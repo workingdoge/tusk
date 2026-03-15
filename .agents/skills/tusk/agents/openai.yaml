@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tusk"
+  short_description: "Foundation for bd issue lanes"
+  default_prompt: "Use $tusk to coordinate one or more bd issues as separate jj workspaces and codex exec lanes."

@@ -1,0 +1,9 @@
+.devenv/
+.direnv/
+.envrc.local
+.beads/
+.jj/
+.jj-workspaces/
+.codex-prompts/
+result
+result-*
