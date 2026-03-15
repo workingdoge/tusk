@@ -27,6 +27,11 @@
       pkgs = nixpkgs.legacyPackages.${system};
       tuskLib = import ./lib.nix { lib = nixpkgs.lib; };
       tuskFlakeModule = import ./flake-module.nix { inherit tuskLib; };
+      tuskSkillBundle = pkgs.runCommand "tusk-openai-skill" {} ''
+        mkdir -p "$out"
+        cp -R ${./.agents/skills/tusk}/. "$out/"
+        chmod -R u+w "$out"
+      '';
       beads = llm-agents.packages.${system}.beads;
       codexPkg = llm-agents.packages.${system}.codex;
       codexNixCheck = pkgs.writeShellApplication {
@@ -73,12 +78,29 @@
           exec ${codexPkg}/bin/codex -C "$repo_root" "$@"
         '';
       };
+      installTuskOpenaiSkill = pkgs.writeShellApplication {
+        name = "install-tusk-openai-skill";
+        runtimeInputs = [ pkgs.coreutils ];
+        text = ''
+          set -euo pipefail
+
+          target_root="''${1:-$HOME/.codex/skills}"
+          target_dir="$target_root/tusk"
+
+          mkdir -p "$target_root"
+          rm -rf "$target_dir"
+          cp -R ${tuskSkillBundle} "$target_dir"
+
+          echo "Installed tusk skill to $target_dir"
+        '';
+      };
       devShellModule =
         { ... }:
         {
           packages = [
             beads
             codexNixCheck
+            installTuskOpenaiSkill
             pkgs.deadnix
             pkgs.direnv
             pkgs.dolt
@@ -105,6 +127,7 @@
             echo "  bd ready --json"
             echo "  jj st"
             echo "  codex-nix-check"
+            echo "  install-tusk-openai-skill"
             echo "  nix develop --no-pure-eval path:. -c sh -lc 'cd \"$DEVENV_ROOT\" && bd version && jj --version && dolt version'"
           '';
 
@@ -136,6 +159,7 @@
       lib.tusk = tuskLib;
       flakeModules.tusk = tuskFlakeModule;
       flakeModules.default = tuskFlakeModule;
+      packages.${system}.tusk-openai-skill = tuskSkillBundle;
 
       apps.${system} = {
         beads = {
@@ -149,6 +173,10 @@
         codex-nix-check = {
           type = "app";
           program = "${codexNixCheck}/bin/codex-nix-check";
+        };
+        install-tusk-openai-skill = {
+          type = "app";
+          program = "${installTuskOpenaiSkill}/bin/install-tusk-openai-skill";
         };
       };
 

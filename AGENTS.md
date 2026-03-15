@@ -18,13 +18,15 @@ bd init -p tusk
 bd ready --json
 bd status --json
 jj st
+nix build .#tusk-openai-skill
+nix run .#install-tusk-openai-skill
 nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && bd version && jj --version && dolt version'
 codex-nix-check
 ```
 
 ## Repo Shape
 
-- `flake.nix` exports `lib.tusk`, `flakeModules.tusk`, and the development shell.
+- `flake.nix` exports `lib.tusk`, `flakeModules.tusk`, the development shell, and the installable OpenAI/Codex skill bundle.
 - `lib.nix` contains the generic `tusk` normalization and validation logic.
 - `flake-module.nix` contains the reusable Nix module surface for `tusk`.
 - `design/` contains architecture and workflow notes that belong to `tusk` itself.
@@ -39,5 +41,7 @@ codex-nix-check
 ## Verification
 
 - `codex-nix-check`
+- `nix build .#tusk-openai-skill`
+- `nix run .#install-tusk-openai-skill`
 - `nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && bd version && jj --version && dolt version'`
 - `nix run path:.#beads -- status --json`
