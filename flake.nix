@@ -27,7 +27,7 @@
       pkgs = nixpkgs.legacyPackages.${system};
       tuskLib = import ./lib.nix { lib = nixpkgs.lib; };
       tuskFlakeModule = import ./flake-module.nix { inherit tuskLib; };
-      tuskSkillBundle = pkgs.runCommand "tusk-openai-skill" {} ''
+      tuskSkillBundle = pkgs.runCommand "tusk-openai-skill" { } ''
         mkdir -p "$out"
         cp -R ${./.agents/skills/tusk}/. "$out/"
         chmod -R u+w "$out"
