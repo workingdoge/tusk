@@ -34,6 +34,13 @@ bd show "$issue_id" >/dev/null
   - repair it in the coordinator shell, or
   - downgrade the lane so the worker does code work only and leaves issue mutation to the coordinator.
 
+## Hierarchy Semantics
+
+- Treat `parent-child` as a completion-hierarchy feature, not a neutral grouping label.
+- If a repo uses `bd ready` as the main execution queue, assume `parent-child` can suppress child issues from readiness until the parent is resolved.
+- When you want an umbrella epic without hiding the actionable leaves, prefer non-blocking lineage such as `discovered-from` or `relates-to`.
+- Use `blocks` only for genuine sequencing, not for visual nesting.
+
 ## What Does Not Belong In A Normal Lane
 
 Do not treat these as implicit worker responsibilities:

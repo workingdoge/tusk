@@ -45,9 +45,26 @@ Create a linked follow-up issue when:
 
 Do not quietly widen the current lane and hope the history still makes sense later.
 
+## Hierarchy Versus Lineage
+
+Use tracker hierarchy deliberately:
+
+- `parent-child` is for true completion hierarchy. Use it when the parent issue is meaningfully incomplete until the child issues are complete, and you want the tracker to enforce that relationship.
+- `discovered-from` is for provenance and umbrella planning. Use it when you want to show where work came from without making the child issue depend on parent completion.
+- `blocks` is for real execution order. Add it only when one issue genuinely cannot proceed until another lands or reaches a defined handoff point.
+
+For roadmap-shaped programs, the safer default is:
+
+1. create an umbrella epic for navigation,
+2. link child issues back to it with `discovered-from` or another non-blocking relation,
+3. add `blocks` edges only for the actual dependency chain.
+
+That keeps child issues visible in `bd ready` while still preserving lineage and order.
+
 ## Anti-Patterns
 
 - omnibus "fix several unrelated things" issues
 - issues with no verification plan
 - issues that mix runtime repair, tracker repair, and product changes without boundaries
 - issues that require multiple teams or landing owners but are still written as one lane
+- using `parent-child` as a cosmetic grouping mechanism when the children still need to show up as individually actionable work

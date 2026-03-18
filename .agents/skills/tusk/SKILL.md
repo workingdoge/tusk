@@ -25,6 +25,7 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
    - Prefer ready issues: clear goal, non-goals, verification, and landing boundary.
    - If the issue is too broad or underspecified, shape or split it before launching a worker.
    - When shaping or splitting work, prefer repo-local issue wrappers such as `bd-new-issue` when they exist.
+   - Be explicit about tracker semantics when building an epic tree. Use `parent-child` only for true completion hierarchy where the parent should stay open until the children are done. If the children should remain individually actionable in `bd ready`, prefer non-blocking lineage such as `discovered-from` or `relates-to`, and add explicit `blocks` edges only where sequencing is real.
    - Do not widen the lane. File discovered work as new linked issues instead.
 4. Create or reuse an issue-scoped workspace.
    - If the repo ships a lane wrapper such as `bd-lane`, prefer it over manually reproducing claim, workspace creation, and prompt boilerplate. Fall back to raw `bd` and `jj` commands only when the wrapper does not exist or is insufficient for the task.
@@ -101,6 +102,7 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
 - Prefer issues that map cleanly to one workspace, one lane, and usually one final visible commit.
 - A ready issue should name the goal, non-goals, verification, and landing boundary.
 - Split issues on dependency edges, landing-owner changes, verification boundaries, or risk boundaries, not on arbitrary file boundaries alone.
+- Distinguish roadmap lineage from completion hierarchy. If you need an umbrella epic for navigation but still want the leaves to surface in `bd ready`, do not reach for `parent-child` by default; use non-blocking lineage edges plus explicit blockers for actual order.
 - Order work as: runtime or tracker unblockers first, then dependency roots, then independent leaves in parallel, then integration or cleanup.
 - Do not launch a worker on an omnibus issue that mixes unrelated outcomes. Shape it into linked follow-ups first.
 - When new work is discovered, create linked follow-up issues instead of widening the current lane.
@@ -153,6 +155,7 @@ fi
 - Prefer repo-local workflow wrappers such as `bd-lane` and `bd-new-issue` when they exist, and fall back to raw `bd` and `jj` only when necessary.
 - Prefer one claimed issue per active workspace.
 - Prefer ready issues with clear verification and landing semantics. If an issue is fuzzy, shape or split it before launch.
+- Prefer `parent-child` only when you want tracker-enforced completion hierarchy. If you only want grouping or provenance, use `discovered-from` or `relates-to` and keep readiness controlled by explicit blocker edges.
 - Prefer `jj workspace add -r <base>` over inheriting the new workspace's parent from ambient state.
 - Prefer one primary visible commit per issue lane; stack only when the task really benefits from it.
 - Default lane completion is a visible `jj` commit, not an implicit merge or Git-side landing.
