@@ -24,7 +24,7 @@
     }:
     let
       system = "aarch64-darwin";
-      tuskLib = import ./lib.nix { lib = nixpkgs.lib; };
+      operationalLib = import ./lib.nix { lib = nixpkgs.lib; };
       repoShellLib = import ./repo-shell-lib.nix {
         lib = nixpkgs.lib;
         inherit
@@ -34,7 +34,7 @@
           ;
         skillSource = ./.agents/skills/tusk;
       };
-      tuskFlakeModule = import ./flake-module.nix { inherit tuskLib; };
+      tuskFlakeModule = import ./flake-module.nix { tuskLib = operationalLib; };
       repoShell = repoShellLib.mkRepoShell {
         inherit system;
         repoName = "tusk";
@@ -46,7 +46,13 @@
       };
     in
     {
-      lib.tusk = tuskLib // repoShellLib;
+      lib.tusk =
+        operationalLib
+        // repoShellLib
+        // {
+          bootstrap = repoShellLib;
+          operational = operationalLib;
+        };
       flakeModules.tusk = tuskFlakeModule;
       flakeModules.default = tuskFlakeModule;
       packages.${system}.tusk-openai-skill = repoShell.skillBundle;

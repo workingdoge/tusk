@@ -275,7 +275,7 @@ It does not tell the repo what work exists.
 The shared shell constructor should implement this contract, not invent a
 different one.
 
-The current reusable surface is `lib.tusk.mkRepoShell`.
+The current reusable surface is `lib.tusk.bootstrap.mkRepoShell`.
 
 That means:
 
@@ -286,7 +286,7 @@ The intended consumer shape is:
 
 ```nix
 let
-  repoShell = tusk.lib.tusk.mkRepoShell {
+  repoShell = tusk.lib.tusk.bootstrap.mkRepoShell {
     system = "aarch64-darwin";
     repoName = "nerve";
     checkFiles = [ "flake.nix" ];
@@ -297,6 +297,10 @@ in
   devShells.aarch64-darwin.default = repoShell.mkShell { inherit inputs; };
 }
 ```
+
+The flat alias `lib.tusk.mkRepoShell` may remain for convenience, but the
+namespaced bootstrap path is the preferred public reading of the export
+surface.
 
 ## Recommendation
 

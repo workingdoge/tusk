@@ -2,7 +2,8 @@
 
 ## Status
 
-Second design sketch for `tusk` as a reusable Nix-native operational layer.
+Second design sketch for the optional downstream operational layer exported by
+`tusk`.
 
 This revision tightens the core semantics. The first sketch had the correct
 center, but it compressed too many axes into a single `effect -> adapter`
@@ -18,6 +19,9 @@ The repo/bootstrap boundary is defined separately in
 [`design/tusk-bootstrap-contract.md`](./tusk-bootstrap-contract.md). This note
 focuses on the reusable operational calculus that sits above that bootstrap
 substrate.
+
+It is therefore **not** the definition of `tusk` core mission. It is an
+optional downstream layer that may be exported on top of bootstrap core.
 
 The semantic center is now:
 

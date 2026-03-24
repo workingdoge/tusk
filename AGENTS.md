@@ -26,11 +26,12 @@ codex-nix-check
 
 ## Repo Shape
 
-- `flake.nix` exports `lib.tusk`, including the shared `mkRepoShell` constructor, `flakeModules.tusk`, the development shell, and the installable OpenAI/Codex skill bundle.
+- `flake.nix` exports `lib.tusk`, with `lib.tusk.bootstrap.mkRepoShell` for bootstrap-core shell adoption and `lib.tusk.operational` for the richer downstream operational surface, plus `flakeModules.tusk`, the development shell, and the installable OpenAI/Codex skill bundle.
 - `lib.nix` contains the generic `tusk` normalization and validation logic.
 - `flake-module.nix` contains the reusable Nix module surface for `tusk`.
 - `repo-shell-lib.nix` contains the shared repo-shell constructor for consumer repos.
 - `design/` contains architecture and workflow notes that belong to `tusk` itself.
+- `design/README.md` defines the design reading order from bootstrap core outward.
 - `design/tusk-bootstrap-contract.md` defines the managed-repo bootstrap contract and registry flow.
 - `.agents/skills/tusk/` contains the repo-local source of truth for the `tusk` workflow skill.
 
