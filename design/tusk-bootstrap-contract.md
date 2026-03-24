@@ -270,17 +270,33 @@ In particular:
 The registry tells `tusk` how to start work in a repo.
 It does not tell the repo what work exists.
 
-## Relationship To Future Shared Shell Work
+## Relationship To Shared Shell Work
 
-This contract should precede extraction of a shared repo-shell constructor.
-
-The constructor work in `tusk-9hx` should implement this contract, not invent a
+The shared shell constructor should implement this contract, not invent a
 different one.
+
+The current reusable surface is `lib.tusk.mkRepoShell`.
 
 That means:
 
 - `63d` defines what a consumer repo must declare,
-- `9hx` defines how `tusk` can package that shell surface for reuse.
+- `9hx` packages that shell surface for reuse.
+
+The intended consumer shape is:
+
+```nix
+let
+  repoShell = tusk.lib.tusk.mkRepoShell {
+    system = "aarch64-darwin";
+    repoName = "nerve";
+    checkFiles = [ "flake.nix" ];
+  };
+in
+{
+  apps.aarch64-darwin = repoShell.apps;
+  devShells.aarch64-darwin.default = repoShell.mkShell { inherit inputs; };
+}
+```
 
 ## Recommendation
 
