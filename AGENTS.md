@@ -19,7 +19,7 @@ bd ready --json
 bd status --json
 jj st
 nix build .#tusk-openai-skill
-nix run .#install-tusk-openai-skill
+nix run .#install-tusk-openai-skill -- "$HOME/.codex/skills"
 nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && bd version && jj --version && dolt version'
 codex-nix-check
 ```
@@ -33,11 +33,21 @@ codex-nix-check
 - `design/` contains architecture and workflow notes that belong to `tusk` itself.
 - `design/README.md` defines the design reading order from bootstrap core outward.
 - `design/tusk-bootstrap-contract.md` defines the managed-repo bootstrap contract and registry flow.
-- `.agents/skills/tusk/` contains the repo-local source of truth for the `tusk` workflow skill.
+- `.agents/skills/tusk/` contains the repo-local source of truth for the shared `tusk` workflow skill.
+- `.codex/skills/` is a repo-local runtime projection built from store-backed skill packages. It is not an editable source tree.
+
+## Tusk Skill Flow
+
+- Keep shared generic skills in this repo under `.agents/skills/<name>/`.
+- Keep consumer-specific skills in the consuming repo under its own `.agents/skills/<name>/`.
+- Use `lib.tusk.bootstrap.mkRepoShell` to project shared and consumer-local skills into repo-local `.codex/skills/`.
+- Treat `.codex/skills/` as runtime projection only.
+- Treat `~/.codex/skills` as compatibility-only. If you use `install-tusk-openai-skill`, pass an explicit target such as `"$HOME/.codex/skills"` and do not treat that path as the source of truth.
 
 ## Change Rules
 
 - Keep `tusk` core generic. Consumer-specific runtime bindings and tracker wrappers belong in the consuming repo until they clearly generalize.
+- Keep shared skill sources editable under `.agents/skills/` and keep projected `.codex/skills/` out of Git.
 - Prefer `codex-nix-check` and a shell smoke test after changing the flake or module surface.
 - If you initialize `.beads/` here for dogfooding, treat it as this repo's own tracker, not as an extension of `config`. The tracker state is local and ignored by Git in this repo.
 
@@ -45,6 +55,6 @@ codex-nix-check
 
 - `codex-nix-check`
 - `nix build .#tusk-openai-skill`
-- `nix run .#install-tusk-openai-skill`
+- `nix run .#install-tusk-openai-skill -- "$HOME/.codex/skills"`
 - `nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && bd version && jj --version && dolt version'`
 - `nix run path:.#beads -- status --json`

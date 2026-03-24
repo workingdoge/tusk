@@ -290,6 +290,9 @@ let
     system = "aarch64-darwin";
     repoName = "nerve";
     checkFiles = [ "flake.nix" ];
+    repoSkillSources = {
+      nerve = ./.agents/skills/nerve;
+    };
   };
 in
 {
@@ -301,6 +304,15 @@ in
 The flat alias `lib.tusk.mkRepoShell` may remain for convenience, but the
 namespaced bootstrap path is the preferred public reading of the export
 surface.
+
+Within that shell contract:
+
+- shared generic skills carried by `tusk` are projected into repo-local
+  `.codex/skills/`,
+- consumer-local skills may be added from the consuming repo through
+  `repoSkillSources`,
+- and global locations such as `~/.codex/skills` remain compatibility-only
+  projections rather than editable sources of truth.
 
 ## Recommendation
 

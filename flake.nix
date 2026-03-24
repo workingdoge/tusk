@@ -32,7 +32,9 @@
           llm-agents
           nixpkgs
           ;
-        skillSource = ./.agents/skills/tusk;
+        sharedSkillSources = {
+          tusk = ./.agents/skills/tusk;
+        };
       };
       tuskFlakeModule = import ./flake-module.nix { tuskLib = operationalLib; };
       repoShell = repoShellLib.mkRepoShell {
@@ -42,6 +44,7 @@
           "flake.nix"
           "flake-module.nix"
           "lib.nix"
+          "repo-shell-lib.nix"
         ];
       };
     in

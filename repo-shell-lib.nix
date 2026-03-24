@@ -3,12 +3,24 @@
   devenv,
   nixpkgs,
   llm-agents,
-  skillSource,
+  sharedSkillSources ? { },
 }:
 let
+  inherit (builtins)
+    attrNames
+    hasAttr
+    pathExists
+    readDir
+    ;
   inherit (lib)
+    filter
+    foldl'
     concatStringsSep
     escapeShellArg
+    listToAttrs
+    map
+    mapAttrsToList
+    nameValuePair
     optionalString
     setAttrByPath
     ;
@@ -19,6 +31,95 @@ let
       repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
     fi
   '';
+
+  validateCodexSkillSource =
+    {
+      name,
+      src,
+      requiredFiles ? [
+        "SKILL.md"
+        "agents/openai.yaml"
+      ],
+    }:
+    let
+      sourcePath = toString src;
+      missing = filter (relativePath: !(pathExists "${sourcePath}/${relativePath}")) requiredFiles;
+    in
+    if missing == [ ] then
+      src
+    else
+      throw "Codex skill `${name}` is missing required files: ${concatStringsSep ", " missing}";
+
+  mkCodexSkillPackage =
+    {
+      pkgs,
+      name,
+      src,
+      bundleName ? "${name}-openai-skill",
+    }:
+    let
+      checkedSource = validateCodexSkillSource { inherit name src; };
+    in
+    pkgs.runCommand bundleName { } ''
+      mkdir -p "$out"
+      cp -R ${checkedSource}/. "$out/"
+      chmod -R u+w "$out"
+    '';
+
+  listRelativeFiles =
+    src:
+    let
+      go =
+        prefix: path:
+        let
+          entries = readDir path;
+        in
+        builtins.concatLists (
+          mapAttrsToList (
+            name: kind:
+            let
+              relativePath = if prefix == "" then name else "${prefix}/${name}";
+            in
+            if kind == "directory" then go relativePath (path + "/${name}") else [ relativePath ]
+          ) entries
+        );
+    in
+    go "" src;
+
+  mkDevenvCodexSkillFiles =
+    {
+      pkgs,
+      name,
+      src,
+      root ? ".codex/skills",
+    }:
+    let
+      checkedSource = validateCodexSkillSource { inherit name src; };
+      package = mkCodexSkillPackage {
+        inherit pkgs name;
+        src = checkedSource;
+      };
+    in
+    listToAttrs (
+      map (
+        relativePath:
+        nameValuePair "${root}/${name}/${relativePath}" {
+          source = package + "/${relativePath}";
+        }
+      ) (listRelativeFiles checkedSource)
+    );
+
+  selectSkillSources =
+    names: sources:
+    listToAttrs (
+      map (
+        name:
+        if hasAttr name sources then
+          nameValuePair name sources.${name}
+        else
+          throw "Unknown shared skill `${name}` requested from mkRepoShell"
+      ) names
+    );
 
   mkRepoShell =
     {
@@ -37,6 +138,10 @@ let
       skillBundleName ? "${skillName}-openai-skill",
       installSkillCommandName ? "install-${skillName}-openai-skill",
       installSkillTargetName ? skillName,
+      projectSharedSkills ? true,
+      sharedSkillNames ? attrNames sharedSkillSources,
+      repoSkillSources ? { },
+      codexInstallRoot ? ".codex/skills",
     }:
     let
       pkgs = nixpkgs.legacyPackages.${system};
@@ -45,11 +150,45 @@ let
       checkArgs = concatStringsSep " " (map escapeShellArg checkFiles);
       extraChecks = concatStringsSep "\n" extraCheckCommands;
       extraEnterShell = concatStringsSep "\n" extraEnterShellLines;
-      skillBundle = pkgs.runCommand skillBundleName { } ''
-        mkdir -p "$out"
-        cp -R ${skillSource}/. "$out/"
-        chmod -R u+w "$out"
-      '';
+      projectedSharedSkillSources =
+        if projectSharedSkills then selectSkillSources sharedSkillNames sharedSkillSources else { };
+      duplicateSkillNames = filter (name: hasAttr name projectedSharedSkillSources) (
+        attrNames repoSkillSources
+      );
+      activeSkillSources =
+        if duplicateSkillNames == [ ] then
+          projectedSharedSkillSources // repoSkillSources
+        else
+          throw "repoSkillSources redefines shared skills: ${concatStringsSep ", " duplicateSkillNames}";
+      projectedSkillFiles = foldl' (acc: attrs: acc // attrs) { } (
+        mapAttrsToList (
+          name: src:
+          mkDevenvCodexSkillFiles {
+            inherit pkgs name src;
+            root = codexInstallRoot;
+          }
+        ) activeSkillSources
+      );
+      projectedSkillChecks = concatStringsSep " && " (
+        map (
+          name:
+          "test -L ${escapeShellArg "${codexInstallRoot}/${name}/SKILL.md"} && test -L ${escapeShellArg "${codexInstallRoot}/${name}/agents/openai.yaml"}"
+        ) (attrNames activeSkillSources)
+      );
+      projectionCheckSuffix = optionalString (projectedSkillChecks != "") " && ${projectedSkillChecks}";
+      skillBundleSource =
+        if hasAttr installSkillTargetName activeSkillSources then
+          activeSkillSources.${installSkillTargetName}
+        else if hasAttr skillName activeSkillSources then
+          activeSkillSources.${skillName}
+        else
+          throw "No skill source is available for `${installSkillTargetName}`";
+      skillBundle = mkCodexSkillPackage {
+        inherit pkgs;
+        name = installSkillTargetName;
+        src = skillBundleSource;
+        bundleName = skillBundleName;
+      };
       codexNixCheck = pkgs.writeShellApplication {
         name = "codex-nix-check";
         runtimeInputs = [
@@ -66,7 +205,7 @@ let
           ${optionalString (checkFiles != [ ]) "deadnix --fail ${checkArgs}"}
           ${extraChecks}
           nix develop --no-pure-eval "path:$repo_root" \
-            -c sh -lc "cd \"\$DEVENV_ROOT\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null"
+            -c sh -lc "cd \"\$DEVENV_ROOT\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null${projectionCheckSuffix}"
         '';
       };
       repoCodex = pkgs.writeShellApplication {
@@ -102,7 +241,7 @@ let
           rm -rf "$target_dir"
           cp -R ${skillBundle} "$target_dir"
 
-          echo "Installed ${installSkillTargetName} skill to $target_dir"
+          echo "Installed compatibility projection for ${installSkillTargetName} to $target_dir"
         '';
       };
       packages = [
@@ -123,7 +262,8 @@ let
         pkgs.ripgrep
         pkgs.statix
         repoCodex
-      ] ++ extraPackages;
+      ]
+      ++ extraPackages;
       beadsProcess = setAttrByPath [ trackerProcessName "exec" ] ''
         set -euo pipefail
         cd "$DEVENV_ROOT"
@@ -146,13 +286,12 @@ let
           sleep 86400
         done
       '';
-      processes =
-        (if enableBeadsProcess then beadsProcess else { })
-        // extraProcesses;
+      processes = (if enableBeadsProcess then beadsProcess else { }) // extraProcesses;
       devenvModule =
         { ... }:
         {
           inherit packages processes;
+          files = projectedSkillFiles;
 
           enterShell = ''
             export PATH="${repoCodex}/bin:$PATH"
@@ -164,6 +303,7 @@ let
             echo "  bd ready --json"
             echo "  jj st"
             echo "  codex-nix-check"
+            echo "  ${codexInstallRoot}"
             echo "  ${installSkillCommandName}"
             echo "  nix develop --no-pure-eval path:. -c sh -lc 'cd \"$DEVENV_ROOT\" && bd version && jj --version && dolt version'"
             ${extraEnterShell}
@@ -206,14 +346,22 @@ let
         codexNixCheck
         devenvModule
         installSkill
+        mkCodexSkillPackage
+        mkDevenvCodexSkillFiles
         mkShell
         packages
         pkgs
         repoCodex
         skillBundle
+        validateCodexSkillSource
         ;
     };
 in
 {
-  inherit mkRepoShell;
+  inherit
+    mkCodexSkillPackage
+    mkDevenvCodexSkillFiles
+    mkRepoShell
+    validateCodexSkillSource
+    ;
 }
