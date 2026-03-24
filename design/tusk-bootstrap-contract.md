@@ -5,6 +5,9 @@
 Design note for the minimum contract a repo must satisfy to be treated as a
 `tusk`-managed bootstrap target.
 
+This contract is part of the frozen bootstrap baseline described in
+[`design/tusk-freeze.md`](./tusk-freeze.md).
+
 This note is intentionally narrower than a workflow control plane and narrower
 than the full `tusk` operational calculus. Its job is to define how `tusk`
 finds a repo, enters the right shell, discovers repo-local tracker and workspace
@@ -14,6 +17,9 @@ repo itself.
 ## Intent
 
 `tusk` is bootstrap first.
+
+This contract defines the public bootstrap boundary that is currently frozen
+for consumer adoption.
 
 That means the first contract it needs with a consumer repo is:
 

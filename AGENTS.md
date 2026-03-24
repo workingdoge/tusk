@@ -31,7 +31,8 @@ codex-nix-check
 - `flake-module.nix` contains the reusable Nix module surface for `tusk`.
 - `repo-shell-lib.nix` contains the shared repo-shell constructor for consumer repos.
 - `design/` contains architecture and workflow notes that belong to `tusk` itself.
-- `design/README.md` defines the design reading order from bootstrap core outward.
+- `design/README.md` defines the design reading order from the frozen bootstrap line outward.
+- `design/tusk-freeze.md` defines the frozen bootstrap boundary and change policy.
 - `design/tusk-bootstrap-contract.md` defines the managed-repo bootstrap contract and registry flow.
 - `.agents/skills/tusk/` contains the repo-local source of truth for the shared `tusk` workflow skill.
 - `.agents/skills/skill-creator/` contains the repo-local source of truth for the shared `skill-creator` authoring skill.
@@ -48,8 +49,14 @@ codex-nix-check
 
 ## Change Rules
 
+- Treat the bootstrap consumer line as frozen unless the active issue is
+  explicitly widening or replacing that freeze.
+- Prefer the frozen bootstrap bookmarks for consumer adoption; do not treat
+  dirty `main` work as the stable entry point for other repos.
 - Keep `tusk` core generic. Consumer-specific runtime bindings and tracker wrappers belong in the consuming repo until they clearly generalize.
 - Keep shared skill sources editable under `.agents/skills/` and keep projected `.codex/skills/` out of Git.
+- Keep downstream operational work and automation experiments off the frozen
+  bootstrap line unless they are bug fixes needed by an existing consumer.
 - Prefer `codex-nix-check` and a shell smoke test after changing the flake or module surface.
 - If you initialize `.beads/` here for dogfooding, treat it as this repo's own tracker, not as an extension of `config`. The tracker state is local and ignored by Git in this repo.
 

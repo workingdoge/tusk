@@ -2,13 +2,16 @@
 
 ## Status
 
-Second design sketch for the optional downstream operational layer exported by
+Deferred design sketch for the optional downstream operational layer exported by
 `tusk`.
 
 This revision tightens the core semantics. The first sketch had the correct
 center, but it compressed too many axes into a single `effect -> adapter`
 shape. This note separates witness production, intent declaration, admission,
 realization, and receipts before more backend code accumulates.
+
+This note is explicitly **outside** the frozen bootstrap baseline described in
+[`design/tusk-freeze.md`](./tusk-freeze.md).
 
 ## Intent
 
