@@ -30,6 +30,7 @@ codex-nix-check
 - `lib.nix` contains the generic `tusk` normalization and validation logic.
 - `flake-module.nix` contains the reusable Nix module surface for `tusk`.
 - `design/` contains architecture and workflow notes that belong to `tusk` itself.
+- `design/tusk-bootstrap-contract.md` defines the managed-repo bootstrap contract and registry flow.
 - `.agents/skills/tusk/` contains the repo-local source of truth for the `tusk` workflow skill.
 
 ## Change Rules

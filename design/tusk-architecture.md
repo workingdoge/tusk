@@ -14,6 +14,11 @@ realization, and receipts before more backend code accumulates.
 `tusk` should package the operational side of a Nix flake the way a config
 library packages the configuration side.
 
+The repo/bootstrap boundary is defined separately in
+[`design/tusk-bootstrap-contract.md`](./tusk-bootstrap-contract.md). This note
+focuses on the reusable operational calculus that sits above that bootstrap
+substrate.
+
 The semantic center is now:
 
 1. verified base entries that emit witnesses,

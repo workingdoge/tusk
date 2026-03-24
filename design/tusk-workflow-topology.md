@@ -11,12 +11,17 @@ service state from drifting into separate script-local conventions.
 
 `tusk` needs one coherent workflow topology for this repo.
 
+The managed-repo bootstrap boundary is defined separately in
+[`design/tusk-bootstrap-contract.md`](./tusk-bootstrap-contract.md). This note
+focuses on workflow objects after the repo root, shell, tracker mode, and
+workspace policy are already known.
+
 Today we already have:
 
 - issue state in `bd`,
 - partial lane state in `bd` metadata,
 - dependency edges in `bd`,
-- tracker health in repo-local scripts,
+- tracker health via repo-local shell and workflow conventions,
 - and a tracker lease service only as a design note.
 
 Those are all real pieces, but they are not yet one model.
@@ -150,8 +155,8 @@ Current authority:
 
 Today:
 
-- health and bootstrap are handled by repo-local scripts like
-  [`bd-tracker-ensure`](../scripts/bd-tracker-ensure.sh)
+- health and bootstrap are handled by repo-local shell guidance and, in some
+  repos, helper wrappers
 - there is no first-class service state record yet
 
 Target authority:
@@ -202,7 +207,7 @@ Current authorities:
 
 Current examples:
 
-- lane launch receipt in [`scripts/bd-lane.sh`](../scripts/bd-lane.sh)
+- lane launch receipt in repo-local issue notes or metadata
 - tracker health repair note on issues
 
 Target shape:
@@ -273,29 +278,15 @@ Authority:
 
 This is useful, but it is not yet a dependency graph and not yet a lease view.
 
-### `bd-lane`
+### Repo-local lane wrappers
 
-Projection plus transition:
+Some repos may add wrappers such as `bd-lane` or future `tusk lane` commands.
 
-- creates lane state for an issue
-- writes a lane launch receipt
+Those wrappers are projections plus transitions over the topology, not
+authoritative workflow objects in their own right.
 
-Authority touched:
-
-- `bd` issue metadata and notes
-
-### `bd-tracker-ensure`
-
-Projection plus repair:
-
-- tracker service health
-- bounded service repair
-
-Authority touched:
-
-- shared repo runtime
-
-This is still service logic without a first-class service state record.
+The important rule is that workflow topology must not depend on a particular
+wrapper existing in every repo.
 
 ## Why This Matters
 
@@ -393,8 +384,8 @@ Already present:
 
 - issues and dependencies in `bd`
 - lane metadata in `bd`
-- board view
-- tracker health check/repair
+- board-style views
+- tracker preflight through repo-local shell guidance
 
 ### Phase 1: Dependency projection
 

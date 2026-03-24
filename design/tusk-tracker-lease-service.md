@@ -7,6 +7,11 @@ Top-down design note for a repo-scoped tracker supervisor and lease service.
 This note exists to preserve the architecture before we rush into another
 ad hoc `bd` / Dolt workaround.
 
+The managed-repo bootstrap contract is defined separately in
+[`design/tusk-bootstrap-contract.md`](./tusk-bootstrap-contract.md). This note
+describes an optional downstream service layer, not a prerequisite for treating
+a repo as `tusk`-managed.
+
 ## Question
 
 Is this a distributed systems problem?
@@ -95,13 +100,19 @@ That matches the `tusk` tracker contract:
 So the top-down stack is:
 
 1. `tusk` skill / coordinator
-2. tracker lease service
-3. repo-scoped `bd` + Dolt backend
-4. worker lanes that lease the tracker
+2. managed-repo bootstrap contract
+3. optional tracker lease service
+4. repo-scoped `bd` + Dolt backend
+5. worker lanes that lease the tracker
+
+The important sequencing rule is:
+
+- bootstrap determines how the repo is entered and preflighted,
+- the lease service coordinates one optional shared runtime inside that repo.
 
 This preserves the right boundary:
 
-- coordinator owns backend lifecycle,
+- coordinator owns backend lifecycle when the service exists,
 - worker owns issue-specific code work,
 - service mediates access and health.
 
@@ -334,17 +345,19 @@ The important thing is that the semantics already support widening.
 Today:
 
 - `devenv up` owns managed services
-- `bd-lane` does tracker preflight directly
-- `bd-handoff` and `bd-followup` assume `bd` is already healthy
+- tracker preflight is performed from the repo's managed shell
+- wrapper commands may exist in some repos, but are not assumed by the
+  bootstrap contract
 
 With the tracker lease service:
 
 - `devenv up` may still own the long-lived daemon
-- `bd-lane` should call `tusk tracker ensure` or `lease` instead of raw
-  startup/retry logic
+- repo-local lane wrappers should call `tusk tracker ensure` or `lease`
+  instead of raw startup/retry logic when the service is active
 - worker briefs should state that the tracker lease is coordinator-owned shared
   infrastructure
-- `bd-handoff` and `bd-followup` should rely on the same service path
+- any repo-local handoff or follow-up helpers should rely on the same service
+  path
 
 That means the service belongs adjacent to `tusk` workflow helpers, not buried
 inside a single script.
