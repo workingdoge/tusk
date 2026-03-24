@@ -34,6 +34,7 @@ codex-nix-check
 - `design/README.md` defines the design reading order from bootstrap core outward.
 - `design/tusk-bootstrap-contract.md` defines the managed-repo bootstrap contract and registry flow.
 - `.agents/skills/tusk/` contains the repo-local source of truth for the shared `tusk` workflow skill.
+- `.agents/skills/skill-creator/` contains the repo-local source of truth for the shared `skill-creator` authoring skill.
 - `.codex/skills/` is a repo-local runtime projection built from store-backed skill packages. It is not an editable source tree.
 
 ## Tusk Skill Flow
@@ -42,6 +43,7 @@ codex-nix-check
 - Keep consumer-specific skills in the consuming repo under its own `.agents/skills/<name>/`.
 - Use `lib.tusk.bootstrap.mkRepoShell` to project shared and consumer-local skills into repo-local `.codex/skills/`.
 - Treat `.codex/skills/` as runtime projection only.
+- The projected repo-local `skill-creator` should be preferred over generic global defaults when you are authoring skills for a tusk-managed repo.
 - Treat `~/.codex/skills` as compatibility-only. If you use `install-tusk-openai-skill`, pass an explicit target such as `"$HOME/.codex/skills"` and do not treat that path as the source of truth.
 
 ## Change Rules

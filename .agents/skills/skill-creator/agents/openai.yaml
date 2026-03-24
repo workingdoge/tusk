@@ -1,0 +1,4 @@
+interface:
+  display_name: "Skill Creator"
+  short_description: "Author repo-local skills"
+  default_prompt: "Use $skill-creator to create or update a skill in repo-local .agents/skills and project it through tusk bootstrap instead of using global skill roots."

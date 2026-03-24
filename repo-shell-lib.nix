@@ -204,8 +204,16 @@ let
 
           ${optionalString (checkFiles != [ ]) "deadnix --fail ${checkArgs}"}
           ${extraChecks}
-          nix develop --no-pure-eval "path:$repo_root" \
-            -c sh -lc "cd \"\$DEVENV_ROOT\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null${projectionCheckSuffix}"
+          if [ "''${DEVENV_ROOT:-}" = "$repo_root" ]; then
+            bd version >/dev/null
+            jj --version >/dev/null
+            dolt version >/dev/null
+            codex --help >/dev/null
+            ${projectedSkillChecks}
+          else
+            nix develop --no-pure-eval "path:$repo_root" \
+              -c sh -lc "cd \"\$DEVENV_ROOT\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null${projectionCheckSuffix}"
+          fi
         '';
       };
       repoCodex = pkgs.writeShellApplication {

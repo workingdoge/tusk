@@ -33,6 +33,7 @@
           nixpkgs
           ;
         sharedSkillSources = {
+          skill-creator = ./.agents/skills/skill-creator;
           tusk = ./.agents/skills/tusk;
         };
       };
