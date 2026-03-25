@@ -5,7 +5,23 @@ description: Claim and execute `bd` issues in dedicated `jj` workspaces or issue
 
 # Tusk
 
-Use this skill to turn one tracked issue into one isolated execution lane. When multiple lanes are active, treat the outer Codex as the coordinator, keep the tracker in the canonical repo root, keep one claimed issue per active workspace, and treat each `codex exec` run as a bounded worker.
+Use this skill to turn one tracked issue into one isolated execution lane.
+
+This skill is part of the frozen `tusk` bootstrap surface. Its job is to start
+disciplined repo work, not to redefine the repo's runtime or semantic
+authority.
+
+That means:
+
+- `tusk` bootstraps entry into the repo, tracker, shell, and lane flow
+- the consuming repo keeps authority over its own tracker, landing rules, and
+  runtime/substrate semantics
+- `tusk` is not the runtime shell for theory lines such as `Nerve`
+- `tusk` is not the semantic center for carriers such as `KCIR`
+
+When multiple lanes are active, treat the outer Codex as the coordinator, keep
+the tracker in the canonical repo root, keep one claimed issue per active
+workspace, and treat each `codex exec` run as a bounded worker.
 
 ## Workflow
 
@@ -14,6 +30,8 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
    - Run `bd` from the repo root even when code work happens elsewhere.
    - Use `jj --repository "$repo_root" ...` for repo-global workspace commands.
    - Check the repo instructions for workflow wrappers before assembling raw `bd` and `jj` commands. If the repo ships helpers such as `bd-lane`, `bd-new-issue`, or similar wrappers, prefer those first.
+   - Keep the bootstrap boundary explicit. `tusk` decides how to start work in
+     the repo; it does not decide the repo's own semantic or runtime model.
 2. Preflight the tracker before relying on `bd` mutations.
    - Run one read command such as `bd ready --json` or `bd show <id> --json` from the repo root.
    - Check `bd dolt status` when the tracker uses Dolt server mode.
@@ -85,6 +103,9 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
 - Default tracker scope inside `tusk`: claim, read, update, and close existing issues only when the backend is healthy.
 - First-time tracker bootstrap, `bd init`, Dolt setup, schema/admin repair, or tracker migration are not default lane work. Make those explicit tasks instead of surprising a worker with shared-state repair.
 - If tracker readiness depends on shell, flake, `devenv`, or tool-provisioning changes, load the repo's Nix environment skill, such as `nix-interrogation`, if available.
+- Preserve repo-local authority. Tracker and lane metadata help the coordinator
+  start and track work, but they do not replace the consuming repo's runtime,
+  doctrine, or carrier semantics.
 
 ## Environment Contract
 
@@ -174,6 +195,9 @@ fi
 - Do not stream raw `codex exec` logs to the user by default. Translate them into lane status, blockers, and next actions.
 - Use the repo's normal landing or export flow before forgetting a workspace.
 - After a publish or merge event outside the workspace, sync imported Git state before cleanup.
+- Do not let `tusk` vocabulary drift into runtime or substrate claims. If the
+  repo has a separate semantic or carrier center, treat that as out of scope
+  for this skill.
 
 ## References
 
