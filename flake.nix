@@ -7,6 +7,9 @@
   };
 
   inputs = {
+    crane = {
+      url = "github:ipetkov/crane/v0.23.2";
+    };
     devenv = {
       url = "github:cachix/devenv";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -16,19 +19,28 @@
     };
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     llm-agents.url = "github:numtide/llm-agents.nix/6cbeeae9fab23fa0de85930a733df478fbc955b4";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
     inputs@{
+      crane,
       devenv,
       glistix,
       nixpkgs,
       llm-agents,
+      rust-overlay,
       ...
     }:
     let
       system = "aarch64-darwin";
-      pkgs = nixpkgs.legacyPackages.${system};
+      pkgs = import nixpkgs {
+        inherit system;
+        overlays = [ rust-overlay.overlays.default ];
+      };
       tuskLib = import ./lib.nix { lib = nixpkgs.lib; };
       tuskFlakeModule = import ./flake-module.nix { inherit tuskLib; };
       tuskSkillBundle = pkgs.runCommand "tusk-openai-skill" { } ''
@@ -39,19 +51,21 @@
       beads = llm-agents.packages.${system}.beads;
       codexPkg = llm-agents.packages.${system}.codex;
       glistixPkg = glistix.packages.${system}.default;
+      rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+        extensions = [ "rust-src" ];
+      };
+      craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
       codexNixCheck = pkgs.writeShellApplication {
         name = "codex-nix-check";
         runtimeInputs = [
           glistixPkg
-          pkgs.cargo
           pkgs.deadnix
           pkgs.erlang
           pkgs.git
           pkgs.nix
           pkgs.rebar3
           pkgs.rust-analyzer
-          pkgs.rustc
-          pkgs.rustfmt
+          rustToolchain
         ];
         text = ''
           set -euo pipefail
@@ -63,6 +77,8 @@
           cd "$repo_root"
 
           deadnix --fail flake.nix flake-module.nix lib.nix
+          nix eval --raw "path:$repo_root#packages.${system}.rust-toolchain.name" >/dev/null
+          nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "lib.crane.buildDepsOnly is not callable"' "path:$repo_root#lib.crane.buildDepsOnly" >/dev/null
           nix develop --no-pure-eval "path:$repo_root" \
             -c sh -lc "cd \"\$DEVENV_ROOT\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null && glistix --help >/dev/null && erl -eval \"erlang:halt().\" -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null"
         '';
@@ -114,7 +130,6 @@
             codexNixCheck
             glistixPkg
             installTuskOpenaiSkill
-            pkgs.cargo
             pkgs.deadnix
             pkgs.direnv
             pkgs.dolt
@@ -131,10 +146,9 @@
             pkgs.rebar3
             pkgs.ripgrep
             pkgs.rust-analyzer
-            pkgs.rustc
-            pkgs.rustfmt
             pkgs.statix
             repoCodex
+            rustToolchain
           ];
 
           enterShell = ''
@@ -149,6 +163,8 @@
             echo "  codex-nix-check"
             echo "  glistix --help"
             echo "  cargo --version"
+            echo "  nix eval path:.#packages.${system}.rust-toolchain.name"
+            echo "  nix eval --apply 'x: if builtins.isFunction x || builtins.hasAttr \"__functor\" x then \"ok\" else throw \"not callable\"' path:.#lib.crane.buildDepsOnly"
             echo "  install-tusk-openai-skill"
             echo "  nix develop --no-pure-eval path:. -c sh -lc 'cd \"$DEVENV_ROOT\" && bd version && jj --version && dolt version'"
           '';
@@ -178,10 +194,16 @@
         };
     in
     {
-      lib.tusk = tuskLib;
+      lib = {
+        crane = craneLib;
+        tusk = tuskLib;
+      };
       flakeModules.tusk = tuskFlakeModule;
       flakeModules.default = tuskFlakeModule;
-      packages.${system}.tusk-openai-skill = tuskSkillBundle;
+      packages.${system} = {
+        rust-toolchain = rustToolchain;
+        tusk-openai-skill = tuskSkillBundle;
+      };
 
       apps.${system} = {
         beads = {
