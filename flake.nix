@@ -11,6 +11,9 @@
       url = "github:cachix/devenv";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    glistix = {
+      url = "github:Glistix/glistix/v0.8.0";
+    };
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     llm-agents.url = "github:numtide/llm-agents.nix/6cbeeae9fab23fa0de85930a733df478fbc955b4";
   };
@@ -18,6 +21,7 @@
   outputs =
     inputs@{
       devenv,
+      glistix,
       nixpkgs,
       llm-agents,
       ...
@@ -34,12 +38,20 @@
       '';
       beads = llm-agents.packages.${system}.beads;
       codexPkg = llm-agents.packages.${system}.codex;
+      glistixPkg = glistix.packages.${system}.default;
       codexNixCheck = pkgs.writeShellApplication {
         name = "codex-nix-check";
         runtimeInputs = [
+          glistixPkg
+          pkgs.cargo
           pkgs.deadnix
+          pkgs.erlang
           pkgs.git
           pkgs.nix
+          pkgs.rebar3
+          pkgs.rust-analyzer
+          pkgs.rustc
+          pkgs.rustfmt
         ];
         text = ''
           set -euo pipefail
@@ -52,7 +64,7 @@
 
           deadnix --fail flake.nix flake-module.nix lib.nix
           nix develop --no-pure-eval "path:$repo_root" \
-            -c sh -lc "cd \"\$DEVENV_ROOT\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null"
+            -c sh -lc "cd \"\$DEVENV_ROOT\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null && glistix --help >/dev/null && erl -eval \"erlang:halt().\" -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null"
         '';
       };
       repoCodex = pkgs.writeShellApplication {
@@ -100,11 +112,15 @@
           packages = [
             beads
             codexNixCheck
+            glistixPkg
             installTuskOpenaiSkill
+            pkgs.cargo
             pkgs.deadnix
             pkgs.direnv
             pkgs.dolt
+            pkgs.erlang
             pkgs.git
+            pkgs.gleam
             pkgs.jujutsu
             pkgs.jq
             pkgs.nil
@@ -112,7 +128,11 @@
             pkgs.nix-tree
             pkgs.nixd
             pkgs.nixfmt
+            pkgs.rebar3
             pkgs.ripgrep
+            pkgs.rust-analyzer
+            pkgs.rustc
+            pkgs.rustfmt
             pkgs.statix
             repoCodex
           ];
@@ -127,6 +147,8 @@
             echo "  bd ready --json"
             echo "  jj st"
             echo "  codex-nix-check"
+            echo "  glistix --help"
+            echo "  cargo --version"
             echo "  install-tusk-openai-skill"
             echo "  nix develop --no-pure-eval path:. -c sh -lc 'cd \"$DEVENV_ROOT\" && bd version && jj --version && dolt version'"
           '';

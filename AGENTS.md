@@ -5,9 +5,10 @@ These instructions apply to `/Users/arj/dev/blackhole/tusk`.
 ## Workflow
 
 - Use `nix develop --no-pure-eval path:.` or `direnv allow` before tracker or workflow work.
-- The dev shell provides `bd`, `dolt`, `jj`, `deadnix`, `statix`, `nil`, `nixd`, `nix-tree`, `nix-output-monitor`, `nixfmt`, and `codex`.
+- The dev shell provides `bd`, `dolt`, `jj`, `deadnix`, `statix`, `nil`, `nixd`, `nix-tree`, `nix-output-monitor`, `nixfmt`, `codex`, `glistix`, `gleam`, `erl`, `rebar3`, `cargo`, `rustc`, `rustfmt`, and `rust-analyzer`.
 - Run `devenv up` inside the dev shell to start managed services such as the repo's Dolt server when `.beads/` exists.
 - Use this repo to develop `tusk` as a standalone flake and skill/tooling home; keep consumer-specific `bd-*` wrappers in the consuming repo unless they are intentionally promoted.
+- Use `glistix` for Nix-target Gleam work; the shell also keeps upstream `gleam` available for generic tooling and language-server compatibility checks.
 
 ## Quick Reference
 
@@ -21,6 +22,7 @@ jj st
 nix build .#tusk-openai-skill
 nix run .#install-tusk-openai-skill
 nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && bd version && jj --version && dolt version'
+nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && glistix --help >/dev/null && erl -eval "erlang:halt()." -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null'
 codex-nix-check
 ```
 
@@ -44,4 +46,5 @@ codex-nix-check
 - `nix build .#tusk-openai-skill`
 - `nix run .#install-tusk-openai-skill`
 - `nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && bd version && jj --version && dolt version'`
+- `nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && glistix --help >/dev/null && erl -eval "erlang:halt()." -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null'`
 - `nix run path:.#beads -- status --json`
