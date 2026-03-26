@@ -106,6 +106,20 @@
           exec ${codexPkg}/bin/codex -C "$repo_root" "$@"
         '';
       };
+      tuskdPackage = pkgs.writeShellApplication {
+        name = "tuskd";
+        runtimeInputs = [
+          beads
+          pkgs.coreutils
+          pkgs.git
+          pkgs.jq
+          pkgs.jujutsu
+          pkgs.socat
+        ];
+        text = ''
+          exec bash ${./scripts/tuskd.sh} "$@"
+        '';
+      };
       installTuskOpenaiSkill = pkgs.writeShellApplication {
         name = "install-tusk-openai-skill";
         runtimeInputs = [ pkgs.coreutils ];
@@ -146,8 +160,10 @@
             pkgs.rebar3
             pkgs.ripgrep
             pkgs.rust-analyzer
+            pkgs.socat
             pkgs.statix
             repoCodex
+            tuskdPackage
             rustToolchain
           ];
 
@@ -163,6 +179,7 @@
             echo "  codex-nix-check"
             echo "  glistix --help"
             echo "  cargo --version"
+            echo "  tuskd --help"
             echo "  nix eval path:.#packages.${system}.rust-toolchain.name"
             echo "  nix eval --apply 'x: if builtins.isFunction x || builtins.hasAttr \"__functor\" x then \"ok\" else throw \"not callable\"' path:.#lib.crane.buildDepsOnly"
             echo "  install-tusk-openai-skill"
@@ -221,6 +238,10 @@
         install-tusk-openai-skill = {
           type = "app";
           program = "${installTuskOpenaiSkill}/bin/install-tusk-openai-skill";
+        };
+        tuskd = {
+          type = "app";
+          program = "${tuskdPackage}/bin/tuskd";
         };
       };
 
