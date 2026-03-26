@@ -9,6 +9,7 @@ Usage:
   tuskd ensure [--repo PATH] [--socket PATH]
   tuskd status [--repo PATH] [--socket PATH]
   tuskd board-status [--repo PATH]
+  tuskd receipts-status [--repo PATH]
   tuskd serve [--repo PATH] [--socket PATH]
   tuskd query [--repo PATH] [--socket PATH] --kind KIND [--request-id ID]
 
@@ -16,12 +17,14 @@ Commands:
   ensure        Ensure repo-local state exists and tracker health is recorded.
   status        Print the current tracker service projection.
   board-status  Print the current board projection.
+  receipts-status Print the current receipt projection.
   serve         Serve the local JSON protocol over a Unix socket.
   query         Query a running tuskd socket.
 
 Protocol request kinds:
   tracker_status
   board_status
+  receipts_status
   ping
 EOF
 }
@@ -423,6 +426,37 @@ board_status_projection() {
     }'
 }
 
+receipts_status_projection() {
+  local repo_root="$1"
+  local receipts_json
+  local lines=""
+
+  ensure_state_files "${repo_root}"
+  if [ -f "$(receipts_path "${repo_root}")" ]; then
+    lines="$(tail -n 20 "$(receipts_path "${repo_root}")" 2>/dev/null || true)"
+  fi
+
+  receipts_json="$(
+    printf '%s' "${lines}" | jq -Rsc '
+      split("\n")
+      | map(select(length > 0))
+      | map(try fromjson catch { invalid_line: . })
+    '
+  )"
+
+  jq -cn \
+    --arg repo_root "${repo_root}" \
+    --arg generated_at "$(now_iso8601)" \
+    --arg receipts_path "$(receipts_path "${repo_root}")" \
+    --argjson receipts "${receipts_json}" \
+    '{
+      repo_root: $repo_root,
+      generated_at: $generated_at,
+      receipts_path: $receipts_path,
+      receipts: $receipts
+    }'
+}
+
 respond_once() {
   local repo_root="$1"
   local socket_path="$2"
@@ -458,6 +492,9 @@ respond_once() {
       ;;
     board_status)
       payload="$(board_status_projection "${repo_root}")"
+      ;;
+    receipts_status)
+      payload="$(receipts_status_projection "${repo_root}")"
       ;;
     ping)
       payload="$(jq -cn --arg repo_root "${repo_root}" --arg timestamp "$(now_iso8601)" '{repo_root:$repo_root, timestamp:$timestamp, status:"ok"}')"
@@ -497,6 +534,12 @@ cmd_board_status() {
   local repo_root="$1"
 
   board_status_projection "${repo_root}"
+}
+
+cmd_receipts_status() {
+  local repo_root="$1"
+
+  receipts_status_projection "${repo_root}"
 }
 
 cmd_serve() {
@@ -600,6 +643,9 @@ case "${command}" in
     ;;
   board-status)
     cmd_board_status "${repo_root}"
+    ;;
+  receipts-status)
+    cmd_receipts_status "${repo_root}"
     ;;
   serve)
     cmd_serve "${repo_root}" "${socket_path}"

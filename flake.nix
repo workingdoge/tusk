@@ -78,6 +78,7 @@
 
           deadnix --fail flake.nix flake-module.nix lib.nix
           nix eval --raw "path:$repo_root#packages.${system}.rust-toolchain.name" >/dev/null
+          nix eval --raw "path:$repo_root#packages.${system}.tusk-ui.name" >/dev/null
           nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "lib.crane.buildDepsOnly is not callable"' "path:$repo_root#lib.crane.buildDepsOnly" >/dev/null
           nix develop --no-pure-eval "path:$repo_root" \
             -c sh -lc "cd \"\$DEVENV_ROOT\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null && glistix --help >/dev/null && erl -eval \"erlang:halt().\" -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null"
@@ -120,6 +121,18 @@
           exec bash ${./scripts/tuskd.sh} "$@"
         '';
       };
+      tuskUiSrc = craneLib.cleanCargoSource ./crates/tusk-ui;
+      tuskUiCommonArgs = {
+        src = tuskUiSrc;
+        strictDeps = true;
+      };
+      tuskUiCargoArtifacts = craneLib.buildDepsOnly tuskUiCommonArgs;
+      tuskUiPackage = craneLib.buildPackage (
+        tuskUiCommonArgs
+        // {
+          cargoArtifacts = tuskUiCargoArtifacts;
+        }
+      );
       installTuskOpenaiSkill = pkgs.writeShellApplication {
         name = "install-tusk-openai-skill";
         runtimeInputs = [ pkgs.coreutils ];
@@ -180,6 +193,8 @@
             echo "  glistix --help"
             echo "  cargo --version"
             echo "  tuskd --help"
+            echo "  nix build path:.#tusk-ui"
+            echo "  nix run path:.#tusk-ui -- --help"
             echo "  nix eval path:.#packages.${system}.rust-toolchain.name"
             echo "  nix eval --apply 'x: if builtins.isFunction x || builtins.hasAttr \"__functor\" x then \"ok\" else throw \"not callable\"' path:.#lib.crane.buildDepsOnly"
             echo "  install-tusk-openai-skill"
@@ -219,6 +234,7 @@
       flakeModules.default = tuskFlakeModule;
       packages.${system} = {
         rust-toolchain = rustToolchain;
+        tusk-ui = tuskUiPackage;
         tusk-openai-skill = tuskSkillBundle;
       };
 
@@ -242,6 +258,10 @@
         tuskd = {
           type = "app";
           program = "${tuskdPackage}/bin/tuskd";
+        };
+        tusk-ui = {
+          type = "app";
+          program = "${tuskUiPackage}/bin/tusk-ui";
         };
       };
 
