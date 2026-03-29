@@ -102,6 +102,508 @@ default_socket_path() {
   printf '%s/tuskd.sock\n' "$(state_root "${repo_root}")"
 }
 
+service_key() {
+  local repo_root="$1"
+  printf 'bd-tracker:%s' "${repo_root}" | sha256sum | awk '{print substr($1, 1, 16)}'
+}
+
+host_state_root() {
+  if [ -n "${TUSK_HOST_STATE_ROOT:-}" ]; then
+    printf '%s\n' "${TUSK_HOST_STATE_ROOT}"
+    return
+  fi
+
+  if [ -n "${XDG_STATE_HOME:-}" ]; then
+    printf '%s/tusk\n' "${XDG_STATE_HOME}"
+    return
+  fi
+
+  if [ "$(uname -s)" = "Darwin" ] && [ -n "${HOME:-}" ]; then
+    printf '%s/Library/Caches/tusk\n' "${HOME}"
+    return
+  fi
+
+  if [ -n "${HOME:-}" ]; then
+    printf '%s/.local/state/tusk\n' "${HOME}"
+    return
+  fi
+
+  printf '/tmp/tusk\n'
+}
+
+host_services_root() {
+  printf '%s/services\n' "$(host_state_root)"
+}
+
+host_locks_root() {
+  printf '%s/locks\n' "$(host_state_root)"
+}
+
+host_service_path() {
+  local repo_root="$1"
+  printf '%s/%s.json\n' "$(host_services_root)" "$(service_key "${repo_root}")"
+}
+
+host_lock_dir() {
+  local repo_root="$1"
+  printf '%s/%s.lock\n' "$(host_locks_root)" "$(service_key "${repo_root}")"
+}
+
+host_startup_lock_dir() {
+  printf '%s/backend-startup.lock\n' "$(host_locks_root)"
+}
+
+local_backend_pid_path() {
+  local repo_root="$1"
+  printf '%s/.beads/dolt-server.pid\n' "${repo_root}"
+}
+
+local_backend_port_path() {
+  local repo_root="$1"
+  printf '%s/.beads/dolt-server.port\n' "${repo_root}"
+}
+
+metadata_path() {
+  local repo_root="$1"
+  printf '%s/.beads/metadata.json\n' "${repo_root}"
+}
+
+backend_host() {
+  printf '127.0.0.1\n'
+}
+
+backend_data_dir() {
+  local repo_root="$1"
+  printf '%s/.beads/dolt\n' "${repo_root}"
+}
+
+backend_log_path() {
+  local repo_root="$1"
+  printf '%s/.beads/dolt-server.log\n' "${repo_root}"
+}
+
+stable_backend_port() {
+  local repo_root="$1"
+  local key
+  local prefix
+
+  key="$(service_key "${repo_root}")"
+  prefix="${key:0:6}"
+  printf '%s\n' "$((17000 + (16#${prefix} % 20000)))"
+}
+
+host_service_record() {
+  local repo_root="$1"
+  local path
+
+  path="$(host_service_path "${repo_root}")"
+  if [ -f "${path}" ]; then
+    cat "${path}"
+    return
+  fi
+
+  printf 'null\n'
+}
+
+ensure_host_state_dirs() {
+  mkdir -p "$(host_services_root)" "$(host_locks_root)"
+}
+
+is_live_pid() {
+  local pid="${1:-}"
+  [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null
+}
+
+port_owner_pid() {
+  local port="$1"
+  local pid=""
+
+  pid="$(lsof -nP -iTCP:"${port}" -sTCP:LISTEN -t 2>/dev/null | head -n1 || true)"
+  if [ -n "${pid}" ]; then
+    printf '%s\n' "${pid}"
+  fi
+}
+
+port_matches_pid() {
+  local port="$1"
+  local pid="$2"
+  local owner=""
+
+  owner="$(port_owner_pid "${port}")"
+  [ -n "${owner}" ] && [ "${owner}" = "${pid}" ]
+}
+
+recorded_backend_port() {
+  local repo_root="$1"
+  local record_json
+
+  record_json="$(host_service_record "${repo_root}")"
+  if [ "${record_json}" = "null" ]; then
+    return 0
+  fi
+
+  jq -r '.backend_endpoint.port // empty' <<<"${record_json}" 2>/dev/null || true
+}
+
+recorded_backend_pid() {
+  local repo_root="$1"
+  local record_json
+
+  record_json="$(host_service_record "${repo_root}")"
+  if [ "${record_json}" = "null" ]; then
+    return 0
+  fi
+
+  jq -r '.backend_runtime.pid // empty' <<<"${record_json}" 2>/dev/null || true
+}
+
+local_backend_port() {
+  local repo_root="$1"
+  local path
+
+  path="$(local_backend_port_path "${repo_root}")"
+  if [ -f "${path}" ]; then
+    tr -d '[:space:]' <"${path}"
+  fi
+}
+
+local_backend_pid() {
+  local repo_root="$1"
+  local path
+
+  path="$(local_backend_pid_path "${repo_root}")"
+  if [ -f "${path}" ]; then
+    tr -d '[:space:]' <"${path}"
+  fi
+}
+
+reusable_recorded_port() {
+  local repo_root="$1"
+  local port=""
+  local pid=""
+
+  port="$(recorded_backend_port "${repo_root}")"
+  pid="$(recorded_backend_pid "${repo_root}")"
+
+  if [ -n "${port}" ] && [ -n "${pid}" ] && is_live_pid "${pid}" && port_matches_pid "${port}" "${pid}"; then
+    printf '%s\n' "${port}"
+    return
+  fi
+
+  if [ -n "${port}" ] && [ -z "$(port_owner_pid "${port}")" ]; then
+    printf '%s\n' "${port}"
+  fi
+}
+
+reusable_local_backend_port() {
+  local repo_root="$1"
+  local port=""
+  local pid=""
+
+  port="$(local_backend_port "${repo_root}")"
+  pid="$(local_backend_pid "${repo_root}")"
+
+  if [ -n "${port}" ] && [ -n "${pid}" ] && is_live_pid "${pid}" && port_matches_pid "${port}" "${pid}"; then
+    printf '%s\n' "${port}"
+  fi
+}
+
+select_backend_port() {
+  local repo_root="$1"
+  local skip_port="${2:-}"
+  local candidate=""
+  local tries=0
+
+  candidate="$(reusable_recorded_port "${repo_root}")"
+  if [ -n "${candidate}" ] && [ "${candidate}" != "${skip_port}" ]; then
+    printf '%s\n' "${candidate}"
+    return
+  fi
+
+  candidate="$(reusable_local_backend_port "${repo_root}")"
+  if [ -n "${candidate}" ] && [ "${candidate}" != "${skip_port}" ]; then
+    printf '%s\n' "${candidate}"
+    return
+  fi
+
+  candidate="$(stable_backend_port "${repo_root}")"
+  while [ "${tries}" -lt 512 ]; do
+    if [ "${candidate}" != "${skip_port}" ] && [ -z "$(port_owner_pid "${candidate}")" ]; then
+      printf '%s\n' "${candidate}"
+      return
+    fi
+
+    candidate="$((candidate + 1))"
+    if [ "${candidate}" -gt 36999 ]; then
+      candidate=17000
+    fi
+    tries="$((tries + 1))"
+  done
+
+  fail "unable to allocate a repo-scoped Dolt port for ${repo_root}"
+}
+
+acquire_service_lock() {
+  local repo_root="$1"
+  local lock_dir
+  local holder_pid=""
+
+  ensure_host_state_dirs
+  lock_dir="$(host_lock_dir "${repo_root}")"
+
+  while ! mkdir "${lock_dir}" 2>/dev/null; do
+    holder_pid="$(cat "${lock_dir}/pid" 2>/dev/null || true)"
+    if [ -n "${holder_pid}" ] && ! is_live_pid "${holder_pid}"; then
+      rm -rf "${lock_dir}"
+      continue
+    fi
+    sleep 0.1
+  done
+
+  printf '%s\n' "$$" >"${lock_dir}/pid"
+  printf '%s\n' "$(now_iso8601)" >"${lock_dir}/acquired_at"
+  printf '%s\n' "${lock_dir}"
+}
+
+release_service_lock() {
+  local lock_dir="$1"
+  if [ -n "${lock_dir}" ] && [ -d "${lock_dir}" ]; then
+    rm -rf "${lock_dir}"
+  fi
+}
+
+write_local_backend_runtime() {
+  local repo_root="$1"
+  local port="$2"
+  local pid="${3:-}"
+
+  mkdir -p "${repo_root}/.beads"
+  printf '%s\n' "${port}" >"$(local_backend_port_path "${repo_root}")"
+
+  if [ -n "${pid}" ]; then
+    printf '%s\n' "${pid}" >"$(local_backend_pid_path "${repo_root}")"
+  else
+    rm -f "$(local_backend_pid_path "${repo_root}")"
+  fi
+}
+
+clear_local_backend_runtime() {
+  local repo_root="$1"
+
+  rm -f "$(local_backend_pid_path "${repo_root}")" "$(local_backend_port_path "${repo_root}")"
+}
+
+scrub_deprecated_backend_config() {
+  local repo_root="$1"
+  local path
+  local temp_path
+
+  path="$(metadata_path "${repo_root}")"
+  if [ ! -f "${path}" ]; then
+    return 0
+  fi
+
+  temp_path="${path}.tmp.$$"
+  jq 'del(.dolt_server_port)' "${path}" >"${temp_path}"
+  mv "${temp_path}" "${path}"
+}
+
+acquire_startup_lock() {
+  local lock_dir
+  local holder_pid=""
+
+  ensure_host_state_dirs
+  lock_dir="$(host_startup_lock_dir)"
+
+  while ! mkdir "${lock_dir}" 2>/dev/null; do
+    holder_pid="$(cat "${lock_dir}/pid" 2>/dev/null || true)"
+    if [ -n "${holder_pid}" ] && ! is_live_pid "${holder_pid}"; then
+      rm -rf "${lock_dir}"
+      continue
+    fi
+    sleep 0.1
+  done
+
+  printf '%s\n' "$$" >"${lock_dir}/pid"
+  printf '%s\n' "$(now_iso8601)" >"${lock_dir}/acquired_at"
+  printf '%s\n' "${lock_dir}"
+}
+
+configured_backend_port() {
+  local repo_root="$1"
+  local show_json
+  local port=""
+
+  show_json="$(run_json_command_in_repo "${repo_root}" "bd_dolt_show" bd dolt show --json)"
+  if ! jq -e '.ok and ((.output | type) == "object")' >/dev/null <<<"${show_json}"; then
+    return 0
+  fi
+
+  port="$(jq -r '.output.port // empty' <<<"${show_json}" 2>/dev/null || true)"
+  if [ -n "${port}" ]; then
+    printf '%s\n' "${port}"
+  fi
+}
+
+effective_backend_port() {
+  local repo_root="$1"
+  local port=""
+
+  port="$(configured_backend_port "${repo_root}")"
+  if [ -n "${port}" ]; then
+    printf '%s\n' "${port}"
+    return
+  fi
+
+  port="$(recorded_backend_port "${repo_root}")"
+  if [ -n "${port}" ]; then
+    printf '%s\n' "${port}"
+    return
+  fi
+
+  port="$(local_backend_port "${repo_root}")"
+  if [ -n "${port}" ]; then
+    printf '%s\n' "${port}"
+    return
+  fi
+
+  stable_backend_port "${repo_root}"
+}
+
+backend_runtime_snapshot() {
+  local repo_root="$1"
+  local port=""
+  local pid=""
+
+  port="$(effective_backend_port "${repo_root}")"
+  if [ -n "${port}" ]; then
+    pid="$(port_owner_pid "${port}")"
+  fi
+
+  jq -cn \
+    --arg checked_at "$(now_iso8601)" \
+    --arg host "$(backend_host)" \
+    --arg data_dir "$(backend_data_dir "${repo_root}")" \
+    --arg port "${port}" \
+    --arg pid "${pid}" \
+    '{
+      checked_at: $checked_at,
+      host: $host,
+      data_dir: $data_dir,
+      port: (if ($port | length) > 0 then ($port | tonumber) else null end),
+      pid: (if ($pid | length) > 0 then ($pid | tonumber) else null end),
+      running: (($pid | length) > 0)
+    }'
+}
+
+configure_backend_endpoint() {
+  local repo_root="$1"
+  local port="$2"
+
+  run_in_repo_capture "${repo_root}" bd dolt set host "$(backend_host)" >/dev/null
+  run_in_repo_capture "${repo_root}" bd dolt set port "${port}" >/dev/null
+  run_in_repo_capture "${repo_root}" bd dolt set data-dir "$(backend_data_dir "${repo_root}")" >/dev/null
+}
+
+ensure_backend_connection() {
+  local repo_root="$1"
+  local attempt=1
+  local max_attempts=4
+  local skip_port=""
+  local selected_port=""
+  local startup_lock=""
+  local service_lock=""
+  local start_output=""
+  local test_output=""
+  local start_exit=0
+  local pid=""
+  local attempt_jsons="[]"
+  local test_ok=false
+  local ok=false
+
+  startup_lock="$(acquire_startup_lock)"
+  service_lock="$(acquire_service_lock "${repo_root}")"
+
+  while [ "${attempt}" -le "${max_attempts}" ]; do
+    selected_port="$(select_backend_port "${repo_root}" "${skip_port}")"
+    configure_backend_endpoint "${repo_root}" "${selected_port}"
+    write_local_backend_runtime "${repo_root}" "${selected_port}"
+    scrub_deprecated_backend_config "${repo_root}"
+
+    test_output="$(run_in_repo_capture "${repo_root}" bd dolt test --json 2>/dev/null || true)"
+    test_ok=false
+    if [ -n "${test_output}" ] && jq -e '.connection_ok == true' >/dev/null <<<"${test_output}" 2>/dev/null; then
+      test_ok=true
+    else
+      if start_output="$(run_in_repo_capture "${repo_root}" bd dolt start 2>&1)"; then
+        start_exit=0
+      else
+        start_exit=$?
+      fi
+
+      test_output="$(run_in_repo_capture "${repo_root}" bd dolt test --json 2>/dev/null || true)"
+      if [ -n "${test_output}" ] && jq -e '.connection_ok == true' >/dev/null <<<"${test_output}" 2>/dev/null; then
+        test_ok=true
+      fi
+    fi
+
+    pid="$(port_owner_pid "${selected_port}")"
+    if [ "${test_ok}" = true ]; then
+      write_local_backend_runtime "${repo_root}" "${selected_port}" "${pid}"
+      ok=true
+    fi
+
+    attempt_jsons="$(
+      jq -cn \
+        --argjson prior "${attempt_jsons}" \
+        --argjson attempt "${attempt}" \
+        --argjson port "${selected_port}" \
+        --argjson test_ok "$([ "${test_ok}" = true ] && echo true || echo false)" \
+        --argjson start_ok "$([ "${start_exit}" -eq 0 ] && echo true || echo false)" \
+        --arg pid "${pid}" \
+        --arg start_output "${start_output}" \
+        --arg test_output "${test_output}" \
+        '$prior + [{
+          attempt: $attempt,
+          port: $port,
+          test_ok: $test_ok,
+          start_ok: $start_ok,
+          pid: (if ($pid | length) > 0 then ($pid | tonumber) else null end),
+          start_output: (if ($start_output | length) > 0 then $start_output else null end),
+          test_output: (if ($test_output | length) > 0 then (try ($test_output | fromjson) catch $test_output) else null end)
+        }]'
+    )"
+
+    if [ "${ok}" = true ]; then
+      break
+    fi
+
+    skip_port="${selected_port}"
+    start_output=""
+    start_exit=0
+    attempt="$((attempt + 1))"
+  done
+
+  if [ "${ok}" != true ]; then
+    clear_local_backend_runtime "${repo_root}"
+  fi
+
+  release_service_lock "${service_lock}"
+  release_service_lock "${startup_lock}"
+
+  jq -cn \
+    --argjson ok "$([ "${ok}" = true ] && echo true || echo false)" \
+    --arg repo_root "${repo_root}" \
+    --argjson attempts "${attempt_jsons}" \
+    --argjson runtime "$(backend_runtime_snapshot "${repo_root}")" \
+    '{
+      ok: $ok,
+      repo_root: $repo_root,
+      attempts: $attempts,
+      runtime: $runtime
+    }'
+}
+
 ensure_state_files() {
   local repo_root="$1"
   local root
@@ -229,34 +731,54 @@ health_snapshot() {
   local allow_repair="$2"
   local ready_result
   local dolt_result
+  local dolt_show_result
+  local dolt_test_result
   local status_result
-  local start_result="null"
+  local repair_result="null"
+  local runtime_json
+  local backend_json
 
-  ready_result="$(run_json_command_in_repo "${repo_root}" "bd_ready" bd ready --json)"
-  if [ "${allow_repair}" = "true" ] && ! jq -e '.ok' >/dev/null <<<"${ready_result}"; then
-    start_result="$(run_json_command_in_repo "${repo_root}" "bd_dolt_start" bd dolt start)"
-    ready_result="$(run_json_command_in_repo "${repo_root}" "bd_ready" bd ready --json)"
+  if [ "${allow_repair}" = "true" ]; then
+    repair_result="$(ensure_backend_connection "${repo_root}")"
   fi
 
+  ready_result="$(run_json_command_in_repo "${repo_root}" "bd_ready" bd ready --json)"
+  dolt_show_result="$(run_json_command_in_repo "${repo_root}" "bd_dolt_show" bd dolt show --json)"
+  dolt_test_result="$(run_json_command_in_repo "${repo_root}" "bd_dolt_test" bd dolt test --json)"
   dolt_result="$(run_json_command_in_repo "${repo_root}" "bd_dolt_status" bd dolt status --json)"
   status_result="$(run_json_command_in_repo "${repo_root}" "bd_status" bd status --json)"
+  runtime_json="$(backend_runtime_snapshot "${repo_root}")"
+  backend_json="$(
+    jq -cn \
+      --argjson runtime "${runtime_json}" \
+      --argjson show "${dolt_show_result}" \
+      'if $show.ok and (($show.output | type) == "object")
+       then $runtime + $show.output
+       else $runtime
+       end'
+  )"
 
   jq -cn \
     --arg checked_at "$(now_iso8601)" \
     --argjson ready "${ready_result}" \
+    --argjson dolt_show "${dolt_show_result}" \
+    --argjson dolt_test "${dolt_test_result}" \
     --argjson dolt "${dolt_result}" \
     --argjson status "${status_result}" \
-    --argjson start "${start_result}" \
+    --argjson repair "${repair_result}" \
+    --argjson backend "${backend_json}" \
     '{
       checked_at: $checked_at,
-      status: (if $ready.ok and $dolt.ok then "healthy" else "unhealthy" end),
+      status: (if $ready.ok and $dolt_test.ok and $status.ok then "healthy" else "unhealthy" end),
       checks: {
         bd_ready: $ready,
+        bd_dolt_show: $dolt_show,
+        bd_dolt_test: $dolt_test,
         bd_dolt_status: $dolt,
         bd_status: $status,
-        bd_dolt_start: $start
+        backend_repair: $repair
       },
-      backend: (if $dolt.ok and (($dolt.output | type) == "object") then $dolt.output else null end),
+      backend: $backend,
       summary: (if $status.ok and (($status.output | type) == "object") then ($status.output.summary // null) else null end)
     }'
 }
@@ -282,26 +804,36 @@ write_service_record() {
   local health_json="$5"
   local leases_json="$6"
   local path
+  local host_path
   local record
 
   path="$(service_path "${repo_root}")"
+  host_path="$(host_service_path "${repo_root}")"
+  ensure_host_state_dirs
   record="$(
     jq -cn \
       --arg generated_at "$(now_iso8601)" \
+      --arg service_key "$(service_key "${repo_root}")" \
       --arg repo_root "${repo_root}" \
       --arg state_root "$(state_root "${repo_root}")" \
       --arg service_path "${path}" \
       --arg leases_path "$(leases_path "${repo_root}")" \
       --arg receipts_path "$(receipts_path "${repo_root}")" \
+      --arg host_state_root "$(host_state_root)" \
+      --arg host_service_path "${host_path}" \
+      --arg host_lock_dir "$(host_lock_dir "${repo_root}")" \
       --arg socket_path "${socket_path}" \
+      --arg backend_host "$(backend_host)" \
+      --arg backend_data_dir "$(backend_data_dir "${repo_root}")" \
       --arg mode "${mode}" \
       --argjson pid "${pid_json}" \
       --argjson health "${health_json}" \
       --argjson leases "${leases_json}" \
       '{
-        schema_version: 1,
+        schema_version: 2,
         generated_at: $generated_at,
         service_kind: "bd-tracker",
+        service_key: $service_key,
         repo_root: $repo_root,
         state_paths: {
           root: $state_root,
@@ -309,10 +841,21 @@ write_service_record() {
           leases: $leases_path,
           receipts: $receipts_path
         },
+        host_registry: {
+          root: $host_state_root,
+          service: $host_service_path,
+          lock: $host_lock_dir
+        },
         protocol: {
           kind: "unix",
           endpoint: $socket_path
         },
+        backend_endpoint: {
+          host: $backend_host,
+          port: ($health.backend.port // null),
+          data_dir: $backend_data_dir
+        },
+        backend_runtime: ($health.backend // null),
         tuskd: {
           mode: $mode,
           pid: $pid
@@ -323,6 +866,7 @@ write_service_record() {
   )"
 
   printf '%s\n' "${record}" >"${path}"
+  printf '%s\n' "${record}" >"${host_path}"
   printf '%s\n' "${record}"
 }
 
@@ -519,8 +1063,14 @@ respond_once() {
 cmd_ensure() {
   local repo_root="$1"
   local socket_path="$2"
+  local projection
 
-  ensure_projection "${repo_root}" "${socket_path}"
+  projection="$(ensure_projection "${repo_root}" "${socket_path}")"
+  printf '%s\n' "${projection}"
+
+  if ! jq -e '.health.status == "healthy"' >/dev/null <<<"${projection}"; then
+    return 1
+  fi
 }
 
 cmd_status() {

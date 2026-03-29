@@ -81,14 +81,42 @@
           nix eval --raw "path:$repo_root#packages.${system}.tusk-ui.name" >/dev/null
           nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "lib.crane.buildDepsOnly is not callable"' "path:$repo_root#lib.crane.buildDepsOnly" >/dev/null
           nix develop --no-pure-eval "path:$repo_root" \
-            -c sh -lc "cd \"\$DEVENV_ROOT\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null && glistix --help >/dev/null && erl -eval \"erlang:halt().\" -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null"
+            -c sh -lc "export DEVENV_ROOT=\"$repo_root\"; export BEADS_WORKSPACE_ROOT=\"$repo_root\"; cd \"$repo_root\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null && glistix --help >/dev/null && erl -eval \"erlang:halt().\" -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null"
+        '';
+      };
+      tuskdPackage = pkgs.writeShellApplication {
+        name = "tuskd";
+        runtimeInputs = [
+          beads
+          pkgs.coreutils
+          pkgs.git
+          pkgs.jq
+          pkgs.jujutsu
+          pkgs.lsof
+          pkgs.socat
+        ];
+        text = ''
+          exec bash ${./scripts/tuskd.sh} "$@"
+        '';
+      };
+      repoBeads = pkgs.writeShellApplication {
+        name = "bd";
+        runtimeInputs = [
+          pkgs.git
+          pkgs.jq
+          pkgs.lsof
+        ];
+        text = ''
+          export TUSK_REAL_BD=${beads}/bin/bd
+          export TUSK_REAL_TUSKD=${tuskdPackage}/bin/tuskd
+          exec bash ${./scripts/bd.sh} "$@"
         '';
       };
       repoCodex = pkgs.writeShellApplication {
         name = "codex";
         runtimeInputs = [
-          beads
           pkgs.git
+          repoBeads
         ];
         text = ''
           set -eu
@@ -105,20 +133,6 @@
           fi
 
           exec ${codexPkg}/bin/codex -C "$repo_root" "$@"
-        '';
-      };
-      tuskdPackage = pkgs.writeShellApplication {
-        name = "tuskd";
-        runtimeInputs = [
-          beads
-          pkgs.coreutils
-          pkgs.git
-          pkgs.jq
-          pkgs.jujutsu
-          pkgs.socat
-        ];
-        text = ''
-          exec bash ${./scripts/tuskd.sh} "$@"
         '';
       };
       tuskUiSrc = craneLib.cleanCargoSource ./crates/tusk-ui;
@@ -153,10 +167,10 @@
         { ... }:
         {
           packages = [
-            beads
             codexNixCheck
             glistixPkg
             installTuskOpenaiSkill
+            repoBeads
             pkgs.deadnix
             pkgs.direnv
             pkgs.dolt
@@ -165,6 +179,7 @@
             pkgs.gleam
             pkgs.jujutsu
             pkgs.jq
+            pkgs.lsof
             pkgs.nil
             pkgs.nix-output-monitor
             pkgs.nix-tree
@@ -210,14 +225,8 @@
               exit 0
             fi
 
-            bd dolt start >/dev/null
-            echo "beads-dolt: dolt server started"
-
-            cleanup() {
-              bd dolt stop >/dev/null 2>&1 || true
-            }
-
-            trap cleanup EXIT INT TERM
+            tuskd ensure --repo "$DEVENV_ROOT" >/dev/null
+            echo "beads-dolt: repo-scoped tracker backend ensured"
 
             while true; do
               sleep 86400
@@ -234,14 +243,20 @@
       flakeModules.default = tuskFlakeModule;
       packages.${system} = {
         rust-toolchain = rustToolchain;
+        bd = repoBeads;
+        beads = repoBeads;
         tusk-ui = tuskUiPackage;
         tusk-openai-skill = tuskSkillBundle;
       };
 
       apps.${system} = {
+        bd = {
+          type = "app";
+          program = "${repoBeads}/bin/bd";
+        };
         beads = {
           type = "app";
-          program = "${beads}/bin/bd";
+          program = "${repoBeads}/bin/bd";
         };
         codex = {
           type = "app";
