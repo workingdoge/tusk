@@ -11,6 +11,7 @@ Usage:
   tuskd board-status [--repo PATH]
   tuskd receipts-status [--repo PATH]
   tuskd claim-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID
+  tuskd close-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON
   tuskd serve [--repo PATH] [--socket PATH]
   tuskd query [--repo PATH] [--socket PATH] --kind KIND [--request-id ID] [--payload JSON]
 
@@ -20,6 +21,7 @@ Commands:
   board-status  Print the current board projection.
   receipts-status Print the current receipt projection.
   claim-issue   Claim one issue through the coordinator action surface.
+  close-issue   Close one issue through the coordinator action surface.
   serve         Serve the local JSON protocol over a Unix socket.
   query         Query a running tuskd socket.
 
@@ -28,6 +30,7 @@ Protocol request kinds:
   board_status
   receipts_status
   claim_issue
+  close_issue
   ping
 EOF
 }
@@ -1095,6 +1098,94 @@ claim_issue_transition() {
   jq -cn --argjson payload "${payload_json}" '{ok:true, payload:$payload}'
 }
 
+close_issue_transition() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local reason="$4"
+  local close_result
+  local issue_json
+  local board_json
+  local board_summary
+  local receipt_payload
+  local payload_json
+
+  if [ -z "${issue_id}" ]; then
+    jq -cn \
+      --arg message "close_issue requires issue_id" \
+      '{ok:false, error:{message:$message}}'
+    return 0
+  fi
+
+  if [ -z "${reason}" ]; then
+    jq -cn \
+      --arg message "close_issue requires reason" \
+      '{ok:false, error:{message:$message}}'
+    return 0
+  fi
+
+  ensure_state_files "${repo_root}"
+  close_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_issue_close" issue close "${issue_id}" --reason "${reason}")"
+  if ! jq -e --arg issue_id "${issue_id}" '
+      .ok and
+      ((.output | type) == "array") and
+      ((.output | length) > 0) and
+      ((.output[0] | type) == "object") and
+      ((.output[0].id // "") == $issue_id) and
+      ((.output[0].status // "") == "closed")
+    ' >/dev/null <<<"${close_result}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg reason "${reason}" \
+      --argjson tracker "${close_result}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        reason: $reason,
+        error: { message: "tracker issue close failed" },
+        tracker: $tracker
+      }'
+    return 0
+  fi
+
+  issue_json="$(jq -c '.output[0]' <<<"${close_result}")"
+  tracker_status_projection "${repo_root}" "${socket_path}" >/dev/null
+  board_json="$(board_status_projection "${repo_root}")"
+  board_summary="$(jq -c '.summary // null' <<<"${board_json}")"
+  receipt_payload="$(
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg reason "${reason}" \
+      --argjson issue "${issue_json}" \
+      --argjson board_summary "${board_summary}" \
+      '{
+        issue_id: $issue_id,
+        reason: $reason,
+        issue: $issue,
+        board_summary: $board_summary
+      }'
+  )"
+  append_receipt "${repo_root}" "issue.close" "${receipt_payload}"
+
+  payload_json="$(
+    jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg issue_id "${issue_id}" \
+      --arg reason "${reason}" \
+      --argjson issue "${issue_json}" \
+      --argjson board_summary "${board_summary}" \
+      '{
+        repo_root: $repo_root,
+        issue_id: $issue_id,
+        reason: $reason,
+        issue: $issue,
+        board_summary: $board_summary
+      }'
+  )"
+
+  jq -cn --argjson payload "${payload_json}" '{ok:true, payload:$payload}'
+}
+
 respond_once() {
   local repo_root="$1"
   local socket_path="$2"
@@ -1103,6 +1194,7 @@ respond_once() {
   local kind=""
   local payload="null"
   local issue_id=""
+  local reason=""
   local action_result=""
 
   if ! IFS= read -r request_line; then
@@ -1139,6 +1231,21 @@ respond_once() {
     claim_issue)
       issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
       action_result="$(claim_issue_transition "${repo_root}" "${socket_path}" "${issue_id}")"
+      if ! jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
+        jq -cn \
+          --arg request_id "${request_id}" \
+          --arg kind "${kind}" \
+          --arg message "$(jq -r '.error.message // "request failed"' <<<"${action_result}")" \
+          --argjson details "${action_result}" \
+          '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message, details:$details}}'
+        return 0
+      fi
+      payload="$(jq -c '.payload' <<<"${action_result}")"
+      ;;
+    close_issue)
+      issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
+      reason="$(printf '%s' "${request_line}" | jq -r '.payload.reason // ""')"
+      action_result="$(close_issue_transition "${repo_root}" "${socket_path}" "${issue_id}" "${reason}")"
       if ! jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
         jq -cn \
           --arg request_id "${request_id}" \
@@ -1218,6 +1325,23 @@ cmd_claim_issue() {
   return 1
 }
 
+cmd_close_issue() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local reason="$4"
+  local action_result
+
+  action_result="$(close_issue_transition "${repo_root}" "${socket_path}" "${issue_id}" "${reason}")"
+  if jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
+    jq -c '.payload' <<<"${action_result}"
+    return 0
+  fi
+
+  jq -c '.' <<<"${action_result}"
+  return 1
+}
+
 cmd_serve() {
   local repo_root="$1"
   local socket_path="$2"
@@ -1286,6 +1410,7 @@ socket_arg=""
 kind_arg=""
 request_id_arg=""
 issue_id_arg=""
+reason_arg=""
 payload_arg="null"
 
 while [ $# -gt 0 ]; do
@@ -1313,6 +1438,11 @@ while [ $# -gt 0 ]; do
     --issue-id)
       [ $# -ge 2 ] || fail "--issue-id requires a value"
       issue_id_arg="$2"
+      shift 2
+      ;;
+    --reason)
+      [ $# -ge 2 ] || fail "--reason requires a value"
+      reason_arg="$2"
       shift 2
       ;;
     --payload)
@@ -1349,6 +1479,11 @@ case "${command}" in
   claim-issue)
     [ -n "${issue_id_arg}" ] || fail "claim-issue requires --issue-id"
     cmd_claim_issue "${repo_root}" "${socket_path}" "${issue_id_arg}"
+    ;;
+  close-issue)
+    [ -n "${issue_id_arg}" ] || fail "close-issue requires --issue-id"
+    [ -n "${reason_arg}" ] || fail "close-issue requires --reason"
+    cmd_close_issue "${repo_root}" "${socket_path}" "${issue_id_arg}" "${reason_arg}"
     ;;
   serve)
     cmd_serve "${repo_root}" "${socket_path}"

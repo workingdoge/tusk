@@ -10,6 +10,7 @@ Usage:
   tusk-tracker ready [--repo PATH]
   tusk-tracker status [--repo PATH]
   tusk-tracker issue claim ISSUE_ID [--repo PATH]
+  tusk-tracker issue close ISSUE_ID --reason REASON [--repo PATH]
   tusk-tracker backend show [--repo PATH]
   tusk-tracker backend status [--repo PATH]
   tusk-tracker backend test [--repo PATH]
@@ -20,6 +21,7 @@ Commands:
   ready              Print the current ready issue set as JSON.
   status             Print the current tracker status summary as JSON.
   issue claim        Claim one issue and print the updated issue JSON.
+  issue close        Close one issue and print the updated issue JSON.
   backend show       Print the current tracker backend configuration as JSON.
   backend status     Print the current tracker backend status as JSON.
   backend test       Test the current tracker backend connection as JSON.
@@ -102,6 +104,16 @@ cmd_issue_claim() {
   run_in_repo "${repo_root}" "${real_bd}" update "${issue_id}" --claim --json
 }
 
+cmd_issue_close() {
+  local repo_root="$1"
+  local issue_id="${2:-}"
+  local reason="${3:-}"
+
+  [ -n "${issue_id}" ] || fail "issue close requires ISSUE_ID"
+  [ -n "${reason}" ] || fail "issue close requires --reason"
+  run_in_repo "${repo_root}" "${real_bd}" close "${issue_id}" --reason "${reason}" --json
+}
+
 cmd_backend_show() {
   local repo_root="$1"
   run_in_repo "${repo_root}" "${real_bd}" dolt show --json
@@ -174,6 +186,7 @@ main() {
   local command=""
   local subcommand=""
   local issue_id=""
+  local reason=""
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -218,6 +231,26 @@ main() {
           issue_id="${1:-}"
           [ "$#" -eq 1 ] || fail "issue claim requires exactly one ISSUE_ID"
           cmd_issue_claim "${repo_root}" "${issue_id}"
+          ;;
+        close)
+          issue_id="${1:-}"
+          shift
+          [ -n "${issue_id}" ] || fail "issue close requires ISSUE_ID"
+
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              --reason|-r)
+                [ "$#" -ge 2 ] || fail "issue close requires a value for --reason"
+                reason="$2"
+                shift 2
+                ;;
+              *)
+                fail "unknown issue close argument: $1"
+                ;;
+            esac
+          done
+
+          cmd_issue_close "${repo_root}" "${issue_id}" "${reason}"
           ;;
         *)
           fail "unknown issue subcommand: ${subcommand}"

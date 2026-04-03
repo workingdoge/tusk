@@ -38,6 +38,7 @@ nix run .#tuskd -- ensure --repo "$PWD"
 nix run .#tuskd -- status --repo "$PWD"
 nix run .#tuskd -- board-status --repo "$PWD"
 nix run .#tuskd -- claim-issue --repo "$PWD" --issue-id tusk-123
+nix run .#tuskd -- close-issue --repo "$PWD" --issue-id tusk-123 --reason "completed in visible commit"
 nix build .#tusk-ui
 nix run .#tusk-ui -- --help
 ```
@@ -79,5 +80,6 @@ nix run .#tusk-ui -- --help
 - `nix run path:.#tuskd -- status --repo "$PWD"`
 - `nix run path:.#tuskd -- board-status --repo "$PWD"`
 - `nix run path:.#tuskd -- claim-issue --repo "$PWD" --issue-id <issue-id>` on a disposable issue
+- `nix run path:.#tuskd -- close-issue --repo "$PWD" --issue-id <issue-id> --reason "<reason>"` on a disposable issue
 - `nix run path:.#bd -- status --json`
 - `nix run path:.#beads -- status --json`
