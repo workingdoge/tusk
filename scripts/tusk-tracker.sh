@@ -9,6 +9,7 @@ usage() {
 Usage:
   tusk-tracker ready [--repo PATH]
   tusk-tracker status [--repo PATH]
+  tusk-tracker issue claim ISSUE_ID [--repo PATH]
   tusk-tracker backend show [--repo PATH]
   tusk-tracker backend status [--repo PATH]
   tusk-tracker backend test [--repo PATH]
@@ -18,6 +19,7 @@ Usage:
 Commands:
   ready              Print the current ready issue set as JSON.
   status             Print the current tracker status summary as JSON.
+  issue claim        Claim one issue and print the updated issue JSON.
   backend show       Print the current tracker backend configuration as JSON.
   backend status     Print the current tracker backend status as JSON.
   backend test       Test the current tracker backend connection as JSON.
@@ -92,6 +94,14 @@ cmd_status() {
   run_in_repo "${repo_root}" "${real_bd}" status --json
 }
 
+cmd_issue_claim() {
+  local repo_root="$1"
+  local issue_id="${2:-}"
+
+  [ -n "${issue_id}" ] || fail "issue claim requires ISSUE_ID"
+  run_in_repo "${repo_root}" "${real_bd}" update "${issue_id}" --claim --json
+}
+
 cmd_backend_show() {
   local repo_root="$1"
   run_in_repo "${repo_root}" "${real_bd}" dolt show --json
@@ -163,6 +173,7 @@ main() {
   local repo_root=""
   local command=""
   local subcommand=""
+  local issue_id=""
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -197,6 +208,21 @@ main() {
       ;;
     status)
       cmd_status "${repo_root}"
+      ;;
+    issue)
+      subcommand="${2:-}"
+      [ -n "${subcommand}" ] || fail "issue requires a subcommand"
+      shift 2
+      case "${subcommand}" in
+        claim)
+          issue_id="${1:-}"
+          [ "$#" -eq 1 ] || fail "issue claim requires exactly one ISSUE_ID"
+          cmd_issue_claim "${repo_root}" "${issue_id}"
+          ;;
+        *)
+          fail "unknown issue subcommand: ${subcommand}"
+          ;;
+      esac
       ;;
     backend)
       subcommand="${2:-}"

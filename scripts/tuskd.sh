@@ -10,14 +10,16 @@ Usage:
   tuskd status [--repo PATH] [--socket PATH]
   tuskd board-status [--repo PATH]
   tuskd receipts-status [--repo PATH]
+  tuskd claim-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID
   tuskd serve [--repo PATH] [--socket PATH]
-  tuskd query [--repo PATH] [--socket PATH] --kind KIND [--request-id ID]
+  tuskd query [--repo PATH] [--socket PATH] --kind KIND [--request-id ID] [--payload JSON]
 
 Commands:
   ensure        Ensure repo-local state exists and tracker health is recorded.
   status        Print the current tracker service projection.
   board-status  Print the current board projection.
   receipts-status Print the current receipt projection.
+  claim-issue   Claim one issue through the coordinator action surface.
   serve         Serve the local JSON protocol over a Unix socket.
   query         Query a running tuskd socket.
 
@@ -25,6 +27,7 @@ Protocol request kinds:
   tracker_status
   board_status
   receipts_status
+  claim_issue
   ping
 EOF
 }
@@ -1019,6 +1022,79 @@ receipts_status_projection() {
     }'
 }
 
+claim_issue_transition() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local claim_result
+  local issue_json
+  local board_json
+  local board_summary
+  local receipt_payload
+  local payload_json
+
+  if [ -z "${issue_id}" ]; then
+    jq -cn \
+      --arg message "claim_issue requires issue_id" \
+      '{ok:false, error:{message:$message}}'
+    return 0
+  fi
+
+  ensure_state_files "${repo_root}"
+  claim_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_issue_claim" issue claim "${issue_id}")"
+  if ! jq -e --arg issue_id "${issue_id}" '
+      .ok and
+      ((.output | type) == "array") and
+      ((.output | length) > 0) and
+      ((.output[0] | type) == "object") and
+      ((.output[0].id // "") == $issue_id)
+    ' >/dev/null <<<"${claim_result}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson tracker "${claim_result}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        error: { message: "tracker issue claim failed" },
+        tracker: $tracker
+      }'
+    return 0
+  fi
+
+  issue_json="$(jq -c '.output[0]' <<<"${claim_result}")"
+  tracker_status_projection "${repo_root}" "${socket_path}" >/dev/null
+  board_json="$(board_status_projection "${repo_root}")"
+  board_summary="$(jq -c '.summary // null' <<<"${board_json}")"
+  receipt_payload="$(
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson issue "${issue_json}" \
+      --argjson board_summary "${board_summary}" \
+      '{
+        issue_id: $issue_id,
+        issue: $issue,
+        board_summary: $board_summary
+      }'
+  )"
+  append_receipt "${repo_root}" "issue.claim" "${receipt_payload}"
+
+  payload_json="$(
+    jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg issue_id "${issue_id}" \
+      --argjson issue "${issue_json}" \
+      --argjson board_summary "${board_summary}" \
+      '{
+        repo_root: $repo_root,
+        issue_id: $issue_id,
+        issue: $issue,
+        board_summary: $board_summary
+      }'
+  )"
+
+  jq -cn --argjson payload "${payload_json}" '{ok:true, payload:$payload}'
+}
+
 respond_once() {
   local repo_root="$1"
   local socket_path="$2"
@@ -1026,6 +1102,8 @@ respond_once() {
   local request_id=""
   local kind=""
   local payload="null"
+  local issue_id=""
+  local action_result=""
 
   if ! IFS= read -r request_line; then
     jq -cn \
@@ -1057,6 +1135,20 @@ respond_once() {
       ;;
     receipts_status)
       payload="$(receipts_status_projection "${repo_root}")"
+      ;;
+    claim_issue)
+      issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
+      action_result="$(claim_issue_transition "${repo_root}" "${socket_path}" "${issue_id}")"
+      if ! jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
+        jq -cn \
+          --arg request_id "${request_id}" \
+          --arg kind "${kind}" \
+          --arg message "$(jq -r '.error.message // "request failed"' <<<"${action_result}")" \
+          --argjson details "${action_result}" \
+          '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message, details:$details}}'
+        return 0
+      fi
+      payload="$(jq -c '.payload' <<<"${action_result}")"
       ;;
     ping)
       payload="$(jq -cn --arg repo_root "${repo_root}" --arg timestamp "$(now_iso8601)" '{repo_root:$repo_root, timestamp:$timestamp, status:"ok"}')"
@@ -1110,6 +1202,22 @@ cmd_receipts_status() {
   receipts_status_projection "${repo_root}"
 }
 
+cmd_claim_issue() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local action_result
+
+  action_result="$(claim_issue_transition "${repo_root}" "${socket_path}" "${issue_id}")"
+  if jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
+    jq -c '.payload' <<<"${action_result}"
+    return 0
+  fi
+
+  jq -c '.' <<<"${action_result}"
+  return 1
+}
+
 cmd_serve() {
   local repo_root="$1"
   local socket_path="$2"
@@ -1151,10 +1259,21 @@ cmd_query() {
   local socket_path="$1"
   local kind="$2"
   local request_id="$3"
+  local payload_json="$4"
   local request_json
 
-  request_json="$(jq -cn --arg request_id "${request_id}" --arg kind "${kind}" '{request_id:$request_id, kind:$kind}')"
-  printf '%s\n' "${request_json}" | socat - "UNIX-CONNECT:${socket_path}"
+  if ! printf '%s' "${payload_json}" | jq -e . >/dev/null 2>&1; then
+    fail "query --payload must be valid JSON"
+  fi
+
+  request_json="$(
+    jq -cn \
+      --arg request_id "${request_id}" \
+      --arg kind "${kind}" \
+      --argjson payload "${payload_json}" \
+      '{request_id:$request_id, kind:$kind, payload:$payload}'
+  )"
+  printf '%s\n' "${request_json}" | socat -,ignoreeof "UNIX-CONNECT:${socket_path}"
 }
 
 command="${1:-}"
@@ -1166,6 +1285,8 @@ repo_arg=""
 socket_arg=""
 kind_arg=""
 request_id_arg=""
+issue_id_arg=""
+payload_arg="null"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -1187,6 +1308,16 @@ while [ $# -gt 0 ]; do
     --request-id)
       [ $# -ge 2 ] || fail "--request-id requires a value"
       request_id_arg="$2"
+      shift 2
+      ;;
+    --issue-id)
+      [ $# -ge 2 ] || fail "--issue-id requires a value"
+      issue_id_arg="$2"
+      shift 2
+      ;;
+    --payload)
+      [ $# -ge 2 ] || fail "--payload requires a JSON value"
+      payload_arg="$2"
       shift 2
       ;;
     -h|--help)
@@ -1215,12 +1346,16 @@ case "${command}" in
   receipts-status)
     cmd_receipts_status "${repo_root}"
     ;;
+  claim-issue)
+    [ -n "${issue_id_arg}" ] || fail "claim-issue requires --issue-id"
+    cmd_claim_issue "${repo_root}" "${socket_path}" "${issue_id_arg}"
+    ;;
   serve)
     cmd_serve "${repo_root}" "${socket_path}"
     ;;
   query)
     [ -n "${kind_arg}" ] || fail "query requires --kind"
-    cmd_query "${socket_path}" "${kind_arg}" "${request_id_arg:-$(now_iso8601)}"
+    cmd_query "${socket_path}" "${kind_arg}" "${request_id_arg:-$(now_iso8601)}" "${payload_arg}"
     ;;
   respond)
     respond_once "${repo_root}" "${socket_path}"

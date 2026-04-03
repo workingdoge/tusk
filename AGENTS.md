@@ -11,6 +11,7 @@ These instructions apply to `/Users/arj/dev/blackhole/tusk`.
 - Use `glistix` for Nix-target Gleam work; the shell also keeps upstream `gleam` available for generic tooling and language-server compatibility checks.
 - Use `lib.crane` from the flake for Rust package definitions so Rust builds share the same pinned `rust-overlay` toolchain as the shell, and run packaged Rust apps via `nix build` / `nix run` instead of mutating manifests ad hoc from outside Nix.
 - `tuskd` writes repo-local service state under `.beads/tuskd/` and a host-local registry under `$TUSK_HOST_STATE_ROOT`, `$XDG_STATE_HOME/tusk`, or `~/Library/Caches/tusk` on macOS.
+- `tuskd` is the coordinator action and receipt surface; `tusk-tracker` is the internal tracker adapter seam behind it.
 - Outside the dev shell, use `nix run .#bd -- ...` instead of an ambient host `bd`; the wrapper reads the `tuskd` service record and exports the repo-scoped Dolt endpoint before execing Beads.
 
 ## Quick Reference
@@ -36,6 +37,7 @@ tuskd --help
 nix run .#tuskd -- ensure --repo "$PWD"
 nix run .#tuskd -- status --repo "$PWD"
 nix run .#tuskd -- board-status --repo "$PWD"
+nix run .#tuskd -- claim-issue --repo "$PWD" --issue-id tusk-123
 nix build .#tusk-ui
 nix run .#tusk-ui -- --help
 ```
@@ -76,5 +78,6 @@ nix run .#tusk-ui -- --help
 - `nix run path:.#tuskd -- ensure --repo "$PWD"`
 - `nix run path:.#tuskd -- status --repo "$PWD"`
 - `nix run path:.#tuskd -- board-status --repo "$PWD"`
+- `nix run path:.#tuskd -- claim-issue --repo "$PWD" --issue-id <issue-id>` on a disposable issue
 - `nix run path:.#bd -- status --json`
 - `nix run path:.#beads -- status --json`
