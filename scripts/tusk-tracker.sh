@@ -9,6 +9,7 @@ usage() {
 Usage:
   tusk-tracker ready [--repo PATH]
   tusk-tracker status [--repo PATH]
+  tusk-tracker issue show ISSUE_ID [--repo PATH]
   tusk-tracker issue claim ISSUE_ID [--repo PATH]
   tusk-tracker issue close ISSUE_ID --reason REASON [--repo PATH]
   tusk-tracker backend show [--repo PATH]
@@ -20,6 +21,7 @@ Usage:
 Commands:
   ready              Print the current ready issue set as JSON.
   status             Print the current tracker status summary as JSON.
+  issue show         Show one issue and print the issue JSON.
   issue claim        Claim one issue and print the updated issue JSON.
   issue close        Close one issue and print the updated issue JSON.
   backend show       Print the current tracker backend configuration as JSON.
@@ -94,6 +96,14 @@ cmd_ready() {
 cmd_status() {
   local repo_root="$1"
   run_in_repo "${repo_root}" "${real_bd}" status --json
+}
+
+cmd_issue_show() {
+  local repo_root="$1"
+  local issue_id="${2:-}"
+
+  [ -n "${issue_id}" ] || fail "issue show requires ISSUE_ID"
+  run_in_repo "${repo_root}" "${real_bd}" show "${issue_id}" --json
 }
 
 cmd_issue_claim() {
@@ -227,6 +237,11 @@ main() {
       [ -n "${subcommand}" ] || fail "issue requires a subcommand"
       shift 2
       case "${subcommand}" in
+        show)
+          issue_id="${1:-}"
+          [ "$#" -eq 1 ] || fail "issue show requires exactly one ISSUE_ID"
+          cmd_issue_show "${repo_root}" "${issue_id}"
+          ;;
         claim)
           issue_id="${1:-}"
           [ "$#" -eq 1 ] || fail "issue claim requires exactly one ISSUE_ID"

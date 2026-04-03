@@ -12,6 +12,7 @@ Usage:
   tuskd receipts-status [--repo PATH]
   tuskd claim-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID
   tuskd close-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON
+  tuskd launch-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --base-rev REV [--slug SLUG]
   tuskd serve [--repo PATH] [--socket PATH]
   tuskd query [--repo PATH] [--socket PATH] --kind KIND [--request-id ID] [--payload JSON]
 
@@ -22,6 +23,7 @@ Commands:
   receipts-status Print the current receipt projection.
   claim-issue   Claim one issue through the coordinator action surface.
   close-issue   Close one issue through the coordinator action surface.
+  launch-lane   Create one dedicated issue workspace through the coordinator action surface.
   serve         Serve the local JSON protocol over a Unix socket.
   query         Query a running tuskd socket.
 
@@ -31,6 +33,7 @@ Protocol request kinds:
   receipts_status
   claim_issue
   close_issue
+  launch_lane
   ping
 EOF
 }
@@ -196,6 +199,19 @@ stable_backend_port() {
   key="$(service_key "${repo_root}")"
   prefix="${key:0:6}"
   printf '%s\n' "$((17000 + (16#${prefix} % 20000)))"
+}
+
+workspace_root_dir() {
+  local repo_root="$1"
+  printf '%s/.jj-workspaces\n' "${repo_root}"
+}
+
+slugify_fragment() {
+  local input="${1:-}"
+
+  printf '%s' "${input}" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g'
 }
 
 host_service_record() {
@@ -959,11 +975,59 @@ tracker_status_projection() {
   write_service_record "${repo_root}" "${socket_path}" "${mode}" "${pid_json}" "${health_json}" "${leases_json}"
 }
 
+lane_launches_projection() {
+  local repo_root="$1"
+  local lines=""
+  local launches_json="[]"
+  local filtered_json="[]"
+  local lane_json=""
+  local workspace_path=""
+
+  ensure_state_files "${repo_root}"
+  if [ -f "$(receipts_path "${repo_root}")" ]; then
+    lines="$(tail -n 200 "$(receipts_path "${repo_root}")" 2>/dev/null || true)"
+  fi
+
+  launches_json="$(
+    printf '%s' "${lines}" | jq -Rsc '
+      split("\n")
+      | map(select(length > 0) | (try fromjson catch empty))
+      | map(select(.kind == "lane.launch" and ((.payload.issue_id // "") | length > 0)))
+      | reduce .[] as $receipt ({};
+          .[$receipt.payload.issue_id] = {
+            issue_id: $receipt.payload.issue_id,
+            issue_title: ($receipt.payload.issue_title // null),
+            workspace_name: ($receipt.payload.workspace_name // null),
+            workspace_path: ($receipt.payload.workspace_path // null),
+            base_rev: ($receipt.payload.base_rev // null),
+            base_commit: ($receipt.payload.base_commit // null),
+            launched_at: $receipt.timestamp
+          })
+      | to_entries
+      | map(.value)
+      | sort_by(.issue_id)
+    '
+  )"
+
+  while IFS= read -r lane_json; do
+    [ -n "${lane_json}" ] || continue
+    workspace_path="$(jq -r '.workspace_path // ""' <<<"${lane_json}")"
+    [ -n "${workspace_path}" ] || continue
+    if [ -d "${workspace_path}" ]; then
+      lane_json="$(jq -c '. + {workspace_exists:true}' <<<"${lane_json}")"
+      filtered_json="$(jq -c --argjson lane "${lane_json}" '. + [$lane]' <<<"${filtered_json}")"
+    fi
+  done < <(jq -c '.[]' <<<"${launches_json}")
+
+  printf '%s\n' "${filtered_json}"
+}
+
 board_status_projection() {
   local repo_root="$1"
   local status_result
   local ready_result
   local workspaces_result
+  local lanes_json
 
   status_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_status" status)"
   ready_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_ready" ready)"
@@ -973,6 +1037,7 @@ board_status_projection() {
       "jj_workspace_list" \
       jj workspace list --ignore-working-copy --color never
   )"
+  lanes_json="$(lane_launches_projection "${repo_root}")"
 
   jq -cn \
     --arg repo_root "${repo_root}" \
@@ -980,11 +1045,13 @@ board_status_projection() {
     --argjson status "${status_result}" \
     --argjson ready "${ready_result}" \
     --argjson workspaces "${workspaces_result}" \
+    --argjson lanes "${lanes_json}" \
     '{
       repo_root: $repo_root,
       generated_at: $generated_at,
       summary: (if $status.ok and (($status.output | type) == "object") then ($status.output.summary // null) else null end),
       ready_issues: (if $ready.ok and (($ready.output | type) == "array") then $ready.output else [] end),
+      lanes: $lanes,
       workspaces: (if $workspaces.ok and (($workspaces.output | type) == "array") then $workspaces.output else [] end),
       checks: {
         tracker_status: $status,
@@ -1186,6 +1253,231 @@ close_issue_transition() {
   jq -cn --argjson payload "${payload_json}" '{ok:true, payload:$payload}'
 }
 
+launch_lane_transition() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local base_rev="$4"
+  local slug_arg="${5:-}"
+  local issue_result
+  local issue_json
+  local issue_title
+  local slug
+  local workspace_name
+  local workspace_path
+  local base_lookup_output=""
+  local base_lookup_exit=0
+  local base_commit=""
+  local add_output=""
+  local add_exit=0
+  local describe_output=""
+  local describe_exit=0
+  local board_json
+  local board_summary
+  local lanes_json
+  local receipt_payload
+  local payload_json
+
+  if [ -z "${issue_id}" ]; then
+    jq -cn \
+      --arg message "launch_lane requires issue_id" \
+      '{ok:false, error:{message:$message}}'
+    return 0
+  fi
+
+  if [ -z "${base_rev}" ]; then
+    jq -cn \
+      --arg message "launch_lane requires base_rev" \
+      '{ok:false, error:{message:$message}}'
+    return 0
+  fi
+
+  ensure_state_files "${repo_root}"
+  issue_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_issue_show" issue show "${issue_id}")"
+  if ! jq -e --arg issue_id "${issue_id}" '
+      .ok and
+      ((.output | type) == "array") and
+      ((.output | length) > 0) and
+      ((.output[0] | type) == "object") and
+      ((.output[0].id // "") == $issue_id)
+    ' >/dev/null <<<"${issue_result}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson tracker "${issue_result}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        error: { message: "tracker issue show failed" },
+        tracker: $tracker
+      }'
+    return 0
+  fi
+
+  issue_json="$(jq -c '.output[0]' <<<"${issue_result}")"
+  if ! jq -e '.status == "in_progress"' >/dev/null <<<"${issue_json}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson issue "${issue_json}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        error: { message: "launch_lane requires a claimed in_progress issue" },
+        issue: $issue
+      }'
+    return 0
+  fi
+
+  issue_title="$(jq -r '.title // ""' <<<"${issue_json}")"
+  slug="${slug_arg}"
+  if [ -z "${slug}" ]; then
+    slug="$(slugify_fragment "${issue_title}")"
+  fi
+  if [ -z "${slug}" ]; then
+    slug="lane"
+  fi
+
+  workspace_name="${issue_id}-${slug}"
+  workspace_path="$(workspace_root_dir "${repo_root}")/${workspace_name}"
+
+  if [ -e "${workspace_path}" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg workspace_name "${workspace_name}" \
+      --arg workspace_path "${workspace_path}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        error: { message: "workspace path already exists" },
+        workspace_name: $workspace_name,
+        workspace_path: $workspace_path
+      }'
+    return 0
+  fi
+
+  if base_lookup_output="$(run_in_repo_capture "${repo_root}" jj --repository "${repo_root}" log -r "${base_rev}" --no-graph -T 'commit_id ++ "\n"')"; then
+    base_lookup_exit=0
+  else
+    base_lookup_exit=$?
+  fi
+  base_commit="$(printf '%s' "${base_lookup_output}" | awk 'NF { print; exit }')"
+  if [ "${base_lookup_exit}" -ne 0 ] || [ -z "${base_commit}" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg base_rev "${base_rev}" \
+      --arg output "${base_lookup_output}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        base_rev: $base_rev,
+        error: { message: "base_rev did not resolve to a commit" },
+        output: $output
+      }'
+    return 0
+  fi
+
+  mkdir -p "$(workspace_root_dir "${repo_root}")"
+  if add_output="$(run_in_repo_capture "${repo_root}" jj --repository "${repo_root}" workspace add "${workspace_path}" --name "${workspace_name}" -r "${base_rev}")"; then
+    add_exit=0
+  else
+    add_exit=$?
+  fi
+  if [ "${add_exit}" -ne 0 ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg workspace_name "${workspace_name}" \
+      --arg workspace_path "${workspace_path}" \
+      --arg base_rev "${base_rev}" \
+      --arg output "${add_output}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        error: { message: "jj workspace add failed" },
+        workspace_name: $workspace_name,
+        workspace_path: $workspace_path,
+        base_rev: $base_rev,
+        output: $output
+      }'
+    return 0
+  fi
+
+  if describe_output="$(run_in_repo_capture "${repo_root}" jj --repository "${workspace_path}" describe -m "${issue_id}: wip")"; then
+    describe_exit=0
+  else
+    describe_exit=$?
+  fi
+  if [ "${describe_exit}" -ne 0 ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg workspace_name "${workspace_name}" \
+      --arg workspace_path "${workspace_path}" \
+      --arg output "${describe_output}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        error: { message: "jj describe failed after workspace creation" },
+        workspace_name: $workspace_name,
+        workspace_path: $workspace_path,
+        output: $output
+      }'
+    return 0
+  fi
+
+  tracker_status_projection "${repo_root}" "${socket_path}" >/dev/null
+  board_json="$(board_status_projection "${repo_root}")"
+  board_summary="$(jq -c '.summary // null' <<<"${board_json}")"
+  lanes_json="$(jq -c '.lanes // []' <<<"${board_json}")"
+  receipt_payload="$(
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg issue_title "${issue_title}" \
+      --arg workspace_name "${workspace_name}" \
+      --arg workspace_path "${workspace_path}" \
+      --arg base_rev "${base_rev}" \
+      --arg base_commit "${base_commit}" \
+      --argjson issue "${issue_json}" \
+      --argjson board_summary "${board_summary}" \
+      '{
+        issue_id: $issue_id,
+        issue_title: $issue_title,
+        workspace_name: $workspace_name,
+        workspace_path: $workspace_path,
+        base_rev: $base_rev,
+        base_commit: $base_commit,
+        issue: $issue,
+        board_summary: $board_summary
+      }'
+  )"
+  append_receipt "${repo_root}" "lane.launch" "${receipt_payload}"
+
+  payload_json="$(
+    jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg issue_id "${issue_id}" \
+      --arg issue_title "${issue_title}" \
+      --arg workspace_name "${workspace_name}" \
+      --arg workspace_path "${workspace_path}" \
+      --arg base_rev "${base_rev}" \
+      --arg base_commit "${base_commit}" \
+      --argjson issue "${issue_json}" \
+      --argjson lanes "${lanes_json}" \
+      --argjson board_summary "${board_summary}" \
+      '{
+        repo_root: $repo_root,
+        issue_id: $issue_id,
+        issue_title: $issue_title,
+        issue: $issue,
+        workspace_name: $workspace_name,
+        workspace_path: $workspace_path,
+        base_rev: $base_rev,
+        base_commit: $base_commit,
+        lanes: $lanes,
+        board_summary: $board_summary
+      }'
+  )"
+
+  jq -cn --argjson payload "${payload_json}" '{ok:true, payload:$payload}'
+}
+
 respond_once() {
   local repo_root="$1"
   local socket_path="$2"
@@ -1195,6 +1487,8 @@ respond_once() {
   local payload="null"
   local issue_id=""
   local reason=""
+  local base_rev=""
+  local slug=""
   local action_result=""
 
   if ! IFS= read -r request_line; then
@@ -1246,6 +1540,22 @@ respond_once() {
       issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
       reason="$(printf '%s' "${request_line}" | jq -r '.payload.reason // ""')"
       action_result="$(close_issue_transition "${repo_root}" "${socket_path}" "${issue_id}" "${reason}")"
+      if ! jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
+        jq -cn \
+          --arg request_id "${request_id}" \
+          --arg kind "${kind}" \
+          --arg message "$(jq -r '.error.message // "request failed"' <<<"${action_result}")" \
+          --argjson details "${action_result}" \
+          '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message, details:$details}}'
+        return 0
+      fi
+      payload="$(jq -c '.payload' <<<"${action_result}")"
+      ;;
+    launch_lane)
+      issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
+      base_rev="$(printf '%s' "${request_line}" | jq -r '.payload.base_rev // ""')"
+      slug="$(printf '%s' "${request_line}" | jq -r '.payload.slug // ""')"
+      action_result="$(launch_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${base_rev}" "${slug}")"
       if ! jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
         jq -cn \
           --arg request_id "${request_id}" \
@@ -1342,6 +1652,24 @@ cmd_close_issue() {
   return 1
 }
 
+cmd_launch_lane() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local base_rev="$4"
+  local slug="${5:-}"
+  local action_result
+
+  action_result="$(launch_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${base_rev}" "${slug}")"
+  if jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
+    jq -c '.payload' <<<"${action_result}"
+    return 0
+  fi
+
+  jq -c '.' <<<"${action_result}"
+  return 1
+}
+
 cmd_serve() {
   local repo_root="$1"
   local socket_path="$2"
@@ -1411,6 +1739,8 @@ kind_arg=""
 request_id_arg=""
 issue_id_arg=""
 reason_arg=""
+base_rev_arg=""
+slug_arg=""
 payload_arg="null"
 
 while [ $# -gt 0 ]; do
@@ -1443,6 +1773,16 @@ while [ $# -gt 0 ]; do
     --reason)
       [ $# -ge 2 ] || fail "--reason requires a value"
       reason_arg="$2"
+      shift 2
+      ;;
+    --base-rev)
+      [ $# -ge 2 ] || fail "--base-rev requires a value"
+      base_rev_arg="$2"
+      shift 2
+      ;;
+    --slug)
+      [ $# -ge 2 ] || fail "--slug requires a value"
+      slug_arg="$2"
       shift 2
       ;;
     --payload)
@@ -1484,6 +1824,11 @@ case "${command}" in
     [ -n "${issue_id_arg}" ] || fail "close-issue requires --issue-id"
     [ -n "${reason_arg}" ] || fail "close-issue requires --reason"
     cmd_close_issue "${repo_root}" "${socket_path}" "${issue_id_arg}" "${reason_arg}"
+    ;;
+  launch-lane)
+    [ -n "${issue_id_arg}" ] || fail "launch-lane requires --issue-id"
+    [ -n "${base_rev_arg}" ] || fail "launch-lane requires --base-rev"
+    cmd_launch_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${base_rev_arg}" "${slug_arg}"
     ;;
   serve)
     cmd_serve "${repo_root}" "${socket_path}"
