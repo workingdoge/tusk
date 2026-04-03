@@ -5,7 +5,7 @@ These instructions apply to `/Users/arj/dev/blackhole/tusk`.
 ## Workflow
 
 - Use `nix develop --no-pure-eval path:.` or `direnv allow` before tracker or workflow work.
-- The dev shell provides a flake-owned `bd` wrapper, `dolt`, `jj`, `deadnix`, `statix`, `nil`, `nixd`, `nix-tree`, `nix-output-monitor`, `nixfmt`, `codex`, `tuskd`, `glistix`, `gleam`, `erl`, `rebar3`, a `rust-overlay` toolchain for `cargo`/`rustc`/`rustfmt`, and `rust-analyzer`.
+- The dev shell provides a flake-owned `bd` wrapper, `tusk-tracker`, `dolt`, `jj`, `deadnix`, `statix`, `nil`, `nixd`, `nix-tree`, `nix-output-monitor`, `nixfmt`, `codex`, `tuskd`, `glistix`, `gleam`, `erl`, `rebar3`, a `rust-overlay` toolchain for `cargo`/`rustc`/`rustfmt`, and `rust-analyzer`.
 - Run `devenv up` inside the dev shell to ensure repo-scoped tracker services when `.beads/` exists. `tuskd ensure` owns backend reuse and host-local coordination; shells must not stop Dolt on exit.
 - Use this repo to develop `tusk` as a standalone flake and skill/tooling home; keep consumer-specific `bd-*` wrappers in the consuming repo unless they are intentionally promoted.
 - Use `glistix` for Nix-target Gleam work; the shell also keeps upstream `gleam` available for generic tooling and language-server compatibility checks.
@@ -21,6 +21,8 @@ devenv up
 bd init -p tusk
 bd ready --json
 bd status --json
+nix run .#tusk-tracker -- status --repo "$PWD"
+nix run .#tusk-tracker -- backend show --repo "$PWD"
 nix run .#bd -- status --json
 jj st
 nix build .#tusk-openai-skill
@@ -40,12 +42,13 @@ nix run .#tusk-ui -- --help
 
 ## Repo Shape
 
-- `flake.nix` exports `lib.tusk`, `flakeModules.tusk`, the development shell, `tuskd`, `tusk-ui`, and the installable OpenAI/Codex skill bundle.
+- `flake.nix` exports `lib.tusk`, `flakeModules.tusk`, the development shell, `tusk-tracker`, `tuskd`, `tusk-ui`, and the installable OpenAI/Codex skill bundle.
 - `flake.nix` also exports a flake-owned `bd`/`beads` wrapper app so raw-shell `nix run` calls reuse repo-scoped tracker state instead of ambient host Beads configuration.
 - `lib.nix` contains the generic `tusk` normalization and validation logic.
 - `flake-module.nix` contains the reusable Nix module surface for `tusk`.
 - `design/` contains architecture and workflow notes that belong to `tusk` itself.
 - `.agents/skills/tusk/` contains the repo-local source of truth for the `tusk` workflow skill.
+- `scripts/tusk-tracker.sh` contains the flake-owned tracker boundary; the current implementation is a `bd` adapter so `tuskd` no longer shells out to raw `bd` commands directly.
 - `scripts/tuskd.sh` contains the local control-plane service skeleton, Unix-socket protocol handler, and repo-scoped Dolt backend registry/coordination logic.
 - `crates/tusk-ui/` contains the Rust `ratatui` control-plane client crate.
 
@@ -60,6 +63,8 @@ nix run .#tusk-ui -- --help
 - `codex-nix-check`
 - `nix build .#tusk-openai-skill`
 - `nix run .#install-tusk-openai-skill`
+- `nix run .#tusk-tracker -- status --repo "$PWD"`
+- `nix run .#tusk-tracker -- backend show --repo "$PWD"`
 - `nix run .#tuskd -- --help`
 - `nix build .#tusk-ui`
 - `nix run .#tusk-ui -- --help`

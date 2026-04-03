@@ -65,6 +65,7 @@
           pkgs.nix
           pkgs.rebar3
           pkgs.rust-analyzer
+          tuskTrackerPackage
           rustToolchain
         ];
         text = ''
@@ -81,19 +82,30 @@
           nix eval --raw "path:$repo_root#packages.${system}.tusk-ui.name" >/dev/null
           nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "lib.crane.buildDepsOnly is not callable"' "path:$repo_root#lib.crane.buildDepsOnly" >/dev/null
           nix develop --no-pure-eval "path:$repo_root" \
-            -c sh -lc "export DEVENV_ROOT=\"$repo_root\"; export BEADS_WORKSPACE_ROOT=\"$repo_root\"; cd \"$repo_root\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null && glistix --help >/dev/null && erl -eval \"erlang:halt().\" -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null"
+            -c sh -lc "export DEVENV_ROOT=\"$repo_root\"; export BEADS_WORKSPACE_ROOT=\"$repo_root\"; cd \"$repo_root\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null && tusk-tracker --help >/dev/null && glistix --help >/dev/null && erl -eval \"erlang:halt().\" -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null"
+        '';
+      };
+      tuskTrackerPackage = pkgs.writeShellApplication {
+        name = "tusk-tracker";
+        runtimeInputs = [
+          beads
+          pkgs.git
+        ];
+        text = ''
+          export TUSK_TRACKER_REAL_BD=${beads}/bin/bd
+          exec bash ${./scripts/tusk-tracker.sh} "$@"
         '';
       };
       tuskdPackage = pkgs.writeShellApplication {
         name = "tuskd";
         runtimeInputs = [
-          beads
           pkgs.coreutils
           pkgs.git
           pkgs.jq
           pkgs.jujutsu
           pkgs.lsof
           pkgs.socat
+          tuskTrackerPackage
         ];
         text = ''
           exec bash ${./scripts/tuskd.sh} "$@"
@@ -191,6 +203,7 @@
             pkgs.socat
             pkgs.statix
             repoCodex
+            tuskTrackerPackage
             tuskdPackage
             rustToolchain
           ];
@@ -207,6 +220,7 @@
             echo "  codex-nix-check"
             echo "  glistix --help"
             echo "  cargo --version"
+            echo "  tusk-tracker --help"
             echo "  tuskd --help"
             echo "  nix build path:.#tusk-ui"
             echo "  nix run path:.#tusk-ui -- --help"
@@ -245,6 +259,7 @@
         rust-toolchain = rustToolchain;
         bd = repoBeads;
         beads = repoBeads;
+        tusk-tracker = tuskTrackerPackage;
         tusk-ui = tuskUiPackage;
         tusk-openai-skill = tuskSkillBundle;
       };
@@ -273,6 +288,10 @@
         tuskd = {
           type = "app";
           program = "${tuskdPackage}/bin/tuskd";
+        };
+        tusk-tracker = {
+          type = "app";
+          program = "${tuskTrackerPackage}/bin/tusk-tracker";
         };
         tusk-ui = {
           type = "app";

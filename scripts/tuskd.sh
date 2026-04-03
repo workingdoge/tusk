@@ -434,7 +434,7 @@ configured_backend_port() {
   local show_json
   local port=""
 
-  show_json="$(run_json_command_in_repo "${repo_root}" "bd_dolt_show" bd dolt show --json)"
+  show_json="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_backend_show" backend show)"
   if ! jq -e '.ok and ((.output | type) == "object")' >/dev/null <<<"${show_json}"; then
     return 0
   fi
@@ -500,9 +500,12 @@ configure_backend_endpoint() {
   local repo_root="$1"
   local port="$2"
 
-  run_in_repo_capture "${repo_root}" bd dolt set host "$(backend_host)" >/dev/null
-  run_in_repo_capture "${repo_root}" bd dolt set port "${port}" >/dev/null
-  run_in_repo_capture "${repo_root}" bd dolt set data-dir "$(backend_data_dir "${repo_root}")" >/dev/null
+  run_tracker_capture_in_repo \
+    "${repo_root}" \
+    backend configure \
+    --host "$(backend_host)" \
+    --port "${port}" \
+    --data-dir "$(backend_data_dir "${repo_root}")" >/dev/null
 }
 
 ensure_backend_connection() {
@@ -530,18 +533,18 @@ ensure_backend_connection() {
     write_local_backend_runtime "${repo_root}" "${selected_port}"
     scrub_deprecated_backend_config "${repo_root}"
 
-    test_output="$(run_in_repo_capture "${repo_root}" bd dolt test --json 2>/dev/null || true)"
+    test_output="$(run_tracker_capture_in_repo "${repo_root}" backend test 2>/dev/null || true)"
     test_ok=false
     if [ -n "${test_output}" ] && jq -e '.connection_ok == true' >/dev/null <<<"${test_output}" 2>/dev/null; then
       test_ok=true
     else
-      if start_output="$(run_in_repo_capture "${repo_root}" bd dolt start 2>&1)"; then
+      if start_output="$(run_tracker_capture_in_repo "${repo_root}" backend start 2>&1)"; then
         start_exit=0
       else
         start_exit=$?
       fi
 
-      test_output="$(run_in_repo_capture "${repo_root}" bd dolt test --json 2>/dev/null || true)"
+      test_output="$(run_tracker_capture_in_repo "${repo_root}" backend test 2>/dev/null || true)"
       if [ -n "${test_output}" ] && jq -e '.connection_ok == true' >/dev/null <<<"${test_output}" 2>/dev/null; then
         test_ok=true
       fi
@@ -710,6 +713,21 @@ run_lines_command_in_repo() {
   render_lines_result "${name}" "${exit_code}" "${output}"
 }
 
+run_tracker_json_command_in_repo() {
+  local repo_root="$1"
+  local name="$2"
+  shift 2
+
+  run_json_command_in_repo "${repo_root}" "${name}" tusk-tracker "$@"
+}
+
+run_tracker_capture_in_repo() {
+  local repo_root="$1"
+  shift
+
+  run_in_repo_capture "${repo_root}" tusk-tracker "$@"
+}
+
 live_server_pid() {
   local repo_root="$1"
   local path
@@ -742,11 +760,11 @@ health_snapshot() {
     repair_result="$(ensure_backend_connection "${repo_root}")"
   fi
 
-  ready_result="$(run_json_command_in_repo "${repo_root}" "bd_ready" bd ready --json)"
-  dolt_show_result="$(run_json_command_in_repo "${repo_root}" "bd_dolt_show" bd dolt show --json)"
-  dolt_test_result="$(run_json_command_in_repo "${repo_root}" "bd_dolt_test" bd dolt test --json)"
-  dolt_result="$(run_json_command_in_repo "${repo_root}" "bd_dolt_status" bd dolt status --json)"
-  status_result="$(run_json_command_in_repo "${repo_root}" "bd_status" bd status --json)"
+  ready_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_ready" ready)"
+  dolt_show_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_backend_show" backend show)"
+  dolt_test_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_backend_test" backend test)"
+  dolt_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_backend_status" backend status)"
+  status_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_status" status)"
   runtime_json="$(backend_runtime_snapshot "${repo_root}")"
   backend_json="$(
     jq -cn \
@@ -771,11 +789,11 @@ health_snapshot() {
       checked_at: $checked_at,
       status: (if $ready.ok and $dolt_test.ok and $status.ok then "healthy" else "unhealthy" end),
       checks: {
-        bd_ready: $ready,
-        bd_dolt_show: $dolt_show,
-        bd_dolt_test: $dolt_test,
-        bd_dolt_status: $dolt,
-        bd_status: $status,
+        tracker_ready: $ready,
+        tracker_backend_show: $dolt_show,
+        tracker_backend_test: $dolt_test,
+        tracker_backend_status: $dolt,
+        tracker_status: $status,
         backend_repair: $repair
       },
       backend: $backend,
@@ -941,8 +959,8 @@ board_status_projection() {
   local ready_result
   local workspaces_result
 
-  status_result="$(run_json_command_in_repo "${repo_root}" "bd_status" bd status --json)"
-  ready_result="$(run_json_command_in_repo "${repo_root}" "bd_ready" bd ready --json)"
+  status_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_status" status)"
+  ready_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_ready" ready)"
   workspaces_result="$(
     run_lines_command_in_repo \
       "${repo_root}" \
@@ -963,8 +981,8 @@ board_status_projection() {
       ready_issues: (if $ready.ok and (($ready.output | type) == "array") then $ready.output else [] end),
       workspaces: (if $workspaces.ok and (($workspaces.output | type) == "array") then $workspaces.output else [] end),
       checks: {
-        bd_status: $status,
-        bd_ready: $ready,
+        tracker_status: $status,
+        tracker_ready: $ready,
         jj_workspace_list: $workspaces
       }
     }'
