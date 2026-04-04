@@ -40,10 +40,12 @@ codex-nix-check
 ## Tusk Skill Flow
 
 - Treat `.agents/skills/tusk/`, `.agents/skills/ops/`, and `.agents/skills/nix/` as the canonical editable sources for the shared skills carried by this repo.
-- Treat `.codex/skills/` as a `devenv.files` projection of packaged skills, not as the editable source.
+- Treat `.codex/` as the repo-local Codex home in `tusk` consumer shells and wrappers.
+- Treat `.codex/skills/` as the packaged runtime skill projection inside that repo-local Codex home, not as the editable source.
 - Prefer `devenvModules.consumer` when another flake wants the shared tusk shell surface. Prefer `devenvModules.codex` once plus any needed skill modules when the consumer needs a more custom shell assembly, and use `devenvModules.scratch` alongside that when it only wants the shared scratch policy.
-- Ignore global skill roots such as `~/.codex/skills` as editable sources in this workflow.
-- During dogfooding, it is acceptable to symlink `~/.codex/skills/tusk` to `.agents/skills/tusk/` so live Codex sessions exercise the repo-local skill copy. Keep the repo path as the source of truth and treat the global path as a projection only.
+- On first use, it is acceptable for the shell bootstrap to copy auth/config/instructions from `~/.codex/` into the repo-local `.codex/` home, but treat that as migration convenience rather than the runtime source of truth for skills.
+- Ignore global skill roots such as `~/.codex/skills` as editable or runtime skill sources in this workflow.
+- During dogfooding, it is acceptable to symlink `~/.codex/skills/tusk` to `.agents/skills/tusk/` only as a compatibility bridge for sessions that are not yet using the repo-local `.codex/` home. Keep the repo path as the source of truth and treat the global path as a projection only.
 - Do not use this repo as the home for consumer-specific skills. If a skill depends on a repo's own domain context, schemas, workflows, or policies, keep that skill in the consuming repo under its own `.agents/skills/<name>/`.
 - Only promote a skill into this repo when it is intentionally shared and generic across repos, the same way `tusk`, `ops`, and `nix` are.
 

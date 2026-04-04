@@ -75,6 +75,7 @@
             name = "codex";
             runtimeInputs = [
               beads
+              pkgs.coreutils
               pkgs.git
             ];
             text = ''
@@ -86,6 +87,8 @@
               fi
               cd "$repo_root"
               export BEADS_WORKSPACE_ROOT="$repo_root"
+              export CODEX_HOME="$repo_root/.codex"
+              sh ${./scripts/codex-home-bootstrap.sh} "$repo_root" ".codex"
 
               if [ -d .beads ]; then
                 bd ready --json >/dev/null 2>&1 || true
@@ -136,6 +139,7 @@
               ${nixpkgs.lib.concatStringsSep "\n" (
                 nixpkgs.lib.map (path: "test -L ${nixpkgs.lib.escapeShellArg path}") cfg.smokeCheck.skillChecks
               )}
+              test "$CODEX_HOME" = "$DEVENV_ROOT/.codex"
               test -n "$TUSK_SCRATCH_ROOT"
               test -n "$CARGO_TARGET_DIR"
               test -n "$TF_DATA_DIR"
@@ -234,6 +238,7 @@
                 export PATH="${repoCodex}/bin:$PATH"
                 export BEADS_WORKSPACE_ROOT="$DEVENV_ROOT"
                 echo "tusk consumer shell"
+                echo "  CODEX_HOME=$CODEX_HOME"
                 echo "  codex"
                 echo "  devenv up"
                 echo "  bd status --json"

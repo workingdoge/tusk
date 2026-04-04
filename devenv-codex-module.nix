@@ -9,6 +9,7 @@ let
   inherit (lib)
     foldl'
     mapAttrsToList
+    mkBefore
     mkIf
     mkOption
     types
@@ -19,6 +20,12 @@ let
 in
 {
   options.codex = {
+    homeRoot = mkOption {
+      type = types.str;
+      default = ".codex";
+      description = "Devenv-root-relative directory used as the repo-local Codex home.";
+    };
+
     installRoot = mkOption {
       type = types.str;
       default = ".codex/skills";
@@ -53,5 +60,10 @@ in
         }
       ) cfg.skills
     );
+
+    enterShell = mkBefore ''
+      export CODEX_HOME="$DEVENV_ROOT/${cfg.homeRoot}"
+      sh ${./scripts/codex-home-bootstrap.sh} "$DEVENV_ROOT" "${cfg.homeRoot}"
+    '';
   };
 }
