@@ -43,6 +43,7 @@ nix run .#tuskd -- close-issue --repo "$PWD" --issue-id tusk-123 --reason "compl
 nix run .#tuskd -- launch-lane --repo "$PWD" --issue-id tusk-123 --base-rev main
 nix run .#tuskd -- handoff-lane --repo "$PWD" --issue-id tusk-123 --revision <rev> --note "ready for landing"
 nix run .#tuskd -- finish-lane --repo "$PWD" --issue-id tusk-123 --outcome completed --note "workspace cleaned after handoff"
+nix run .#tuskd -- archive-lane --repo "$PWD" --issue-id tusk-123 --note "lane compacted into receipts"
 nix build .#tusk-ui
 nix run .#tusk-ui -- --help
 ```
@@ -60,6 +61,7 @@ nix run .#tusk-ui -- --help
 - `.beads/tuskd/lanes.json` holds first-class lane state for the current repo; `board-status` reads lane truth from there and derives stale-vs-live workspace observations.
 - lane records can transition to handoff state with `handoff_revision`, `handed_off_at`, and an optional `handoff_note`.
 - lane records can transition to finished state with `outcome`, `finished_at`, and an optional `finish_note`; finished lanes remain explicit even after their workspaces are removed.
+- `archive-lane` removes a finished lane from live lane state only after its workspace is gone; receipts remain the audit surface for archived lanes.
 - `crates/tusk-ui/` contains the Rust `ratatui` control-plane client crate and renders tracker, board, lane, and receipt projections from `tuskd`.
 
 ## Change Rules
@@ -92,5 +94,6 @@ nix run .#tusk-ui -- --help
 - `nix run path:.#tuskd -- handoff-lane --repo "$PWD" --issue-id <issue-id> --revision <rev> [--note "..."]` on a disposable launched lane
 - `nix run path:.#tuskd -- finish-lane --repo "$PWD" --issue-id <issue-id> --outcome <outcome> [--note "..."]` on a disposable launched or handed-off lane
 - forgetting/removing that disposable finished lane workspace causes `board-status` to keep the lane record with `observed_status = "finished"` instead of `stale`
+- `nix run path:.#tuskd -- archive-lane --repo "$PWD" --issue-id <issue-id> [--note "..."]` removes that finished lane from `board-status` once the workspace is gone
 - `nix run path:.#bd -- status --json`
 - `nix run path:.#beads -- status --json`

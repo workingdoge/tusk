@@ -15,6 +15,7 @@ Usage:
   tuskd launch-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --base-rev REV [--slug SLUG]
   tuskd handoff-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --revision REV [--note TEXT]
   tuskd finish-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --outcome OUTCOME [--note TEXT]
+  tuskd archive-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID [--note TEXT]
   tuskd serve [--repo PATH] [--socket PATH]
   tuskd query [--repo PATH] [--socket PATH] --kind KIND [--request-id ID] [--payload JSON]
 
@@ -28,6 +29,7 @@ Commands:
   launch-lane   Create one dedicated issue workspace through the coordinator action surface.
   handoff-lane  Record a lane handoff with an explicit revision.
   finish-lane   Record a terminal lane outcome without collapsing into issue closure.
+  archive-lane  Remove one finished lane from live state once its workspace is gone.
   serve         Serve the local JSON protocol over a Unix socket.
   query         Query a running tuskd socket.
 
@@ -40,6 +42,7 @@ Protocol request kinds:
   launch_lane
   handoff_lane
   finish_lane
+  archive_lane
   ping
 EOF
 }
@@ -978,6 +981,21 @@ upsert_lane_state() {
   mv "${tmp}" "${path}"
 }
 
+remove_lane_state() {
+  local repo_root="$1"
+  local issue_id="$2"
+  local path
+  local tmp
+
+  ensure_state_files "${repo_root}"
+  path="$(lanes_path "${repo_root}")"
+  tmp="$(mktemp "${path}.XXXXXX")"
+  jq --arg issue_id "${issue_id}" '
+    map(select(.issue_id != $issue_id))
+  ' "${path}" >"${tmp}"
+  mv "${tmp}" "${path}"
+}
+
 ensure_projection() {
   local repo_root="$1"
   local socket_path="$2"
@@ -1775,6 +1793,110 @@ finish_lane_transition() {
   jq -cn --argjson payload "${payload_json}" '{ok:true, payload:$payload}'
 }
 
+archive_lane_transition() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local note="${4:-}"
+  local lane_json
+  local workspace_path=""
+  local stored_status=""
+  local board_json
+  local board_summary
+  local lanes_json
+  local receipt_payload
+  local payload_json
+
+  if [ -z "${issue_id}" ]; then
+    jq -cn \
+      --arg message "archive_lane requires issue_id" \
+      '{ok:false, error:{message:$message}}'
+    return 0
+  fi
+
+  ensure_state_files "${repo_root}"
+  lane_json="$(current_lane_for_issue "${repo_root}" "${issue_id}")"
+  if [ "${lane_json}" = "null" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        error: { message: "archive_lane requires an existing lane record" }
+      }'
+    return 0
+  fi
+
+  stored_status="$(jq -r '.status // ""' <<<"${lane_json}")"
+  if [ "${stored_status}" != "finished" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg status "${stored_status}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        status: $status,
+        error: { message: "archive_lane requires a finished lane" }
+      }'
+    return 0
+  fi
+
+  workspace_path="$(jq -r '.workspace_path // ""' <<<"${lane_json}")"
+  if [ -n "${workspace_path}" ] && [ -d "${workspace_path}" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg workspace_path "${workspace_path}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        workspace_path: $workspace_path,
+        error: { message: "archive_lane requires the lane workspace to be removed first" }
+      }'
+    return 0
+  fi
+
+  remove_lane_state "${repo_root}" "${issue_id}"
+
+  tracker_status_projection "${repo_root}" "${socket_path}" >/dev/null
+  board_json="$(board_status_projection "${repo_root}")"
+  board_summary="$(jq -c '.summary // null' <<<"${board_json}")"
+  lanes_json="$(jq -c '.lanes // []' <<<"${board_json}")"
+  receipt_payload="$(
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg note "${note}" \
+      --argjson lane "${lane_json}" \
+      --argjson board_summary "${board_summary}" \
+      '{
+        issue_id: $issue_id,
+        note: $note,
+        lane: $lane,
+        board_summary: $board_summary
+      }'
+  )"
+  append_receipt "${repo_root}" "lane.archive" "${receipt_payload}"
+
+  payload_json="$(
+    jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg issue_id "${issue_id}" \
+      --arg note "${note}" \
+      --argjson archived_lane "${lane_json}" \
+      --argjson lanes "${lanes_json}" \
+      --argjson board_summary "${board_summary}" \
+      '{
+        repo_root: $repo_root,
+        issue_id: $issue_id,
+        note: $note,
+        archived_lane: $archived_lane,
+        lanes: $lanes,
+        board_summary: $board_summary
+      }'
+  )"
+
+  jq -cn --argjson payload "${payload_json}" '{ok:true, payload:$payload}'
+}
+
 respond_once() {
   local repo_root="$1"
   local socket_path="$2"
@@ -1888,6 +2010,21 @@ respond_once() {
       outcome="$(printf '%s' "${request_line}" | jq -r '.payload.outcome // ""')"
       note="$(printf '%s' "${request_line}" | jq -r '.payload.note // ""')"
       action_result="$(finish_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${outcome}" "${note}")"
+      if ! jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
+        jq -cn \
+          --arg request_id "${request_id}" \
+          --arg kind "${kind}" \
+          --arg message "$(jq -r '.error.message // "request failed"' <<<"${action_result}")" \
+          --argjson details "${action_result}" \
+          '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message, details:$details}}'
+        return 0
+      fi
+      payload="$(jq -c '.payload' <<<"${action_result}")"
+      ;;
+    archive_lane)
+      issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
+      note="$(printf '%s' "${request_line}" | jq -r '.payload.note // ""')"
+      action_result="$(archive_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${note}")"
       if ! jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
         jq -cn \
           --arg request_id "${request_id}" \
@@ -2029,6 +2166,23 @@ cmd_finish_lane() {
   local action_result
 
   action_result="$(finish_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${outcome}" "${note}")"
+  if jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
+    jq -c '.payload' <<<"${action_result}"
+    return 0
+  fi
+
+  jq -c '.' <<<"${action_result}"
+  return 1
+}
+
+cmd_archive_lane() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local note="${4:-}"
+  local action_result
+
+  action_result="$(archive_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${note}")"
   if jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
     jq -c '.payload' <<<"${action_result}"
     return 0
@@ -2225,6 +2379,10 @@ case "${command}" in
     [ -n "${issue_id_arg}" ] || fail "finish-lane requires --issue-id"
     [ -n "${outcome_arg}" ] || fail "finish-lane requires --outcome"
     cmd_finish_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${outcome_arg}" "${note_arg}"
+    ;;
+  archive-lane)
+    [ -n "${issue_id_arg}" ] || fail "archive-lane requires --issue-id"
+    cmd_archive_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${note_arg}"
     ;;
   serve)
     cmd_serve "${repo_root}" "${socket_path}"
