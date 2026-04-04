@@ -12,6 +12,7 @@ These instructions apply to `/Users/arj/dev/blackhole/tusk`.
 - Use `lib.crane` from the flake for Rust package definitions so Rust builds share the same pinned `rust-overlay` toolchain as the shell, and run packaged Rust apps via `nix build` / `nix run` instead of mutating manifests ad hoc from outside Nix.
 - `tuskd` writes repo-local service state under `.beads/tuskd/` and a host-local registry under `$TUSK_HOST_STATE_ROOT`, `$XDG_STATE_HOME/tusk`, or `~/Library/Caches/tusk` on macOS.
 - `tuskd` is the coordinator action and receipt surface; `tusk-tracker` is the internal tracker adapter seam behind it.
+- `.beads/tuskd/lanes.json` is the first-class lane state record; receipts remain the audit log of lane transitions.
 - Outside the dev shell, use `nix run .#bd -- ...` instead of an ambient host `bd`; the wrapper reads the `tuskd` service record and exports the repo-scoped Dolt endpoint before execing Beads.
 
 ## Quick Reference
@@ -54,6 +55,7 @@ nix run .#tusk-ui -- --help
 - `.agents/skills/tusk/` contains the repo-local source of truth for the `tusk` workflow skill.
 - `scripts/tusk-tracker.sh` contains the flake-owned tracker boundary; the current implementation is a `bd` adapter so `tuskd` no longer shells out to raw `bd` commands directly.
 - `scripts/tuskd.sh` contains the local control-plane service skeleton, Unix-socket protocol handler, and repo-scoped Dolt backend registry/coordination logic.
+- `.beads/tuskd/lanes.json` holds first-class lane state for the current repo; `board-status` reads lane truth from there and derives stale-vs-live workspace observations.
 - `crates/tusk-ui/` contains the Rust `ratatui` control-plane client crate.
 
 ## Change Rules
@@ -83,5 +85,6 @@ nix run .#tusk-ui -- --help
 - `nix run path:.#tuskd -- claim-issue --repo "$PWD" --issue-id <issue-id>` on a disposable issue
 - `nix run path:.#tuskd -- close-issue --repo "$PWD" --issue-id <issue-id> --reason "<reason>"` on a disposable issue
 - `nix run path:.#tuskd -- launch-lane --repo "$PWD" --issue-id <issue-id> --base-rev <rev>` on a disposable claimed issue
+- forgetting/removing that disposable lane workspace causes `board-status` to keep the lane record with `observed_status = "stale"`
 - `nix run path:.#bd -- status --json`
 - `nix run path:.#beads -- status --json`

@@ -106,6 +106,11 @@ receipts_path() {
   printf '%s/receipts.jsonl\n' "$(state_root "${repo_root}")"
 }
 
+lanes_path() {
+  local repo_root="$1"
+  printf '%s/lanes.json\n' "$(state_root "${repo_root}")"
+}
+
 default_socket_path() {
   local repo_root="$1"
   printf '%s/tuskd.sock\n' "$(state_root "${repo_root}")"
@@ -640,6 +645,10 @@ ensure_state_files() {
     printf '[]\n' >"$(leases_path "${repo_root}")"
   fi
 
+  if [ ! -f "$(lanes_path "${repo_root}")" ]; then
+    printf '[]\n' >"$(lanes_path "${repo_root}")"
+  fi
+
   touch "$(receipts_path "${repo_root}")"
 }
 
@@ -859,6 +868,7 @@ write_service_record() {
       --arg service_path "${path}" \
       --arg leases_path "$(leases_path "${repo_root}")" \
       --arg receipts_path "$(receipts_path "${repo_root}")" \
+      --arg lanes_path "$(lanes_path "${repo_root}")" \
       --arg host_state_root "$(host_state_root)" \
       --arg host_service_path "${host_path}" \
       --arg host_lock_dir "$(host_lock_dir "${repo_root}")" \
@@ -879,7 +889,8 @@ write_service_record() {
           root: $state_root,
           service: $service_path,
           leases: $leases_path,
-          receipts: $receipts_path
+          receipts: $receipts_path,
+          lanes: $lanes_path
         },
         host_registry: {
           root: $host_state_root,
@@ -922,6 +933,34 @@ append_receipt() {
     --argjson payload "${payload_json}" \
     '{timestamp:$timestamp, kind:$kind, repo_root:$repo_root, payload:$payload}' \
     >>"$(receipts_path "${repo_root}")"
+}
+
+current_lanes() {
+  local repo_root="$1"
+  local path
+
+  path="$(lanes_path "${repo_root}")"
+  if [ ! -f "${path}" ]; then
+    printf '[]\n'
+    return
+  fi
+
+  cat "${path}"
+}
+
+upsert_lane_state() {
+  local repo_root="$1"
+  local lane_json="$2"
+  local path
+  local tmp
+
+  ensure_state_files "${repo_root}"
+  path="$(lanes_path "${repo_root}")"
+  tmp="$(mktemp "${path}.XXXXXX")"
+  jq --argjson lane "${lane_json}" '
+    (map(select(.issue_id != $lane.issue_id)) + [$lane]) | sort_by(.issue_id)
+  ' "${path}" >"${tmp}"
+  mv "${tmp}" "${path}"
 }
 
 ensure_projection() {
@@ -975,51 +1014,43 @@ tracker_status_projection() {
   write_service_record "${repo_root}" "${socket_path}" "${mode}" "${pid_json}" "${health_json}" "${leases_json}"
 }
 
-lane_launches_projection() {
+lane_state_projection() {
   local repo_root="$1"
-  local lines=""
-  local launches_json="[]"
-  local filtered_json="[]"
+  local lanes_json="[]"
+  local projected_json="[]"
   local lane_json=""
   local workspace_path=""
+  local workspace_exists=false
+  local observed_status=""
 
   ensure_state_files "${repo_root}"
-  if [ -f "$(receipts_path "${repo_root}")" ]; then
-    lines="$(tail -n 200 "$(receipts_path "${repo_root}")" 2>/dev/null || true)"
-  fi
-
-  launches_json="$(
-    printf '%s' "${lines}" | jq -Rsc '
-      split("\n")
-      | map(select(length > 0) | (try fromjson catch empty))
-      | map(select(.kind == "lane.launch" and ((.payload.issue_id // "") | length > 0)))
-      | reduce .[] as $receipt ({};
-          .[$receipt.payload.issue_id] = {
-            issue_id: $receipt.payload.issue_id,
-            issue_title: ($receipt.payload.issue_title // null),
-            workspace_name: ($receipt.payload.workspace_name // null),
-            workspace_path: ($receipt.payload.workspace_path // null),
-            base_rev: ($receipt.payload.base_rev // null),
-            base_commit: ($receipt.payload.base_commit // null),
-            launched_at: $receipt.timestamp
-          })
-      | to_entries
-      | map(.value)
-      | sort_by(.issue_id)
-    '
-  )"
+  lanes_json="$(current_lanes "${repo_root}")"
 
   while IFS= read -r lane_json; do
     [ -n "${lane_json}" ] || continue
     workspace_path="$(jq -r '.workspace_path // ""' <<<"${lane_json}")"
-    [ -n "${workspace_path}" ] || continue
-    if [ -d "${workspace_path}" ]; then
-      lane_json="$(jq -c '. + {workspace_exists:true}' <<<"${lane_json}")"
-      filtered_json="$(jq -c --argjson lane "${lane_json}" '. + [$lane]' <<<"${filtered_json}")"
+    workspace_exists=false
+    if [ -n "${workspace_path}" ] && [ -d "${workspace_path}" ]; then
+      workspace_exists=true
     fi
-  done < <(jq -c '.[]' <<<"${launches_json}")
 
-  printf '%s\n' "${filtered_json}"
+    if [ "${workspace_exists}" = true ]; then
+      observed_status="$(jq -r '.status // "launched"' <<<"${lane_json}")"
+    else
+      observed_status="stale"
+    fi
+
+    lane_json="$(
+      jq -c \
+        --argjson workspace_exists "$([ "${workspace_exists}" = true ] && echo true || echo false)" \
+        --arg observed_status "${observed_status}" \
+        '. + {workspace_exists:$workspace_exists, observed_status:$observed_status}' \
+        <<<"${lane_json}"
+    )"
+    projected_json="$(jq -c --argjson lane "${lane_json}" '. + [$lane]' <<<"${projected_json}")"
+  done < <(jq -c '.[]' <<<"${lanes_json}")
+
+  printf '%s\n' "${projected_json}"
 }
 
 board_status_projection() {
@@ -1037,7 +1068,7 @@ board_status_projection() {
       "jj_workspace_list" \
       jj workspace list --ignore-working-copy --color never
   )"
-  lanes_json="$(lane_launches_projection "${repo_root}")"
+  lanes_json="$(lane_state_projection "${repo_root}")"
 
   jq -cn \
     --arg repo_root "${repo_root}" \
@@ -1275,6 +1306,7 @@ launch_lane_transition() {
   local board_json
   local board_summary
   local lanes_json
+  local lane_record
   local receipt_payload
   local payload_json
 
@@ -1421,6 +1453,28 @@ launch_lane_transition() {
       }'
     return 0
   fi
+
+  lane_record="$(
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg issue_title "${issue_title}" \
+      --arg workspace_name "${workspace_name}" \
+      --arg workspace_path "${workspace_path}" \
+      --arg base_rev "${base_rev}" \
+      --arg base_commit "${base_commit}" \
+      --arg launched_at "$(now_iso8601)" \
+      '{
+        issue_id: $issue_id,
+        issue_title: $issue_title,
+        status: "launched",
+        workspace_name: $workspace_name,
+        workspace_path: $workspace_path,
+        base_rev: $base_rev,
+        base_commit: $base_commit,
+        launched_at: $launched_at
+      }'
+  )"
+  upsert_lane_state "${repo_root}" "${lane_record}"
 
   tracker_status_projection "${repo_root}" "${socket_path}" >/dev/null
   board_json="$(board_status_projection "${repo_root}")"
