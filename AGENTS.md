@@ -45,21 +45,25 @@ nix run .#tuskd-transition-tests -- --source-repo "$PWD"
 nix run .#tuskd -- claim-issue --repo "$PWD" --issue-id tusk-123
 nix run .#tuskd -- close-issue --repo "$PWD" --issue-id tusk-123 --reason "completed in visible commit"
 nix run .#tuskd -- launch-lane --repo "$PWD" --issue-id tusk-123 --base-rev main
-nix run .#tuskd -- handoff-lane --repo "$PWD" --issue-id tusk-123 --revision <rev> --note "ready for landing"
+nix run .#tuskd -- handoff-lane --repo "$PWD" --revision <rev> --note "ready for landing"
 nix run .#tuskd -- finish-lane --repo "$PWD" --issue-id tusk-123 --outcome completed --note "workspace cleaned after handoff"
 nix run .#tuskd -- archive-lane --repo "$PWD" --issue-id tusk-123 --note "lane compacted into receipts"
 nix build .#tusk-ui
 nix run .#tusk-ui -- --help
-# in tusk-ui: b focuses the board, j/k or Up/Down move across ready issues, claimed issues, and active lanes; c claims the selected ready issue, l launches the selected claimed issue, and f finishes the selected active lane
 ```
 
 ## Repo Shape
 
-- `flake.nix` exports `lib.tusk`, `flakeModules.tusk`, the development shell, `tusk-tracker`, `tuskd`, `tusk-ui`, the installable OpenAI/Codex skill bundle, and `devenvModules.{codex,tusk-skill,ops-skill,nix-skill}` for flake consumers that want shared skill projection.
+- `flake.nix` exports `lib.tusk`, `flakeModules.tusk`, the development shell, `tusk-tracker`, `tuskd`, `tusk-ui`, the installable OpenAI/Codex skill bundle, and `devenvModules.{codex,scratch,consumer,dogfood,tusk-skill,ops-skill,nix-skill}`.
 - `tusk-flake` is the intended moving bookmark for flake consumers; once exported to Git and pushed, consumers can pin the repo with `?ref=tusk-flake` and optionally a specific revision.
 - `flake.nix` also exports a flake-owned `bd`/`beads` wrapper app so raw-shell `nix run` calls reuse repo-scoped tracker state instead of ambient host Beads configuration.
 - `flake.nix` also exports `tusk-flake-ref`, which prints the canonical `path:`, `git+file:`, and remote `git+...?...ref=` forms for this repo and reports when no publish remote is configured.
-- `devenv-codex-module.nix` contains the shared `codex.skills` option declaration and `.codex/skills` projection logic for `devenv` consumers; import it once, then compose one or more skill modules on top.
+- `devenv-codex-module.nix` owns the shared `codex.skills` option declaration, repo-local `CODEX_HOME` bootstrap, and `.codex/skills` projection logic for `devenv` consumers.
+- `devenv-scratch-module.nix` owns the shared per-repo scratch relocation policy for common build tools in consumer shells.
+- `devenvModules.consumer` is the reusable downstream shell surface: repo-local `CODEX_HOME`, explicit skill opt-in, scratch relocation, and the conservative `tusk-clean` helper.
+- `devenvModules.dogfood` is the repo's own downstream composition of `codex` plus explicit `tusk`/`ops`/`nix` skill packs.
+- `scripts/codex-home-bootstrap.sh` copies auth/config/rules from `~/.codex` only as a first-use migration into the repo-local `.codex` home.
+- `scripts/tusk-clean.sh` contains the conservative cleanup/quarantine script for rebuildable repo-local artifacts.
 - `lib.nix` contains the generic `tusk` normalization and validation logic.
 - `flake-module.nix` contains the reusable Nix module surface for `tusk`.
 - `design/` contains architecture and workflow notes that belong to `tusk` itself.
@@ -70,15 +74,23 @@ nix run .#tusk-ui -- --help
 - `scripts/tuskd.sh` contains the local control-plane service skeleton, Unix-socket protocol handler, and repo-scoped Dolt backend registry/coordination logic.
 - `scripts/tuskd-transition-tests.sh` clones an isolated colocated temp repo, replays the current lane diff onto it, and runs automated lifecycle, concurrency, and rollback checks against that repo's own flake-owned `bd`/`tuskd` surface.
 - `.beads/tuskd/lanes.json` holds first-class lane state for the current repo; `board-status` reads lane truth from there, derives stale-vs-live workspace observations, and carries ready, claimed, blocked, and deferred issue buckets alongside lanes.
-- lane records can transition to handoff state with `handoff_revision`, `handed_off_at`, and an optional `handoff_note`.
-- lane records can transition to finished state with `outcome`, `finished_at`, and an optional `finish_note`; finished lanes remain explicit even after their workspaces are removed.
-- `archive-lane` removes a finished lane from live lane state only after its workspace is gone; receipts remain the audit surface for archived lanes.
-- `crates/tusk-ui/` contains the Rust `ratatui` control-plane client crate and renders tracker, board, lane, and receipt projections from `tuskd`; the first interactive board actions are claim on a selected ready issue, launch on a selected claimed issue, and finish on a selected active lane, with `--base-rev` controlling the launch target revision.
+- `crates/tusk-ui/` contains the Rust `ratatui` control-plane client crate and renders tracker, board, lane, and receipt projections from `tuskd`.
+
+## Codex Contract
+
+- Treat `.agents/skills/*` as the editable source of truth for shared skills.
+- Treat `.codex/` as runtime state only. It is the repo-local Codex home, not the editable source of skills.
+- Bootstrap from `~/.codex` only for missing auth/config/rules; do not treat `~/.codex/skills` as runtime skill input.
+- `devenvModules.consumer` should expose zero shared skills by default. Consumers opt in explicitly with `devenvModules.tusk-skill`, `devenvModules.ops-skill`, `devenvModules.nix-skill`, or their own local `codex.skills.*.source` entries.
+- `devenvModules.dogfood` is allowed to project the shared skills explicitly because this repo authors them.
 
 ## Change Rules
 
 - Keep `tusk` core generic. Consumer-specific runtime bindings and tracker wrappers belong in the consuming repo until they clearly generalize.
-- Import `devenvModules.codex` exactly once in a consumer flake, then compose any needed skill modules such as `devenvModules.tusk-skill`, `devenvModules.ops-skill`, and `devenvModules.nix-skill` on top of it.
+- Keep consumer-context skills in the consuming repo; do not centralize them in `tusk` unless they are intentionally becoming shared infrastructure.
+- Import `devenvModules.codex` exactly once in a consumer flake, then compose `devenvModules.consumer` or explicit skill modules on top.
+- Keep the shared scratch module focused on generic environment redirection; repo-specific cleanup choices still belong in the consuming repo.
+- Keep `tusk-clean` conservative: dry-run by default, skip `.jj-workspaces/`, and quarantine instead of deleting.
 - Prefer `codex-nix-check` and a shell smoke test after changing the flake or module surface.
 - If you initialize `.beads/` here for dogfooding, treat it as this repo's own tracker, not as an extension of `config`. The tracker state is local and ignored by Git in this repo.
 
@@ -94,7 +106,6 @@ nix run .#tusk-ui -- --help
 - `nix run .#tuskd -- --help`
 - `nix build .#tusk-ui`
 - `nix run .#tusk-ui -- --help`
-- a PTY-driven `tusk-ui` session can focus the board, claim a disposable ready issue with `c`, launch it with `l`, then finish the selected active lane with `f`, after which `board-status` shows the finished lane before cleanup
 - `nix eval --raw path:.#packages.aarch64-darwin.rust-toolchain.name`
 - `nix eval --raw path:.#packages.aarch64-darwin.tusk-ui.name`
 - `nix flake metadata "git+file://$PWD?ref=tusk-flake"`
@@ -105,13 +116,5 @@ nix run .#tusk-ui -- --help
 - `nix run path:.#tuskd -- status --repo "$PWD"`
 - `nix run path:.#tuskd -- board-status --repo "$PWD"`
 - `nix run path:.#tuskd-transition-tests -- --source-repo "$PWD"`
-- disposable claimed, blocked, and deferred issues appear in the expected `board-status` sections before any lane is launched
-- `nix run path:.#tuskd -- claim-issue --repo "$PWD" --issue-id <issue-id>` on a disposable issue
-- `nix run path:.#tuskd -- close-issue --repo "$PWD" --issue-id <issue-id> --reason "<reason>"` on a disposable issue
-- `nix run path:.#tuskd -- launch-lane --repo "$PWD" --issue-id <issue-id> --base-rev <rev>` on a disposable claimed issue
-- `nix run path:.#tuskd -- handoff-lane --repo "$PWD" --issue-id <issue-id> --revision <rev> [--note "..."]` on a disposable launched lane
-- `nix run path:.#tuskd -- finish-lane --repo "$PWD" --issue-id <issue-id> --outcome <outcome> [--note "..."]` on a disposable launched or handed-off lane
-- forgetting/removing that disposable finished lane workspace causes `board-status` to keep the lane record with `observed_status = "finished"` instead of `stale`
-- `nix run path:.#tuskd -- archive-lane --repo "$PWD" --issue-id <issue-id> [--note "..."]` removes that finished lane from `board-status` once the workspace is gone
 - `nix run path:.#bd -- status --json`
 - `nix run path:.#beads -- status --json`

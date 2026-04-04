@@ -9,7 +9,9 @@ let
   inherit (lib)
     foldl'
     mapAttrsToList
+    mkBefore
     mkIf
+    mkMerge
     mkOption
     types
     ;
@@ -19,6 +21,12 @@ let
 in
 {
   options.codex = {
+    homeRoot = mkOption {
+      type = types.str;
+      default = ".codex";
+      description = "Devenv-root-relative directory used as the repo-local Codex home.";
+    };
+
     installRoot = mkOption {
       type = types.str;
       default = ".codex/skills";
@@ -42,16 +50,24 @@ in
     };
   };
 
-  config = mkIf hasSkills {
-    files = foldl' (acc: attrs: acc // attrs) { } (
-      mapAttrsToList (
-        name: skill:
-        tuskLib.mkDevenvCodexSkillFiles {
-          inherit pkgs name;
-          src = skill.source;
-          root = cfg.installRoot;
-        }
-      ) cfg.skills
-    );
-  };
+  config = mkMerge [
+    {
+      enterShell = mkBefore ''
+        export CODEX_HOME="$DEVENV_ROOT/${cfg.homeRoot}"
+        sh ${./scripts/codex-home-bootstrap.sh} "$DEVENV_ROOT" "${cfg.homeRoot}"
+      '';
+    }
+    (mkIf hasSkills {
+      files = foldl' (acc: attrs: acc // attrs) { } (
+        mapAttrsToList (
+          name: skill:
+          tuskLib.mkDevenvCodexSkillFiles {
+            inherit pkgs name;
+            src = skill.source;
+            root = cfg.installRoot;
+          }
+        ) cfg.skills
+      );
+    })
+  ];
 }

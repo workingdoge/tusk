@@ -44,6 +44,7 @@
       tuskLib = import ./lib.nix { lib = nixpkgs.lib; };
       tuskFlakeModule = import ./flake-module.nix { inherit tuskLib; };
       devenvCodexModule = import ./devenv-codex-module.nix { inherit tuskLib; };
+      devenvScratchModule = import ./devenv-scratch-module.nix;
       codexSkillSources = {
         tusk = ./.agents/skills/tusk;
         ops = ./.agents/skills/ops;
@@ -67,39 +68,238 @@
         extensions = [ "rust-src" ];
       };
       craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-      codexNixCheck = pkgs.writeShellApplication {
-        name = "codex-nix-check";
+      tuskClean = pkgs.writeShellApplication {
+        name = "tusk-clean";
         runtimeInputs = [
-          glistixPkg
-          pkgs.deadnix
-          pkgs.erlang
-          pkgs.git
-          pkgs.nix
-          pkgs.rebar3
-          pkgs.rust-analyzer
-          tuskFlakeRefPackage
-          tuskdTransitionTestsPackage
-          tuskTrackerPackage
-          rustToolchain
+          pkgs.coreutils
+          pkgs.findutils
+          pkgs.gnused
         ];
         text = ''
-          set -euo pipefail
-
-          repo_root="''${BEADS_WORKSPACE_ROOT:-''${DEVENV_ROOT:-}}"
-          if [ -z "$repo_root" ]; then
-            repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-          fi
-          cd "$repo_root"
-
-          deadnix --fail flake.nix devenv-codex-module.nix flake-module.nix lib.nix
-          nix eval --raw "path:$repo_root#packages.${system}.rust-toolchain.name" >/dev/null
-          nix eval --raw "path:$repo_root#packages.${system}.tusk-ui.name" >/dev/null
-          nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "lib.crane.buildDepsOnly is not callable"' "path:$repo_root#lib.crane.buildDepsOnly" >/dev/null
-          tusk-flake-ref --repo "$repo_root" --json >/dev/null
-          nix develop --no-pure-eval "path:$repo_root" \
-            -c sh -lc "export DEVENV_ROOT=\"$repo_root\"; export BEADS_WORKSPACE_ROOT=\"$repo_root\"; cd \"$repo_root\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null && tusk-tracker --help >/dev/null && tuskd-transition-tests --help >/dev/null && glistix --help >/dev/null && erl -eval \"erlang:halt().\" -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null && test -L .codex/skills/tusk/SKILL.md && test -L .codex/skills/ops/SKILL.md && test -L .codex/skills/ops/references/TOOLING.md && test -L .codex/skills/nix/SKILL.md && test -L .codex/skills/nix/scripts/detect-shape.py"
+          exec bash ${./scripts/tusk-clean.sh} "$@"
         '';
       };
+      consumerCodexModule =
+        {
+          lib,
+          pkgs,
+          config,
+          ...
+        }:
+        let
+          inherit (lib)
+            mkDefault
+            mkEnableOption
+            mkIf
+            mkMerge
+            mkOption
+            optional
+            optionalString
+            types
+            ;
+
+          cfg = config.tusk.consumer;
+          consumerSystem = pkgs.stdenv.hostPlatform.system;
+          consumerBeads = llm-agents.packages.${consumerSystem}.beads;
+          consumerCodex = llm-agents.packages.${consumerSystem}.codex;
+          repoCodex = pkgs.writeShellApplication {
+            name = "codex";
+            runtimeInputs = [
+              consumerBeads
+              pkgs.coreutils
+              pkgs.git
+            ];
+            text = ''
+              set -eu
+
+              tracker_root="''${BEADS_WORKSPACE_ROOT:-''${DEVENV_ROOT:-}}"
+              if [ -z "$tracker_root" ]; then
+                tracker_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+              fi
+              export BEADS_WORKSPACE_ROOT="$tracker_root"
+              export CODEX_HOME="$tracker_root/.codex"
+              sh ${./scripts/codex-home-bootstrap.sh} "$tracker_root" ".codex"
+
+              if [ -d "$tracker_root/.beads" ]; then
+                (
+                  cd "$tracker_root"
+                  bd ready --json >/dev/null 2>&1 || true
+                )
+              fi
+
+              exec ${consumerCodex}/bin/codex "$@"
+            '';
+          };
+          codexNixCheck = pkgs.writeShellApplication {
+            name = "codex-nix-check";
+            runtimeInputs = [
+              pkgs.deadnix
+              pkgs.git
+              pkgs.nix
+            ];
+            text = ''
+              set -euo pipefail
+
+              repo_root="''${BEADS_WORKSPACE_ROOT:-''${DEVENV_ROOT:-}}"
+              if [ -z "$repo_root" ]; then
+                repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+              fi
+              cd "$repo_root"
+
+              ${optionalString (cfg.smokeCheck.deadnixTargets != [ ]) ''
+                deadnix --fail ${nixpkgs.lib.escapeShellArgs cfg.smokeCheck.deadnixTargets}
+              ''}
+
+              check_cmd="$(cat <<'EOF'
+              cd "$DEVENV_ROOT"
+              bd version >/dev/null
+              jj --version >/dev/null
+              jq --version >/dev/null
+              dolt version >/dev/null
+              codex --help >/dev/null
+              tusk-clean --help >/dev/null
+              ${nixpkgs.lib.concatStringsSep "\n" (
+                nixpkgs.lib.map (path: "test -L ${nixpkgs.lib.escapeShellArg path}") cfg.smokeCheck.skillChecks
+              )}
+              test "$CODEX_HOME" = "$DEVENV_ROOT/.codex"
+              test -n "$TUSK_SCRATCH_ROOT"
+              test -n "$CARGO_TARGET_DIR"
+              test -n "$TF_DATA_DIR"
+              test -n "$UV_CACHE_DIR"
+              test -n "$PIP_CACHE_DIR"
+              test -d "$TUSK_SCRATCH_ROOT"
+              ${cfg.smokeCheck.extraChecks}
+              EOF
+              )"
+
+              nix develop --no-pure-eval "path:$repo_root" -c sh -lc "$check_cmd"
+            '';
+          };
+        in
+        {
+          imports = [
+            devenvCodexModule
+            devenvScratchModule
+          ];
+
+          options.tusk.consumer = {
+            enable = mkEnableOption "the shared tusk devenv consumer surface";
+
+            beadsDolt.enable = mkOption {
+              type = types.bool;
+              default = true;
+              description = "Run the shared Beads Dolt process when .beads/ exists.";
+            };
+
+            extraPackages = mkOption {
+              type = types.listOf types.package;
+              default = [ ];
+              description = "Additional packages to append to the shared consumer shell.";
+            };
+
+            extraEnterShell = mkOption {
+              type = types.lines;
+              default = "";
+              description = "Extra shell lines appended after the shared consumer banner.";
+            };
+
+            smokeCheck = {
+              enable = mkOption {
+                type = types.bool;
+                default = true;
+                description = "Expose codex-nix-check in the shared consumer shell.";
+              };
+
+              deadnixTargets = mkOption {
+                type = types.listOf types.str;
+                default = [ "flake.nix" ];
+                description = "Paths passed to deadnix by codex-nix-check before the shell smoke test.";
+              };
+
+              skillChecks = mkOption {
+                type = types.listOf types.str;
+                default = [ ];
+                description = "Projected skill files that codex-nix-check must see in the shell.";
+              };
+
+              extraChecks = mkOption {
+                type = types.lines;
+                default = "";
+                description = "Additional shell assertions appended inside codex-nix-check.";
+              };
+            };
+          };
+
+          config = mkIf cfg.enable (mkMerge [
+            {
+              tusk.scratch.enable = mkDefault true;
+
+              packages =
+                [
+                  consumerBeads
+                  pkgs.deadnix
+                  pkgs.direnv
+                  pkgs.dolt
+                  pkgs.git
+                  pkgs.jujutsu
+                  pkgs.jq
+                  pkgs.nil
+                  pkgs.nix-output-monitor
+                  pkgs.nix-tree
+                  pkgs.nixd
+                  pkgs.nixfmt
+                  pkgs.ripgrep
+                  pkgs.statix
+                  repoCodex
+                  tuskClean
+                ]
+                ++ optional cfg.smokeCheck.enable codexNixCheck
+                ++ cfg.extraPackages;
+
+              enterShell = ''
+                export PATH="${repoCodex}/bin:$PATH"
+                export BEADS_WORKSPACE_ROOT="$DEVENV_ROOT"
+                echo "tusk consumer shell"
+                echo "  CODEX_HOME=$CODEX_HOME"
+                echo "  codex"
+                echo "  devenv up"
+                echo "  bd status --json"
+                echo "  bd ready --json"
+                echo "  jj st"
+                ${optionalString cfg.smokeCheck.enable ''
+                  echo "  codex-nix-check"
+                ''}
+                echo "  tusk-clean"
+                echo "  nix develop --no-pure-eval path:. -c sh -lc 'cd \"$DEVENV_ROOT\" && bd version && jj --version && dolt version'"
+                ${cfg.extraEnterShell}
+              '';
+            }
+            (mkIf cfg.beadsDolt.enable {
+              processes.beads-dolt.exec = ''
+                set -euo pipefail
+                cd "$DEVENV_ROOT"
+
+                if [ ! -d .beads ]; then
+                  echo "beads-dolt: skipping, .beads/ is missing"
+                  exit 0
+                fi
+
+                bd dolt start >/dev/null
+                echo "beads-dolt: dolt server started"
+
+                cleanup() {
+                  bd dolt stop >/dev/null 2>&1 || true
+                }
+
+                trap cleanup EXIT INT TERM
+
+                while true; do
+                  sleep 86400
+                done
+              '';
+            })
+          ]);
+        };
       tuskTrackerPackage = pkgs.writeShellApplication {
         name = "tusk-tracker";
         runtimeInputs = [
@@ -156,6 +356,7 @@
       repoCodex = pkgs.writeShellApplication {
         name = "codex";
         runtimeInputs = [
+          pkgs.coreutils
           pkgs.git
           repoBeads
         ];
@@ -167,6 +368,8 @@
             tracker_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
           fi
           export BEADS_WORKSPACE_ROOT="$tracker_root"
+          export CODEX_HOME="$tracker_root/.codex"
+          sh ${./scripts/codex-home-bootstrap.sh} "$tracker_root" ".codex"
 
           if [ -d "$tracker_root/.beads" ]; then
             (
@@ -201,6 +404,75 @@
           cargoArtifacts = tuskUiCargoArtifacts;
         }
       );
+      codexNixCheck = pkgs.writeShellApplication {
+        name = "codex-nix-check";
+        runtimeInputs = [
+          glistixPkg
+          pkgs.deadnix
+          pkgs.erlang
+          pkgs.git
+          pkgs.nix
+          pkgs.rebar3
+          pkgs.rust-analyzer
+          tuskClean
+          tuskFlakeRefPackage
+          tuskTrackerPackage
+          tuskdTransitionTestsPackage
+          rustToolchain
+        ];
+        text = ''
+          set -euo pipefail
+
+          repo_root="''${BEADS_WORKSPACE_ROOT:-''${DEVENV_ROOT:-}}"
+          if [ -z "$repo_root" ]; then
+            repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+          fi
+          cd "$repo_root"
+
+          deadnix --fail flake.nix devenv-codex-module.nix devenv-scratch-module.nix flake-module.nix lib.nix
+          nix eval --raw "path:$repo_root#packages.${system}.rust-toolchain.name" >/dev/null
+          nix eval --raw "path:$repo_root#packages.${system}.tusk-ui.name" >/dev/null
+          nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "lib.crane.buildDepsOnly is not callable"' "path:$repo_root#lib.crane.buildDepsOnly" >/dev/null
+          tusk-flake-ref --repo "$repo_root" --json >/dev/null
+          nix develop --no-pure-eval "path:$repo_root" \
+            -c sh -lc "export DEVENV_ROOT=\"$repo_root\"; export BEADS_WORKSPACE_ROOT=\"$repo_root\"; cd \"$repo_root\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null && tusk-clean --help >/dev/null && tusk-tracker --help >/dev/null && tuskd-transition-tests --help >/dev/null && glistix --help >/dev/null && erl -eval \"erlang:halt().\" -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null && test \"$CODEX_HOME\" = \"$repo_root/.codex\" && test -L .codex/skills/tusk/SKILL.md && test -L .codex/skills/ops/SKILL.md && test -L .codex/skills/ops/references/TOOLING.md && test -L .codex/skills/nix/SKILL.md && test -L .codex/skills/nix/scripts/detect-shape.py"
+          nix eval --raw --expr '
+            let
+              flake = builtins.getFlake "path:'"$repo_root"'";
+              pkgs = flake.inputs.nixpkgs.legacyPackages.${builtins.currentSystem};
+              consumer = flake.inputs.devenv.lib.mkShell {
+                inherit (flake) inputs;
+                inherit pkgs;
+                modules = [
+                  flake.devenvModules.consumer
+                  {
+                    tusk.consumer.enable = true;
+                    tusk.consumer.smokeCheck.enable = false;
+                  }
+                ];
+              };
+              dogfood = flake.inputs.devenv.lib.mkShell {
+                inherit (flake) inputs;
+                inherit pkgs;
+                modules = [ flake.devenvModules.dogfood ];
+              };
+              consumerFiles = consumer.config.files or { };
+              dogfoodFiles = dogfood.config.files or { };
+            in
+            if
+              (! builtins.hasAttr ".codex/skills/tusk/SKILL.md" consumerFiles)
+              && (! builtins.hasAttr ".codex/skills/ops/SKILL.md" consumerFiles)
+              && (! builtins.hasAttr ".codex/skills/nix/SKILL.md" consumerFiles)
+              && builtins.hasAttr ".codex/skills/tusk/SKILL.md" dogfoodFiles
+              && builtins.hasAttr ".codex/skills/ops/SKILL.md" dogfoodFiles
+              && builtins.hasAttr ".codex/skills/nix/SKILL.md" dogfoodFiles
+            then
+              "ok"
+            else
+              throw "consumer/dogfood skill contract mismatch"
+          ' >/dev/null
+        '';
+      };
       installTuskOpenaiSkill = pkgs.writeShellApplication {
         name = "install-tusk-openai-skill";
         runtimeInputs = [ pkgs.coreutils ];
@@ -217,7 +489,7 @@
           echo "Installed tusk skill to $target_dir"
         '';
       };
-      devShellModule =
+      dogfoodModule =
         { ... }:
         {
           imports = [
@@ -252,6 +524,7 @@
             pkgs.socat
             pkgs.statix
             repoCodex
+            tuskClean
             tuskFlakeRefPackage
             tuskTrackerPackage
             tuskdPackage
@@ -262,13 +535,15 @@
           enterShell = ''
             export PATH="${repoCodex}/bin:$PATH"
             export BEADS_WORKSPACE_ROOT="$DEVENV_ROOT"
-            echo "tusk dev shell"
+            echo "tusk dogfood shell"
+            echo "  CODEX_HOME=$CODEX_HOME"
             echo "  codex"
             echo "  devenv up"
             echo "  bd status --json"
             echo "  bd ready --json"
             echo "  jj st"
             echo "  codex-nix-check"
+            echo "  tusk-clean"
             echo "  glistix --help"
             echo "  cargo --version"
             echo "  tusk-flake-ref --json"
@@ -308,6 +583,10 @@
       };
       devenvModules = {
         codex = devenvCodexModule;
+        scratch = devenvScratchModule;
+        consumer = consumerCodexModule;
+        default = consumerCodexModule;
+        dogfood = dogfoodModule;
         tusk-skill = devenvTuskSkillModule;
         ops-skill = devenvOpsSkillModule;
         nix-skill = devenvNixSkillModule;
@@ -318,6 +597,7 @@
         rust-toolchain = rustToolchain;
         bd = repoBeads;
         beads = repoBeads;
+        tusk-clean = tuskClean;
         tusk-flake-ref = tuskFlakeRefPackage;
         tusk-tracker = tuskTrackerPackage;
         tuskd-transition-tests = tuskdTransitionTestsPackage;
@@ -346,6 +626,10 @@
           type = "app";
           program = "${installTuskOpenaiSkill}/bin/install-tusk-openai-skill";
         };
+        tusk-clean = {
+          type = "app";
+          program = "${tuskClean}/bin/tusk-clean";
+        };
         tusk-flake-ref = {
           type = "app";
           program = "${tuskFlakeRefPackage}/bin/tusk-flake-ref";
@@ -370,7 +654,7 @@
 
       devShells.${system}.default = devenv.lib.mkShell {
         inherit inputs pkgs;
-        modules = [ devShellModule ];
+        modules = [ dogfoodModule ];
       };
 
       formatter.${system} = pkgs.nixfmt;
