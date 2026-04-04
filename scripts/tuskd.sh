@@ -13,6 +13,7 @@ Usage:
   tuskd claim-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID
   tuskd close-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON
   tuskd launch-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --base-rev REV [--slug SLUG]
+  tuskd handoff-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --revision REV [--note TEXT]
   tuskd serve [--repo PATH] [--socket PATH]
   tuskd query [--repo PATH] [--socket PATH] --kind KIND [--request-id ID] [--payload JSON]
 
@@ -24,6 +25,7 @@ Commands:
   claim-issue   Claim one issue through the coordinator action surface.
   close-issue   Close one issue through the coordinator action surface.
   launch-lane   Create one dedicated issue workspace through the coordinator action surface.
+  handoff-lane  Record a lane handoff with an explicit revision.
   serve         Serve the local JSON protocol over a Unix socket.
   query         Query a running tuskd socket.
 
@@ -34,6 +36,7 @@ Protocol request kinds:
   claim_issue
   close_issue
   launch_lane
+  handoff_lane
   ping
 EOF
 }
@@ -948,6 +951,15 @@ current_lanes() {
   cat "${path}"
 }
 
+current_lane_for_issue() {
+  local repo_root="$1"
+  local issue_id="$2"
+
+  jq -c --arg issue_id "${issue_id}" '
+    map(select(.issue_id == $issue_id)) | .[0] // null
+  ' <<<"$(current_lanes "${repo_root}")"
+}
+
 upsert_lane_state() {
   local repo_root="$1"
   local lane_json="$2"
@@ -1532,6 +1544,130 @@ launch_lane_transition() {
   jq -cn --argjson payload "${payload_json}" '{ok:true, payload:$payload}'
 }
 
+handoff_lane_transition() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local revision="$4"
+  local note="${5:-}"
+  local lane_json
+  local revision_lookup_output=""
+  local revision_lookup_exit=0
+  local resolved_revision=""
+  local updated_lane_json
+  local board_json
+  local board_summary
+  local lanes_json
+  local receipt_payload
+  local payload_json
+
+  if [ -z "${issue_id}" ]; then
+    jq -cn \
+      --arg message "handoff_lane requires issue_id" \
+      '{ok:false, error:{message:$message}}'
+    return 0
+  fi
+
+  if [ -z "${revision}" ]; then
+    jq -cn \
+      --arg message "handoff_lane requires revision" \
+      '{ok:false, error:{message:$message}}'
+    return 0
+  fi
+
+  ensure_state_files "${repo_root}"
+  lane_json="$(current_lane_for_issue "${repo_root}" "${issue_id}")"
+  if [ "${lane_json}" = "null" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        error: { message: "handoff_lane requires an existing lane record" }
+      }'
+    return 0
+  fi
+
+  if revision_lookup_output="$(run_in_repo_capture "${repo_root}" jj --repository "${repo_root}" log -r "${revision}" --no-graph -T 'commit_id ++ "\n"')"; then
+    revision_lookup_exit=0
+  else
+    revision_lookup_exit=$?
+  fi
+  resolved_revision="$(printf '%s' "${revision_lookup_output}" | awk 'NF { print; exit }')"
+  if [ "${revision_lookup_exit}" -ne 0 ] || [ -z "${resolved_revision}" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg revision "${revision}" \
+      --arg output "${revision_lookup_output}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        revision: $revision,
+        error: { message: "revision did not resolve to a commit" },
+        output: $output
+      }'
+    return 0
+  fi
+
+  updated_lane_json="$(
+    jq -c \
+      --arg status "handoff" \
+      --arg handoff_revision "${resolved_revision}" \
+      --arg handed_off_at "$(now_iso8601)" \
+      --arg handoff_note "${note}" \
+      '(. + {
+        status: $status,
+        handoff_revision: $handoff_revision,
+        handed_off_at: $handed_off_at
+      }) | if ($handoff_note | length) > 0 then . + {handoff_note:$handoff_note} else del(.handoff_note) end' \
+      <<<"${lane_json}"
+  )"
+  upsert_lane_state "${repo_root}" "${updated_lane_json}"
+
+  tracker_status_projection "${repo_root}" "${socket_path}" >/dev/null
+  board_json="$(board_status_projection "${repo_root}")"
+  board_summary="$(jq -c '.summary // null' <<<"${board_json}")"
+  lanes_json="$(jq -c '.lanes // []' <<<"${board_json}")"
+  receipt_payload="$(
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg revision "${resolved_revision}" \
+      --arg note "${note}" \
+      --argjson lane "${updated_lane_json}" \
+      --argjson board_summary "${board_summary}" \
+      '{
+        issue_id: $issue_id,
+        revision: $revision,
+        note: $note,
+        lane: $lane,
+        board_summary: $board_summary
+      }'
+  )"
+  append_receipt "${repo_root}" "lane.handoff" "${receipt_payload}"
+
+  payload_json="$(
+    jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg issue_id "${issue_id}" \
+      --arg revision "${resolved_revision}" \
+      --arg note "${note}" \
+      --argjson lane "${updated_lane_json}" \
+      --argjson lanes "${lanes_json}" \
+      --argjson board_summary "${board_summary}" \
+      '{
+        repo_root: $repo_root,
+        issue_id: $issue_id,
+        revision: $revision,
+        note: $note,
+        lane: $lane,
+        lanes: $lanes,
+        board_summary: $board_summary
+      }'
+  )"
+
+  jq -cn --argjson payload "${payload_json}" '{ok:true, payload:$payload}'
+}
+
 respond_once() {
   local repo_root="$1"
   local socket_path="$2"
@@ -1543,6 +1679,8 @@ respond_once() {
   local reason=""
   local base_rev=""
   local slug=""
+  local revision=""
+  local note=""
   local action_result=""
 
   if ! IFS= read -r request_line; then
@@ -1610,6 +1748,22 @@ respond_once() {
       base_rev="$(printf '%s' "${request_line}" | jq -r '.payload.base_rev // ""')"
       slug="$(printf '%s' "${request_line}" | jq -r '.payload.slug // ""')"
       action_result="$(launch_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${base_rev}" "${slug}")"
+      if ! jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
+        jq -cn \
+          --arg request_id "${request_id}" \
+          --arg kind "${kind}" \
+          --arg message "$(jq -r '.error.message // "request failed"' <<<"${action_result}")" \
+          --argjson details "${action_result}" \
+          '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message, details:$details}}'
+        return 0
+      fi
+      payload="$(jq -c '.payload' <<<"${action_result}")"
+      ;;
+    handoff_lane)
+      issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
+      revision="$(printf '%s' "${request_line}" | jq -r '.payload.revision // ""')"
+      note="$(printf '%s' "${request_line}" | jq -r '.payload.note // ""')"
+      action_result="$(handoff_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${revision}" "${note}")"
       if ! jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
         jq -cn \
           --arg request_id "${request_id}" \
@@ -1724,6 +1878,24 @@ cmd_launch_lane() {
   return 1
 }
 
+cmd_handoff_lane() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local revision="$4"
+  local note="${5:-}"
+  local action_result
+
+  action_result="$(handoff_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${revision}" "${note}")"
+  if jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
+    jq -c '.payload' <<<"${action_result}"
+    return 0
+  fi
+
+  jq -c '.' <<<"${action_result}"
+  return 1
+}
+
 cmd_serve() {
   local repo_root="$1"
   local socket_path="$2"
@@ -1795,6 +1967,8 @@ issue_id_arg=""
 reason_arg=""
 base_rev_arg=""
 slug_arg=""
+revision_arg=""
+note_arg=""
 payload_arg="null"
 
 while [ $# -gt 0 ]; do
@@ -1837,6 +2011,16 @@ while [ $# -gt 0 ]; do
     --slug)
       [ $# -ge 2 ] || fail "--slug requires a value"
       slug_arg="$2"
+      shift 2
+      ;;
+    --revision)
+      [ $# -ge 2 ] || fail "--revision requires a value"
+      revision_arg="$2"
+      shift 2
+      ;;
+    --note)
+      [ $# -ge 2 ] || fail "--note requires a value"
+      note_arg="$2"
       shift 2
       ;;
     --payload)
@@ -1883,6 +2067,11 @@ case "${command}" in
     [ -n "${issue_id_arg}" ] || fail "launch-lane requires --issue-id"
     [ -n "${base_rev_arg}" ] || fail "launch-lane requires --base-rev"
     cmd_launch_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${base_rev_arg}" "${slug_arg}"
+    ;;
+  handoff-lane)
+    [ -n "${issue_id_arg}" ] || fail "handoff-lane requires --issue-id"
+    [ -n "${revision_arg}" ] || fail "handoff-lane requires --revision"
+    cmd_handoff_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${revision_arg}" "${note_arg}"
     ;;
   serve)
     cmd_serve "${repo_root}" "${socket_path}"
