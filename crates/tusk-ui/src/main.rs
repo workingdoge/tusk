@@ -22,6 +22,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 const DEFAULT_REFRESH_MS: u64 = 5_000;
+const DEFAULT_BASE_REV: &str = "main";
 
 fn main() -> Result<()> {
     let cli = Cli::parse(env::args_os())?;
@@ -30,7 +31,7 @@ fn main() -> Result<()> {
         .socket
         .unwrap_or_else(|| default_socket_path(&repo_root));
     let client = ProtocolClient::new(repo_root, socket_path);
-    let mut app = App::new(client, Duration::from_millis(cli.refresh_ms));
+    let mut app = App::new(client, Duration::from_millis(cli.refresh_ms), cli.base_rev);
     app.refresh();
     run_tui(app)
 }
@@ -77,6 +78,7 @@ struct Cli {
     repo: Option<PathBuf>,
     socket: Option<PathBuf>,
     refresh_ms: u64,
+    base_rev: String,
 }
 
 impl Cli {
@@ -88,6 +90,7 @@ impl Cli {
         let mut repo = None;
         let mut socket = None;
         let mut refresh_ms = DEFAULT_REFRESH_MS;
+        let mut base_rev = DEFAULT_BASE_REV.to_owned();
 
         let mut values = args.into_iter().map(Into::into);
         let _program = values.next();
@@ -109,6 +112,10 @@ impl Cli {
                         .parse()
                         .context("parse --refresh-ms")?;
                 }
+                "--base-rev" => {
+                    let value = values.next().context("--base-rev requires a revision")?;
+                    base_rev = value.to_string_lossy().into_owned();
+                }
                 "-h" | "--help" | "help" => {
                     print_help();
                     std::process::exit(0);
@@ -121,6 +128,7 @@ impl Cli {
             repo,
             socket,
             refresh_ms,
+            base_rev,
         })
     }
 }
@@ -129,7 +137,7 @@ fn print_help() {
     println!(
         "\
 Usage:
-  tusk-ui [--repo PATH] [--socket PATH] [--refresh-ms N]
+  tusk-ui [--repo PATH] [--socket PATH] [--refresh-ms N] [--base-rev REV]
 
 Keys:
   q            quit
@@ -138,9 +146,10 @@ Keys:
   Tab          focus next pane
   Shift+Tab    focus previous pane
   t / b / e    focus tracker, board, or receipts
-  j / k        move ready-issue selection in the board
-  Up / Down    move ready-issue selection in the board
+  j / k        move actionable-issue selection in the board
+  Up / Down    move actionable-issue selection in the board
   c            claim the selected ready issue from the board
+  l            launch a lane for the selected claimed issue
 "
     );
 }
@@ -201,6 +210,13 @@ impl ProtocolClient {
 
     fn claim_issue(&self, issue_id: &str) -> Result<ClaimIssuePayload> {
         self.query_with_payload("claim_issue", json!({ "issue_id": issue_id }))
+    }
+
+    fn launch_lane(&self, issue_id: &str, base_rev: &str) -> Result<LaunchLanePayload> {
+        self.query_with_payload(
+            "launch_lane",
+            json!({ "issue_id": issue_id, "base_rev": base_rev }),
+        )
     }
 
     fn query<T>(&self, kind: &str) -> Result<T>
@@ -271,26 +287,28 @@ fn now_label() -> String {
 struct App {
     client: ProtocolClient,
     refresh_interval: Duration,
+    default_base_rev: String,
     last_refresh_started: Instant,
     status_line: String,
     should_quit: bool,
     focus: Focus,
-    selected_ready_issue_id: Option<String>,
+    selected_action_issue_id: Option<String>,
     tracker: PanelState<TrackerStatus>,
     board: PanelState<BoardStatus>,
     receipts: PanelState<ReceiptsStatus>,
 }
 
 impl App {
-    fn new(client: ProtocolClient, refresh_interval: Duration) -> Self {
+    fn new(client: ProtocolClient, refresh_interval: Duration, default_base_rev: String) -> Self {
         Self {
             client,
             refresh_interval,
+            default_base_rev,
             last_refresh_started: Instant::now() - refresh_interval,
             status_line: "press r to refresh, b to focus the board, q to quit".to_owned(),
             should_quit: false,
             focus: Focus::Tracker,
-            selected_ready_issue_id: None,
+            selected_action_issue_id: None,
             tracker: PanelState::default(),
             board: PanelState::default(),
             receipts: PanelState::default(),
@@ -333,12 +351,12 @@ impl App {
 
     fn sync_board_selection(&mut self) {
         let Some(board) = self.board.value.as_ref() else {
-            self.selected_ready_issue_id = None;
+            self.selected_action_issue_id = None;
             return;
         };
 
-        self.selected_ready_issue_id =
-            normalized_ready_selection(board, self.selected_ready_issue_id.as_deref());
+        self.selected_action_issue_id =
+            normalized_action_selection(board, self.selected_action_issue_id.as_deref());
     }
 
     fn move_board_selection(&mut self, delta: isize) {
@@ -348,30 +366,77 @@ impl App {
         };
 
         let Some(next) =
-            step_ready_selection(board, self.selected_ready_issue_id.as_deref(), delta)
+            step_action_selection(board, self.selected_action_issue_id.as_deref(), delta)
         else {
-            self.selected_ready_issue_id = None;
-            self.status_line = "no ready issues to select".to_owned();
+            self.selected_action_issue_id = None;
+            self.status_line = "no actionable issues to select".to_owned();
             return;
         };
 
-        self.selected_ready_issue_id = Some(next.clone());
+        self.selected_action_issue_id = Some(next.clone());
         self.status_line = format!("selected {next}");
     }
 
-    fn claim_selected_ready_issue(&mut self) {
-        let Some(issue_id) = self.selected_ready_issue_id.clone() else {
+    fn claim_selected_issue(&mut self) {
+        let Some(issue_id) = self.selected_action_issue_id.clone() else {
             self.status_line = "no ready issue selected to claim".to_owned();
             return;
         };
+        let Some(board) = self.board.value.as_ref() else {
+            self.status_line = "board data is unavailable".to_owned();
+            return;
+        };
+        let Some(actionable) = selected_actionable_issue(board, Some(issue_id.as_str())) else {
+            self.status_line = "selected issue is no longer actionable".to_owned();
+            return;
+        };
+        if actionable.bucket != ActionableBucket::Ready {
+            self.status_line = format!("selected issue {issue_id} is not ready to claim");
+            return;
+        }
 
         match self.client.claim_issue(&issue_id) {
             Ok(payload) => {
                 self.refresh();
-                self.status_line = format!("claimed {}", payload.issue_id);
+                self.status_line = format!(
+                    "claimed {}; launch base is {}",
+                    payload.issue_id, self.default_base_rev
+                );
             }
             Err(error) => {
                 self.status_line = format!("claim failed for {issue_id}: {error:#}");
+            }
+        }
+    }
+
+    fn launch_selected_issue(&mut self) {
+        let Some(issue_id) = self.selected_action_issue_id.clone() else {
+            self.status_line = "no claimed issue selected to launch".to_owned();
+            return;
+        };
+        let Some(board) = self.board.value.as_ref() else {
+            self.status_line = "board data is unavailable".to_owned();
+            return;
+        };
+        let Some(actionable) = selected_actionable_issue(board, Some(issue_id.as_str())) else {
+            self.status_line = "selected issue is no longer actionable".to_owned();
+            return;
+        };
+        if actionable.bucket != ActionableBucket::Claimed {
+            self.status_line = format!("selected issue {issue_id} is not claimed yet");
+            return;
+        }
+
+        match self.client.launch_lane(&issue_id, &self.default_base_rev) {
+            Ok(payload) => {
+                self.refresh();
+                self.status_line = format!(
+                    "launched {} in {} from {}",
+                    payload.issue_id, payload.workspace_name, payload.base_rev
+                );
+            }
+            Err(error) => {
+                self.status_line = format!("launch failed for {issue_id}: {error:#}");
             }
         }
     }
@@ -382,7 +447,8 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true
             }
-            KeyCode::Char('c') if self.focus == Focus::Board => self.claim_selected_ready_issue(),
+            KeyCode::Char('c') if self.focus == Focus::Board => self.claim_selected_issue(),
+            KeyCode::Char('l') if self.focus == Focus::Board => self.launch_selected_issue(),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('p') => self.ping(),
             KeyCode::Char('t') => self.focus = Focus::Tracker,
@@ -471,6 +537,13 @@ struct ProtocolError {
 #[derive(Debug, Deserialize)]
 struct ClaimIssuePayload {
     issue_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LaunchLanePayload {
+    issue_id: String,
+    workspace_name: String,
+    base_rev: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -629,7 +702,7 @@ fn render(frame: &mut Frame, app: &App) {
             }),
             Span::raw("  "),
             Span::styled(
-                "t/b/e focus  Tab cycle  j/k move  c claim  r refresh  p ping  q quit",
+                "t/b/e focus  Tab cycle  j/k move  c claim  l launch  r refresh  p ping  q quit",
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -659,7 +732,7 @@ fn render_tracker(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
 fn render_board(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     let block = pane_block("Board", app.focus == Focus::Board);
     let lines = match (&app.board.value, &app.board.error) {
-        (Some(board), _) => board_lines(board, app.selected_ready_issue_id.as_deref()),
+        (Some(board), _) => board_lines(board, app.selected_action_issue_id.as_deref()),
         (_, Some(error)) => error_lines(error),
         _ => vec![Line::from("waiting for board data")],
     };
@@ -757,7 +830,7 @@ fn tracker_lines(tracker: &TrackerStatus) -> Vec<Line<'static>> {
     lines
 }
 
-fn board_lines(board: &BoardStatus, selected_ready_issue_id: Option<&str>) -> Vec<Line<'static>> {
+fn board_lines(board: &BoardStatus, selected_action_issue_id: Option<&str>) -> Vec<Line<'static>> {
     let mut lines = vec![
         kv_line("repo", board.repo_root.clone()),
         kv_line("updated", board.generated_at.clone()),
@@ -774,11 +847,16 @@ fn board_lines(board: &BoardStatus, selected_ready_issue_id: Option<&str>) -> Ve
         &mut lines,
         "ready issues",
         &board.ready_issues,
-        selected_ready_issue_id,
+        selected_action_issue_id,
     );
 
     lines.push(Line::from(""));
-    append_issue_section(&mut lines, "claimed issues", &board.claimed_issues, None);
+    append_issue_section(
+        &mut lines,
+        "claimed issues",
+        &board.claimed_issues,
+        selected_action_issue_id,
+    );
 
     lines.push(Line::from(""));
     append_issue_section(&mut lines, "blocked issues", &board.blocked_issues, None);
@@ -839,54 +917,84 @@ fn issue_line(issue: &BoardIssue, selected_issue_id: Option<&str>) -> Line<'stat
     Line::from(Span::styled(text, style))
 }
 
-fn normalized_ready_selection(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActionableBucket {
+    Ready,
+    Claimed,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ActionableIssueRef<'a> {
+    bucket: ActionableBucket,
+    issue: &'a BoardIssue,
+}
+
+fn actionable_issues(board: &BoardStatus) -> Vec<ActionableIssueRef<'_>> {
+    let mut issues = Vec::with_capacity(board.ready_issues.len() + board.claimed_issues.len());
+    issues.extend(board.ready_issues.iter().map(|issue| ActionableIssueRef {
+        bucket: ActionableBucket::Ready,
+        issue,
+    }));
+    issues.extend(board.claimed_issues.iter().map(|issue| ActionableIssueRef {
+        bucket: ActionableBucket::Claimed,
+        issue,
+    }));
+    issues
+}
+
+fn selected_actionable_issue<'a>(
+    board: &'a BoardStatus,
+    selected_issue_id: Option<&str>,
+) -> Option<ActionableIssueRef<'a>> {
+    let selected_issue_id = selected_issue_id?;
+    actionable_issues(board)
+        .into_iter()
+        .find(|actionable| actionable.issue.id == selected_issue_id)
+}
+
+fn normalized_action_selection(
     board: &BoardStatus,
     selected_issue_id: Option<&str>,
 ) -> Option<String> {
-    if board.ready_issues.is_empty() {
+    let actionable = actionable_issues(board);
+    if actionable.is_empty() {
         return None;
     }
 
-    if let Some(selected_issue_id) = selected_issue_id {
-        if board
-            .ready_issues
-            .iter()
-            .any(|issue| issue.id == selected_issue_id)
-        {
-            return Some(selected_issue_id.to_owned());
-        }
+    if let Some(selected) = selected_actionable_issue(board, selected_issue_id) {
+        return Some(selected.issue.id.clone());
     }
 
-    Some(board.ready_issues[0].id.clone())
+    Some(actionable[0].issue.id.clone())
 }
 
-fn step_ready_selection(
+fn step_action_selection(
     board: &BoardStatus,
     selected_issue_id: Option<&str>,
     delta: isize,
 ) -> Option<String> {
-    if board.ready_issues.is_empty() {
+    let actionable = actionable_issues(board);
+    if actionable.is_empty() {
         return None;
     }
 
     let current_index = selected_issue_id
         .and_then(|selected| {
-            board
-                .ready_issues
+            actionable
                 .iter()
-                .position(|issue| issue.id == selected)
+                .position(|issue| issue.issue.id == selected)
         })
         .unwrap_or(0);
 
     let step = delta.unsigned_abs();
-    let max_index = board.ready_issues.len().saturating_sub(1);
+    let max_index = actionable.len().saturating_sub(1);
     let next_index = if delta.is_negative() {
         current_index.saturating_sub(step)
     } else {
         current_index.saturating_add(step).min(max_index)
     };
 
-    Some(board.ready_issues[next_index].id.clone())
+    Some(actionable[next_index].issue.id.clone())
 }
 
 fn summary_lines(summary: &BoardSummary) -> Vec<Line<'static>> {
@@ -1235,7 +1343,7 @@ mod tests {
     }
 
     #[test]
-    fn board_lines_mark_selected_ready_issue() {
+    fn board_lines_mark_selected_actionable_issue() {
         let board = BoardStatus {
             repo_root: "/tmp/repo".to_owned(),
             generated_at: "2026-03-26T00:00:00Z".to_owned(),
@@ -1270,7 +1378,39 @@ mod tests {
     }
 
     #[test]
-    fn selection_helpers_follow_ready_issue_order() {
+    fn board_lines_mark_selected_claimed_issue() {
+        let board = BoardStatus {
+            repo_root: "/tmp/repo".to_owned(),
+            generated_at: "2026-03-26T00:00:00Z".to_owned(),
+            summary: None,
+            ready_issues: vec![BoardIssue {
+                id: "tusk-a".to_owned(),
+                title: "first ready issue".to_owned(),
+                status: Some("open".to_owned()),
+            }],
+            claimed_issues: vec![BoardIssue {
+                id: "tusk-b".to_owned(),
+                title: "claimed issue".to_owned(),
+                status: Some("in_progress".to_owned()),
+            }],
+            blocked_issues: vec![],
+            deferred_issues: vec![],
+            lanes: vec![],
+            workspaces: vec![],
+        };
+
+        let rendered = board_lines(&board, Some("tusk-b"))
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("> tusk-b claimed issue [in_progress]"));
+        assert!(rendered.contains("  tusk-a first ready issue [open]"));
+    }
+
+    #[test]
+    fn selection_helpers_follow_actionable_issue_order() {
         let board = BoardStatus {
             repo_root: "/tmp/repo".to_owned(),
             generated_at: "2026-03-26T00:00:00Z".to_owned(),
@@ -1287,7 +1427,11 @@ mod tests {
                     status: Some("open".to_owned()),
                 },
             ],
-            claimed_issues: vec![],
+            claimed_issues: vec![BoardIssue {
+                id: "tusk-c".to_owned(),
+                title: "claimed issue".to_owned(),
+                status: Some("in_progress".to_owned()),
+            }],
             blocked_issues: vec![],
             deferred_issues: vec![],
             lanes: vec![],
@@ -1295,19 +1439,27 @@ mod tests {
         };
 
         assert_eq!(
-            normalized_ready_selection(&board, None),
+            normalized_action_selection(&board, None),
             Some("tusk-a".to_owned())
         );
         assert_eq!(
-            step_ready_selection(&board, Some("tusk-a"), 1),
+            step_action_selection(&board, Some("tusk-a"), 1),
             Some("tusk-b".to_owned())
         );
         assert_eq!(
-            step_ready_selection(&board, Some("tusk-b"), 1),
+            step_action_selection(&board, Some("tusk-b"), 1),
+            Some("tusk-c".to_owned())
+        );
+        assert_eq!(
+            step_action_selection(&board, Some("tusk-c"), 1),
+            Some("tusk-c".to_owned())
+        );
+        assert_eq!(
+            step_action_selection(&board, Some("tusk-c"), -1),
             Some("tusk-b".to_owned())
         );
         assert_eq!(
-            step_ready_selection(&board, Some("tusk-b"), -1),
+            step_action_selection(&board, Some("tusk-b"), -1),
             Some("tusk-a".to_owned())
         );
     }
