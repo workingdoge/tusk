@@ -138,6 +138,9 @@ Keys:
   Tab          focus next pane
   Shift+Tab    focus previous pane
   t / b / e    focus tracker, board, or receipts
+  j / k        move ready-issue selection in the board
+  Up / Down    move ready-issue selection in the board
+  c            claim the selected ready issue from the board
 "
     );
 }
@@ -196,7 +199,18 @@ impl ProtocolClient {
         self.query("ping")
     }
 
+    fn claim_issue(&self, issue_id: &str) -> Result<ClaimIssuePayload> {
+        self.query_with_payload("claim_issue", json!({ "issue_id": issue_id }))
+    }
+
     fn query<T>(&self, kind: &str) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        self.query_with_payload(kind, Value::Null)
+    }
+
+    fn query_with_payload<T>(&self, kind: &str, payload: Value) -> Result<T>
     where
         T: DeserializeOwned,
     {
@@ -212,6 +226,7 @@ impl ProtocolClient {
         let request = json!({
             "request_id": request_id(),
             "kind": kind,
+            "payload": payload,
         });
         let mut body = serde_json::to_vec(&request).context("serialize request")?;
         body.push(b'\n');
@@ -260,6 +275,7 @@ struct App {
     status_line: String,
     should_quit: bool,
     focus: Focus,
+    selected_ready_issue_id: Option<String>,
     tracker: PanelState<TrackerStatus>,
     board: PanelState<BoardStatus>,
     receipts: PanelState<ReceiptsStatus>,
@@ -271,9 +287,10 @@ impl App {
             client,
             refresh_interval,
             last_refresh_started: Instant::now() - refresh_interval,
-            status_line: "press r to refresh, p to ping, q to quit".to_owned(),
+            status_line: "press r to refresh, b to focus the board, q to quit".to_owned(),
             should_quit: false,
             focus: Focus::Tracker,
+            selected_ready_issue_id: None,
             tracker: PanelState::default(),
             board: PanelState::default(),
             receipts: PanelState::default(),
@@ -294,6 +311,7 @@ impl App {
         self.tracker = PanelState::from_result(self.client.tracker_status());
         self.board = PanelState::from_result(self.client.board_status());
         self.receipts = PanelState::from_result(self.client.receipts_status());
+        self.sync_board_selection();
 
         self.status_line = format!(
             "refreshed {} from {}",
@@ -313,17 +331,69 @@ impl App {
         }
     }
 
+    fn sync_board_selection(&mut self) {
+        let Some(board) = self.board.value.as_ref() else {
+            self.selected_ready_issue_id = None;
+            return;
+        };
+
+        self.selected_ready_issue_id =
+            normalized_ready_selection(board, self.selected_ready_issue_id.as_deref());
+    }
+
+    fn move_board_selection(&mut self, delta: isize) {
+        let Some(board) = self.board.value.as_ref() else {
+            self.status_line = "board data is unavailable".to_owned();
+            return;
+        };
+
+        let Some(next) =
+            step_ready_selection(board, self.selected_ready_issue_id.as_deref(), delta)
+        else {
+            self.selected_ready_issue_id = None;
+            self.status_line = "no ready issues to select".to_owned();
+            return;
+        };
+
+        self.selected_ready_issue_id = Some(next.clone());
+        self.status_line = format!("selected {next}");
+    }
+
+    fn claim_selected_ready_issue(&mut self) {
+        let Some(issue_id) = self.selected_ready_issue_id.clone() else {
+            self.status_line = "no ready issue selected to claim".to_owned();
+            return;
+        };
+
+        match self.client.claim_issue(&issue_id) {
+            Ok(payload) => {
+                self.refresh();
+                self.status_line = format!("claimed {}", payload.issue_id);
+            }
+            Err(error) => {
+                self.status_line = format!("claim failed for {issue_id}: {error:#}");
+            }
+        }
+    }
+
     fn handle_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true
             }
+            KeyCode::Char('c') if self.focus == Focus::Board => self.claim_selected_ready_issue(),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('p') => self.ping(),
             KeyCode::Char('t') => self.focus = Focus::Tracker,
             KeyCode::Char('b') => self.focus = Focus::Board,
             KeyCode::Char('e') => self.focus = Focus::Receipts,
+            KeyCode::Char('j') | KeyCode::Down if self.focus == Focus::Board => {
+                self.move_board_selection(1)
+            }
+            KeyCode::Char('k') | KeyCode::Up if self.focus == Focus::Board => {
+                self.move_board_selection(-1)
+            }
             KeyCode::Tab => self.focus = self.focus.next(),
             KeyCode::BackTab => self.focus = self.focus.previous(),
             _ => {}
@@ -396,6 +466,11 @@ struct Response<T> {
 #[derive(Debug, Deserialize)]
 struct ProtocolError {
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimIssuePayload {
+    issue_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -554,7 +629,7 @@ fn render(frame: &mut Frame, app: &App) {
             }),
             Span::raw("  "),
             Span::styled(
-                "t/b/e focus  Tab cycle  r refresh  p ping  q quit",
+                "t/b/e focus  Tab cycle  j/k move  c claim  r refresh  p ping  q quit",
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -584,7 +659,7 @@ fn render_tracker(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
 fn render_board(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     let block = pane_block("Board", app.focus == Focus::Board);
     let lines = match (&app.board.value, &app.board.error) {
-        (Some(board), _) => board_lines(board),
+        (Some(board), _) => board_lines(board, app.selected_ready_issue_id.as_deref()),
         (_, Some(error)) => error_lines(error),
         _ => vec![Line::from("waiting for board data")],
     };
@@ -682,7 +757,7 @@ fn tracker_lines(tracker: &TrackerStatus) -> Vec<Line<'static>> {
     lines
 }
 
-fn board_lines(board: &BoardStatus) -> Vec<Line<'static>> {
+fn board_lines(board: &BoardStatus, selected_ready_issue_id: Option<&str>) -> Vec<Line<'static>> {
     let mut lines = vec![
         kv_line("repo", board.repo_root.clone()),
         kv_line("updated", board.generated_at.clone()),
@@ -695,16 +770,21 @@ fn board_lines(board: &BoardStatus) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
-    append_issue_section(&mut lines, "ready issues", &board.ready_issues);
+    append_issue_section(
+        &mut lines,
+        "ready issues",
+        &board.ready_issues,
+        selected_ready_issue_id,
+    );
 
     lines.push(Line::from(""));
-    append_issue_section(&mut lines, "claimed issues", &board.claimed_issues);
+    append_issue_section(&mut lines, "claimed issues", &board.claimed_issues, None);
 
     lines.push(Line::from(""));
-    append_issue_section(&mut lines, "blocked issues", &board.blocked_issues);
+    append_issue_section(&mut lines, "blocked issues", &board.blocked_issues, None);
 
     lines.push(Line::from(""));
-    append_issue_section(&mut lines, "deferred issues", &board.deferred_issues);
+    append_issue_section(&mut lines, "deferred issues", &board.deferred_issues, None);
 
     lines.push(Line::from(""));
     lines.push(title_line("lanes"));
@@ -721,7 +801,12 @@ fn board_lines(board: &BoardStatus) -> Vec<Line<'static>> {
     lines
 }
 
-fn append_issue_section(lines: &mut Vec<Line<'static>>, title: &str, issues: &[BoardIssue]) {
+fn append_issue_section(
+    lines: &mut Vec<Line<'static>>,
+    title: &str,
+    issues: &[BoardIssue],
+    selected_issue_id: Option<&str>,
+) {
     lines.push(title_line(title));
 
     if issues.is_empty() {
@@ -729,17 +814,79 @@ fn append_issue_section(lines: &mut Vec<Line<'static>>, title: &str, issues: &[B
         return;
     }
 
-    for issue in issues.iter().take(6) {
-        let suffix = issue
-            .status
-            .as_deref()
-            .map(|status| format!(" [{status}]"))
-            .unwrap_or_default();
-        lines.push(Line::from(format!(
-            "{} {}{}",
-            issue.id, issue.title, suffix
-        )));
+    for issue in issues {
+        lines.push(issue_line(issue, selected_issue_id));
     }
+}
+
+fn issue_line(issue: &BoardIssue, selected_issue_id: Option<&str>) -> Line<'static> {
+    let suffix = issue
+        .status
+        .as_deref()
+        .map(|status| format!(" [{status}]"))
+        .unwrap_or_default();
+    let selected = selected_issue_id == Some(issue.id.as_str());
+    let prefix = if selected { "> " } else { "  " };
+    let text = format!("{}{} {}{}", prefix, issue.id, issue.title, suffix);
+    let style = if selected {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    Line::from(Span::styled(text, style))
+}
+
+fn normalized_ready_selection(
+    board: &BoardStatus,
+    selected_issue_id: Option<&str>,
+) -> Option<String> {
+    if board.ready_issues.is_empty() {
+        return None;
+    }
+
+    if let Some(selected_issue_id) = selected_issue_id {
+        if board
+            .ready_issues
+            .iter()
+            .any(|issue| issue.id == selected_issue_id)
+        {
+            return Some(selected_issue_id.to_owned());
+        }
+    }
+
+    Some(board.ready_issues[0].id.clone())
+}
+
+fn step_ready_selection(
+    board: &BoardStatus,
+    selected_issue_id: Option<&str>,
+    delta: isize,
+) -> Option<String> {
+    if board.ready_issues.is_empty() {
+        return None;
+    }
+
+    let current_index = selected_issue_id
+        .and_then(|selected| {
+            board
+                .ready_issues
+                .iter()
+                .position(|issue| issue.id == selected)
+        })
+        .unwrap_or(0);
+
+    let step = delta.unsigned_abs();
+    let max_index = board.ready_issues.len().saturating_sub(1);
+    let next_index = if delta.is_negative() {
+        current_index.saturating_sub(step)
+    } else {
+        current_index.saturating_add(step).min(max_index)
+    };
+
+    Some(board.ready_issues[next_index].id.clone())
 }
 
 fn summary_lines(summary: &BoardSummary) -> Vec<Line<'static>> {
@@ -976,7 +1123,7 @@ mod tests {
             workspaces: vec!["default".to_owned()],
         };
 
-        let rendered = board_lines(&board)
+        let rendered = board_lines(&board, None)
             .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
@@ -1012,7 +1159,7 @@ mod tests {
             workspaces: vec![],
         };
 
-        let rendered = board_lines(&board)
+        let rendered = board_lines(&board, None)
             .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
@@ -1068,7 +1215,7 @@ mod tests {
             workspaces: vec![],
         };
 
-        let rendered = board_lines(&board)
+        let rendered = board_lines(&board, None)
             .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
@@ -1085,6 +1232,84 @@ mod tests {
         assert!(rendered.contains("workspace missing"));
         assert!(rendered.contains("tusk-stale stale lane"));
         assert!(rendered.contains("observed stale"));
+    }
+
+    #[test]
+    fn board_lines_mark_selected_ready_issue() {
+        let board = BoardStatus {
+            repo_root: "/tmp/repo".to_owned(),
+            generated_at: "2026-03-26T00:00:00Z".to_owned(),
+            summary: None,
+            ready_issues: vec![
+                BoardIssue {
+                    id: "tusk-a".to_owned(),
+                    title: "first ready issue".to_owned(),
+                    status: Some("open".to_owned()),
+                },
+                BoardIssue {
+                    id: "tusk-b".to_owned(),
+                    title: "second ready issue".to_owned(),
+                    status: Some("open".to_owned()),
+                },
+            ],
+            claimed_issues: vec![],
+            blocked_issues: vec![],
+            deferred_issues: vec![],
+            lanes: vec![],
+            workspaces: vec![],
+        };
+
+        let rendered = board_lines(&board, Some("tusk-b"))
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("> tusk-b second ready issue [open]"));
+        assert!(rendered.contains("  tusk-a first ready issue [open]"));
+    }
+
+    #[test]
+    fn selection_helpers_follow_ready_issue_order() {
+        let board = BoardStatus {
+            repo_root: "/tmp/repo".to_owned(),
+            generated_at: "2026-03-26T00:00:00Z".to_owned(),
+            summary: None,
+            ready_issues: vec![
+                BoardIssue {
+                    id: "tusk-a".to_owned(),
+                    title: "first ready issue".to_owned(),
+                    status: Some("open".to_owned()),
+                },
+                BoardIssue {
+                    id: "tusk-b".to_owned(),
+                    title: "second ready issue".to_owned(),
+                    status: Some("open".to_owned()),
+                },
+            ],
+            claimed_issues: vec![],
+            blocked_issues: vec![],
+            deferred_issues: vec![],
+            lanes: vec![],
+            workspaces: vec![],
+        };
+
+        assert_eq!(
+            normalized_ready_selection(&board, None),
+            Some("tusk-a".to_owned())
+        );
+        assert_eq!(
+            step_ready_selection(&board, Some("tusk-a"), 1),
+            Some("tusk-b".to_owned())
+        );
+        assert_eq!(
+            step_ready_selection(&board, Some("tusk-b"), 1),
+            Some("tusk-b".to_owned())
+        );
+        assert_eq!(
+            step_ready_selection(&board, Some("tusk-b"), -1),
+            Some("tusk-a".to_owned())
+        );
     }
 
     #[test]

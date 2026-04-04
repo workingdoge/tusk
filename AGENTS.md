@@ -47,6 +47,7 @@ nix run .#tuskd -- finish-lane --repo "$PWD" --issue-id tusk-123 --outcome compl
 nix run .#tuskd -- archive-lane --repo "$PWD" --issue-id tusk-123 --note "lane compacted into receipts"
 nix build .#tusk-ui
 nix run .#tusk-ui -- --help
+# in tusk-ui: b focuses the board, j/k or Up/Down move across ready issues, c claims the selected ready issue
 ```
 
 ## Repo Shape
@@ -63,7 +64,7 @@ nix run .#tusk-ui -- --help
 - lane records can transition to handoff state with `handoff_revision`, `handed_off_at`, and an optional `handoff_note`.
 - lane records can transition to finished state with `outcome`, `finished_at`, and an optional `finish_note`; finished lanes remain explicit even after their workspaces are removed.
 - `archive-lane` removes a finished lane from live lane state only after its workspace is gone; receipts remain the audit surface for archived lanes.
-- `crates/tusk-ui/` contains the Rust `ratatui` control-plane client crate and renders tracker, board, lane, and receipt projections from `tuskd`.
+- `crates/tusk-ui/` contains the Rust `ratatui` control-plane client crate and renders tracker, board, lane, and receipt projections from `tuskd`; the first interactive action is claiming the selected ready issue from the board.
 
 ## Change Rules
 
@@ -82,6 +83,7 @@ nix run .#tusk-ui -- --help
 - `nix run .#tuskd -- --help`
 - `nix build .#tusk-ui`
 - `nix run .#tusk-ui -- --help`
+- a PTY-driven `tusk-ui` session can focus the board and claim a disposable ready issue with `c`, after which `board-status` shows that issue in claimed state instead of ready
 - `nix eval --raw path:.#packages.aarch64-darwin.rust-toolchain.name`
 - `nix eval --raw path:.#packages.aarch64-darwin.tusk-ui.name`
 - `nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "not callable"' path:.#lib.crane.buildDepsOnly`
