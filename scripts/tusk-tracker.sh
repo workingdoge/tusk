@@ -12,6 +12,7 @@ Usage:
   tusk-tracker issue show ISSUE_ID [--repo PATH]
   tusk-tracker issue claim ISSUE_ID [--repo PATH]
   tusk-tracker issue close ISSUE_ID --reason REASON [--repo PATH]
+  tusk-tracker issues board [--repo PATH]
   tusk-tracker backend show [--repo PATH]
   tusk-tracker backend status [--repo PATH]
   tusk-tracker backend test [--repo PATH]
@@ -24,6 +25,7 @@ Commands:
   issue show         Show one issue and print the issue JSON.
   issue claim        Claim one issue and print the updated issue JSON.
   issue close        Close one issue and print the updated issue JSON.
+  issues board       Print machine-readable board issue buckets as JSON.
   backend show       Print the current tracker backend configuration as JSON.
   backend status     Print the current tracker backend status as JSON.
   backend test       Test the current tracker backend connection as JSON.
@@ -124,6 +126,44 @@ cmd_issue_close() {
   run_in_repo "${repo_root}" "${real_bd}" close "${issue_id}" --reason "${reason}" --json
 }
 
+cmd_issues_board() {
+  local repo_root="$1"
+  local export_output=""
+  local blocked_output=""
+
+  export_output="$(run_in_repo "${repo_root}" "${real_bd}" export)"
+  blocked_output="$(run_in_repo "${repo_root}" "${real_bd}" blocked --json)"
+
+  jq -Rsc \
+    --argjson blocked "${blocked_output}" \
+    '
+      def issue_view:
+        {
+          id: .id,
+          title: .title,
+          status: (.status // null)
+        };
+
+      split("\n")
+      | map(select(length > 0) | fromjson)
+      | {
+          claimed_issues: (
+            map(select(.status == "in_progress") | issue_view)
+            | sort_by(.id)
+          ),
+          deferred_issues: (
+            map(select(.status == "deferred") | issue_view)
+            | sort_by(.id)
+          ),
+          blocked_issues: (
+            ($blocked // [])
+            | map(issue_view)
+            | sort_by(.id)
+          )
+        }
+    ' <<<"${export_output}"
+}
+
 cmd_backend_show() {
   local repo_root="$1"
   run_in_repo "${repo_root}" "${real_bd}" dolt show --json
@@ -197,6 +237,7 @@ main() {
   local subcommand=""
   local issue_id=""
   local reason=""
+  local scope=""
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -269,6 +310,20 @@ main() {
           ;;
         *)
           fail "unknown issue subcommand: ${subcommand}"
+          ;;
+      esac
+      ;;
+    issues)
+      scope="${2:-}"
+      [ -n "${scope}" ] || fail "issues requires a subcommand"
+      shift 2
+      case "${scope}" in
+        board)
+          [ "$#" -eq 0 ] || fail "issues board does not accept positional arguments"
+          cmd_issues_board "${repo_root}"
+          ;;
+        *)
+          fail "unknown issues subcommand: ${scope}"
           ;;
       esac
       ;;

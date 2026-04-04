@@ -1094,11 +1094,13 @@ board_status_projection() {
   local repo_root="$1"
   local status_result
   local ready_result
+  local board_issues_result
   local workspaces_result
   local lanes_json
 
   status_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_status" status)"
   ready_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_ready" ready)"
+  board_issues_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_board_issues" issues board)"
   workspaces_result="$(
     run_lines_command_in_repo \
       "${repo_root}" \
@@ -1112,6 +1114,7 @@ board_status_projection() {
     --arg generated_at "$(now_iso8601)" \
     --argjson status "${status_result}" \
     --argjson ready "${ready_result}" \
+    --argjson board_issues "${board_issues_result}" \
     --argjson workspaces "${workspaces_result}" \
     --argjson lanes "${lanes_json}" \
     '{
@@ -1119,11 +1122,33 @@ board_status_projection() {
       generated_at: $generated_at,
       summary: (if $status.ok and (($status.output | type) == "object") then ($status.output.summary // null) else null end),
       ready_issues: (if $ready.ok and (($ready.output | type) == "array") then $ready.output else [] end),
+      claimed_issues: (
+        if $board_issues.ok and (($board_issues.output | type) == "object")
+        then (
+          ($board_issues.output.claimed_issues // [])
+          | map(select(.id as $id | (($lanes | map(.issue_id)) | index($id) | not)))
+        )
+        else []
+        end
+      ),
+      blocked_issues: (
+        if $board_issues.ok and (($board_issues.output | type) == "object")
+        then ($board_issues.output.blocked_issues // [])
+        else []
+        end
+      ),
+      deferred_issues: (
+        if $board_issues.ok and (($board_issues.output | type) == "object")
+        then ($board_issues.output.deferred_issues // [])
+        else []
+        end
+      ),
       lanes: $lanes,
       workspaces: (if $workspaces.ok and (($workspaces.output | type) == "array") then $workspaces.output else [] end),
       checks: {
         tracker_status: $status,
         tracker_ready: $ready,
+        tracker_board_issues: $board_issues,
         jj_workspace_list: $workspaces
       }
     }'

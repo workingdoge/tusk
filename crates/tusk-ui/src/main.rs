@@ -441,7 +441,13 @@ struct BoardStatus {
     generated_at: String,
     summary: Option<BoardSummary>,
     #[serde(default)]
-    ready_issues: Vec<ReadyIssue>,
+    ready_issues: Vec<BoardIssue>,
+    #[serde(default)]
+    claimed_issues: Vec<BoardIssue>,
+    #[serde(default)]
+    blocked_issues: Vec<BoardIssue>,
+    #[serde(default)]
+    deferred_issues: Vec<BoardIssue>,
     #[serde(default)]
     lanes: Vec<LaneEntry>,
     #[serde(default)]
@@ -460,7 +466,7 @@ struct BoardSummary {
 }
 
 #[derive(Debug, Deserialize)]
-struct ReadyIssue {
+struct BoardIssue {
     id: String,
     title: String,
     status: Option<String>,
@@ -689,19 +695,16 @@ fn board_lines(board: &BoardStatus) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
-    lines.push(title_line("ready issues"));
-    if board.ready_issues.is_empty() {
-        lines.push(Line::from("none"));
-    } else {
-        lines.extend(board.ready_issues.iter().take(6).map(|issue| {
-            let suffix = issue
-                .status
-                .as_deref()
-                .map(|status| format!(" [{status}]"))
-                .unwrap_or_default();
-            Line::from(format!("{} {}{}", issue.id, issue.title, suffix))
-        }));
-    }
+    append_issue_section(&mut lines, "ready issues", &board.ready_issues);
+
+    lines.push(Line::from(""));
+    append_issue_section(&mut lines, "claimed issues", &board.claimed_issues);
+
+    lines.push(Line::from(""));
+    append_issue_section(&mut lines, "blocked issues", &board.blocked_issues);
+
+    lines.push(Line::from(""));
+    append_issue_section(&mut lines, "deferred issues", &board.deferred_issues);
 
     lines.push(Line::from(""));
     lines.push(title_line("lanes"));
@@ -716,6 +719,27 @@ fn board_lines(board: &BoardStatus) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn append_issue_section(lines: &mut Vec<Line<'static>>, title: &str, issues: &[BoardIssue]) {
+    lines.push(title_line(title));
+
+    if issues.is_empty() {
+        lines.push(Line::from("none"));
+        return;
+    }
+
+    for issue in issues.iter().take(6) {
+        let suffix = issue
+            .status
+            .as_deref()
+            .map(|status| format!(" [{status}]"))
+            .unwrap_or_default();
+        lines.push(Line::from(format!(
+            "{} {}{}",
+            issue.id, issue.title, suffix
+        )));
+    }
 }
 
 fn summary_lines(summary: &BoardSummary) -> Vec<Line<'static>> {
@@ -940,11 +964,14 @@ mod tests {
                 deferred_issues: Some(0),
                 ready_issues: Some(1),
             }),
-            ready_issues: vec![ReadyIssue {
+            ready_issues: vec![BoardIssue {
                 id: "tusk-demo".to_owned(),
                 title: "demo ready issue".to_owned(),
                 status: Some("open".to_owned()),
             }],
+            claimed_issues: vec![],
+            blocked_issues: vec![],
+            deferred_issues: vec![],
             lanes: vec![],
             workspaces: vec!["default".to_owned()],
         };
@@ -960,12 +987,55 @@ mod tests {
     }
 
     #[test]
+    fn board_lines_include_claimed_blocked_and_deferred_sections() {
+        let board = BoardStatus {
+            repo_root: "/tmp/repo".to_owned(),
+            generated_at: "2026-03-26T00:00:00Z".to_owned(),
+            summary: None,
+            ready_issues: vec![],
+            claimed_issues: vec![BoardIssue {
+                id: "tusk-claim".to_owned(),
+                title: "claimed issue".to_owned(),
+                status: Some("in_progress".to_owned()),
+            }],
+            blocked_issues: vec![BoardIssue {
+                id: "tusk-blocked".to_owned(),
+                title: "blocked issue".to_owned(),
+                status: Some("open".to_owned()),
+            }],
+            deferred_issues: vec![BoardIssue {
+                id: "tusk-deferred".to_owned(),
+                title: "deferred issue".to_owned(),
+                status: Some("deferred".to_owned()),
+            }],
+            lanes: vec![],
+            workspaces: vec![],
+        };
+
+        let rendered = board_lines(&board)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("claimed issues"));
+        assert!(rendered.contains("blocked issues"));
+        assert!(rendered.contains("deferred issues"));
+        assert!(rendered.contains("tusk-claim claimed issue [in_progress]"));
+        assert!(rendered.contains("tusk-blocked blocked issue [open]"));
+        assert!(rendered.contains("tusk-deferred deferred issue [deferred]"));
+    }
+
+    #[test]
     fn board_lines_include_lane_groups_and_outcomes() {
         let board = BoardStatus {
             repo_root: "/tmp/repo".to_owned(),
             generated_at: "2026-03-26T00:00:00Z".to_owned(),
             summary: None,
             ready_issues: vec![],
+            claimed_issues: vec![],
+            blocked_issues: vec![],
+            deferred_issues: vec![],
             lanes: vec![
                 LaneEntry {
                     issue_id: "tusk-live".to_owned(),
