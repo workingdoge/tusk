@@ -1,6 +1,10 @@
 { lib }:
 let
-  inherit (builtins) removeAttrs;
+  inherit (builtins)
+    pathExists
+    readDir
+    removeAttrs
+    ;
   inherit (lib)
     attrNames
     attrValues
@@ -9,6 +13,7 @@ let
     filter
     flatten
     listToAttrs
+    map
     mapAttrs
     mapAttrsToList
     nameValuePair
@@ -22,6 +27,82 @@ let
   mkExecutor = args: args // { kind = args.kind or "executor"; };
   mkDriver = args: args // { kind = args.kind or "driver"; };
   mkRealization = args: args // { kind = "realization"; };
+
+  validateCodexSkillSource =
+    {
+      name,
+      src,
+      requiredFiles ? [
+        "SKILL.md"
+        "agents/openai.yaml"
+      ],
+    }:
+    let
+      sourcePath = toString src;
+      missing = filter (relativePath: !(pathExists "${sourcePath}/${relativePath}")) requiredFiles;
+    in
+    if missing == [ ] then
+      src
+    else
+      throw "Codex skill `${name}` is missing required files: ${concatStringsSep ", " missing}";
+
+  mkCodexSkillPackage =
+    {
+      pkgs,
+      name,
+      src,
+    }:
+    let
+      checkedSource = validateCodexSkillSource { inherit name src; };
+    in
+    pkgs.runCommand "${name}-openai-skill" { } ''
+      mkdir -p "$out"
+      cp -R ${checkedSource}/. "$out/"
+      chmod -R u+w "$out"
+    '';
+
+  listRelativeFiles =
+    src:
+    let
+      go =
+        prefix: path:
+        let
+          entries = readDir path;
+        in
+        flatten (
+          mapAttrsToList (
+            name: kind:
+            let
+              relativePath = if prefix == "" then name else "${prefix}/${name}";
+            in
+            if kind == "directory" then go relativePath (path + "/${name}") else [ relativePath ]
+          ) entries
+        );
+    in
+    go "" src;
+
+  mkDevenvCodexSkillFiles =
+    {
+      pkgs,
+      name,
+      src,
+      root ? ".codex/skills",
+    }:
+    let
+      checkedSource = validateCodexSkillSource { inherit name src; };
+      package = mkCodexSkillPackage {
+        inherit pkgs name;
+        src = checkedSource;
+      };
+    in
+    listToAttrs (
+      map (
+        relativePath:
+        nameValuePair "${root}/${name}/${relativePath}" {
+          source = package + "/${relativePath}";
+        }
+      ) (listRelativeFiles checkedSource)
+    );
 
   resolveId = value: fallback: if value != null then value else fallback;
 
@@ -328,6 +409,8 @@ let
 in
 {
   inherit
+    mkDevenvCodexSkillFiles
+    mkCodexSkillPackage
     mkBase
     mkDriver
     mkEffect
@@ -337,5 +420,6 @@ in
     mkWitness
     normalize
     renderValidationError
+    validateCodexSkillSource
     ;
 }
