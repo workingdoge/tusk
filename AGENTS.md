@@ -60,7 +60,7 @@ nix run .#tusk-ui -- --help
 - `.beads/tuskd/lanes.json` holds first-class lane state for the current repo; `board-status` reads lane truth from there and derives stale-vs-live workspace observations.
 - lane records can transition to handoff state with `handoff_revision`, `handed_off_at`, and an optional `handoff_note`.
 - lane records can transition to finished state with `outcome`, `finished_at`, and an optional `finish_note`; finished lanes remain explicit even after their workspaces are removed.
-- `crates/tusk-ui/` contains the Rust `ratatui` control-plane client crate.
+- `crates/tusk-ui/` contains the Rust `ratatui` control-plane client crate and renders tracker, board, lane, and receipt projections from `tuskd`.
 
 ## Change Rules
 

@@ -443,6 +443,8 @@ struct BoardStatus {
     #[serde(default)]
     ready_issues: Vec<ReadyIssue>,
     #[serde(default)]
+    lanes: Vec<LaneEntry>,
+    #[serde(default)]
     workspaces: Vec<String>,
 }
 
@@ -462,6 +464,17 @@ struct ReadyIssue {
     id: String,
     title: String,
     status: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LaneEntry {
+    issue_id: String,
+    issue_title: String,
+    status: String,
+    observed_status: Option<String>,
+    workspace_exists: Option<bool>,
+    outcome: Option<String>,
+    workspace_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -691,6 +704,10 @@ fn board_lines(board: &BoardStatus) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
+    lines.push(title_line("lanes"));
+    lines.extend(lane_lines(&board.lanes));
+
+    lines.push(Line::from(""));
     lines.push(title_line("workspaces"));
     if board.workspaces.is_empty() {
         lines.push(Line::from("none"));
@@ -729,6 +746,88 @@ fn summary_lines(summary: &BoardSummary) -> Vec<Line<'static>> {
             summary.closed_issues.unwrap_or_default().to_string(),
         ),
     ]
+}
+
+fn lane_lines(lanes: &[LaneEntry]) -> Vec<Line<'static>> {
+    if lanes.is_empty() {
+        return vec![Line::from("none")];
+    }
+
+    let mut active = Vec::new();
+    let mut finished = Vec::new();
+    let mut stale = Vec::new();
+
+    let mut ordered = lanes.to_vec();
+    ordered.sort_by(|left, right| left.issue_id.cmp(&right.issue_id));
+
+    for lane in ordered {
+        let observed_status = lane
+            .observed_status
+            .clone()
+            .unwrap_or_else(|| lane.status.clone());
+
+        if observed_status == "stale" {
+            stale.push(lane);
+        } else if lane.status == "finished" || observed_status == "finished" {
+            finished.push(lane);
+        } else {
+            active.push(lane);
+        }
+    }
+
+    let mut lines = Vec::new();
+    if !active.is_empty() {
+        append_lane_section(&mut lines, "active lanes", &active);
+    }
+    if !finished.is_empty() {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        append_lane_section(&mut lines, "finished lanes", &finished);
+    }
+    if !stale.is_empty() {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        append_lane_section(&mut lines, "stale lanes", &stale);
+    }
+    lines
+}
+
+fn append_lane_section(lines: &mut Vec<Line<'static>>, title: &str, lanes: &[LaneEntry]) {
+    lines.push(title_line(title));
+
+    if lanes.is_empty() {
+        lines.push(Line::from("none"));
+        return;
+    }
+
+    for lane in lanes {
+        let mut detail_parts = vec![format!("status {}", lane.status)];
+        if let Some(observed_status) = &lane.observed_status {
+            if observed_status != &lane.status {
+                detail_parts.push(format!("observed {}", observed_status));
+            }
+        }
+        if let Some(outcome) = &lane.outcome {
+            detail_parts.push(format!("outcome {}", outcome));
+        }
+        detail_parts.push(if lane.workspace_exists.unwrap_or(false) {
+            "workspace live".to_owned()
+        } else {
+            "workspace missing".to_owned()
+        });
+
+        lines.push(Line::from(format!(
+            "{} {}",
+            lane.issue_id, lane.issue_title
+        )));
+        lines.push(Line::from(format!("  {}", detail_parts.join(" | "))));
+
+        if let Some(workspace_name) = &lane.workspace_name {
+            lines.push(Line::from(format!("  ws {}", workspace_name)));
+        }
+    }
 }
 
 fn receipt_items(receipts: &ReceiptsStatus) -> Vec<ListItem<'static>> {
@@ -846,6 +945,7 @@ mod tests {
                 title: "demo ready issue".to_owned(),
                 status: Some("open".to_owned()),
             }],
+            lanes: vec![],
             workspaces: vec!["default".to_owned()],
         };
 
@@ -857,6 +957,64 @@ mod tests {
 
         assert!(rendered.contains("demo ready issue"));
         assert!(rendered.contains("default"));
+    }
+
+    #[test]
+    fn board_lines_include_lane_groups_and_outcomes() {
+        let board = BoardStatus {
+            repo_root: "/tmp/repo".to_owned(),
+            generated_at: "2026-03-26T00:00:00Z".to_owned(),
+            summary: None,
+            ready_issues: vec![],
+            lanes: vec![
+                LaneEntry {
+                    issue_id: "tusk-live".to_owned(),
+                    issue_title: "live lane".to_owned(),
+                    status: "handoff".to_owned(),
+                    observed_status: Some("handoff".to_owned()),
+                    workspace_exists: Some(true),
+                    outcome: None,
+                    workspace_name: Some("tusk-live-lane".to_owned()),
+                },
+                LaneEntry {
+                    issue_id: "tusk-done".to_owned(),
+                    issue_title: "finished lane".to_owned(),
+                    status: "finished".to_owned(),
+                    observed_status: Some("finished".to_owned()),
+                    workspace_exists: Some(false),
+                    outcome: Some("completed".to_owned()),
+                    workspace_name: Some("tusk-done-lane".to_owned()),
+                },
+                LaneEntry {
+                    issue_id: "tusk-stale".to_owned(),
+                    issue_title: "stale lane".to_owned(),
+                    status: "handoff".to_owned(),
+                    observed_status: Some("stale".to_owned()),
+                    workspace_exists: Some(false),
+                    outcome: None,
+                    workspace_name: Some("tusk-stale-lane".to_owned()),
+                },
+            ],
+            workspaces: vec![],
+        };
+
+        let rendered = board_lines(&board)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("active lanes"));
+        assert!(rendered.contains("finished lanes"));
+        assert!(rendered.contains("stale lanes"));
+        assert!(rendered.contains("tusk-live live lane"));
+        assert!(rendered.contains("status handoff"));
+        assert!(rendered.contains("workspace live"));
+        assert!(rendered.contains("tusk-done finished lane"));
+        assert!(rendered.contains("outcome completed"));
+        assert!(rendered.contains("workspace missing"));
+        assert!(rendered.contains("tusk-stale stale lane"));
+        assert!(rendered.contains("observed stale"));
     }
 
     #[test]
