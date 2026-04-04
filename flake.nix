@@ -65,6 +65,7 @@
           pkgs.nix
           pkgs.rebar3
           pkgs.rust-analyzer
+          tuskFlakeRefPackage
           tuskTrackerPackage
           rustToolchain
         ];
@@ -81,6 +82,7 @@
           nix eval --raw "path:$repo_root#packages.${system}.rust-toolchain.name" >/dev/null
           nix eval --raw "path:$repo_root#packages.${system}.tusk-ui.name" >/dev/null
           nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "lib.crane.buildDepsOnly is not callable"' "path:$repo_root#lib.crane.buildDepsOnly" >/dev/null
+          tusk-flake-ref --repo "$repo_root" --json >/dev/null
           nix develop --no-pure-eval "path:$repo_root" \
             -c sh -lc "export DEVENV_ROOT=\"$repo_root\"; export BEADS_WORKSPACE_ROOT=\"$repo_root\"; cd \"$repo_root\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null && tusk-tracker --help >/dev/null && glistix --help >/dev/null && erl -eval \"erlang:halt().\" -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null"
         '';
@@ -147,6 +149,17 @@
           exec ${codexPkg}/bin/codex -C "$repo_root" "$@"
         '';
       };
+      tuskFlakeRefPackage = pkgs.writeShellApplication {
+        name = "tusk-flake-ref";
+        runtimeInputs = [
+          pkgs.git
+          pkgs.jq
+          pkgs.jujutsu
+        ];
+        text = ''
+          exec bash ${./scripts/tusk-flake-ref.sh} "$@"
+        '';
+      };
       tuskUiSrc = craneLib.cleanCargoSource ./crates/tusk-ui;
       tuskUiCommonArgs = {
         src = tuskUiSrc;
@@ -203,6 +216,7 @@
             pkgs.socat
             pkgs.statix
             repoCodex
+            tuskFlakeRefPackage
             tuskTrackerPackage
             tuskdPackage
             rustToolchain
@@ -220,6 +234,7 @@
             echo "  codex-nix-check"
             echo "  glistix --help"
             echo "  cargo --version"
+            echo "  tusk-flake-ref --json"
             echo "  tusk-tracker --help"
             echo "  tuskd --help"
             echo "  nix build path:.#tusk-ui"
@@ -259,6 +274,7 @@
         rust-toolchain = rustToolchain;
         bd = repoBeads;
         beads = repoBeads;
+        tusk-flake-ref = tuskFlakeRefPackage;
         tusk-tracker = tuskTrackerPackage;
         tusk-ui = tuskUiPackage;
         tusk-openai-skill = tuskSkillBundle;
@@ -284,6 +300,10 @@
         install-tusk-openai-skill = {
           type = "app";
           program = "${installTuskOpenaiSkill}/bin/install-tusk-openai-skill";
+        };
+        tusk-flake-ref = {
+          type = "app";
+          program = "${tuskFlakeRefPackage}/bin/tusk-flake-ref";
         };
         tuskd = {
           type = "app";
