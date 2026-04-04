@@ -54,14 +54,17 @@ nix run .#tusk-ui -- --help
 
 ## Repo Shape
 
-- `flake.nix` exports `lib.tusk`, `flakeModules.tusk`, the development shell, `tusk-tracker`, `tuskd`, `tusk-ui`, and the installable OpenAI/Codex skill bundle.
+- `flake.nix` exports `lib.tusk`, `flakeModules.tusk`, the development shell, `tusk-tracker`, `tuskd`, `tusk-ui`, the installable OpenAI/Codex skill bundle, and `devenvModules.{codex,tusk-skill,ops-skill,nix-skill}` for flake consumers that want shared skill projection.
 - `tusk-flake` is the intended moving bookmark for flake consumers; once exported to Git and pushed, consumers can pin the repo with `?ref=tusk-flake` and optionally a specific revision.
 - `flake.nix` also exports a flake-owned `bd`/`beads` wrapper app so raw-shell `nix run` calls reuse repo-scoped tracker state instead of ambient host Beads configuration.
 - `flake.nix` also exports `tusk-flake-ref`, which prints the canonical `path:`, `git+file:`, and remote `git+...?...ref=` forms for this repo and reports when no publish remote is configured.
+- `devenv-codex-module.nix` contains the shared `codex.skills` option declaration and `.codex/skills` projection logic for `devenv` consumers; import it once, then compose one or more skill modules on top.
 - `lib.nix` contains the generic `tusk` normalization and validation logic.
 - `flake-module.nix` contains the reusable Nix module surface for `tusk`.
 - `design/` contains architecture and workflow notes that belong to `tusk` itself.
 - `.agents/skills/tusk/` contains the repo-local source of truth for the `tusk` workflow skill.
+- `.agents/skills/ops/` contains the repo-local source of truth for the shared `ops` skill.
+- `.agents/skills/nix/` contains the repo-local source of truth for the shared `nix` skill.
 - `scripts/tusk-tracker.sh` contains the flake-owned tracker boundary; the current implementation is a `bd` adapter so `tuskd` no longer shells out to raw `bd` commands directly.
 - `scripts/tuskd.sh` contains the local control-plane service skeleton, Unix-socket protocol handler, and repo-scoped Dolt backend registry/coordination logic.
 - `.beads/tuskd/lanes.json` holds first-class lane state for the current repo; `board-status` reads lane truth from there, derives stale-vs-live workspace observations, and carries ready, claimed, blocked, and deferred issue buckets alongside lanes.
@@ -73,6 +76,7 @@ nix run .#tusk-ui -- --help
 ## Change Rules
 
 - Keep `tusk` core generic. Consumer-specific runtime bindings and tracker wrappers belong in the consuming repo until they clearly generalize.
+- Import `devenvModules.codex` exactly once in a consumer flake, then compose any needed skill modules such as `devenvModules.tusk-skill`, `devenvModules.ops-skill`, and `devenvModules.nix-skill` on top of it.
 - Prefer `codex-nix-check` and a shell smoke test after changing the flake or module surface.
 - If you initialize `.beads/` here for dogfooding, treat it as this repo's own tracker, not as an extension of `config`. The tracker state is local and ignored by Git in this repo.
 

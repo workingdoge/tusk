@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ops"
+  short_description: "Nix-native CI/CD and effects"
+  default_prompt: "Use $ops to design or analyze this Nix-native operational pipeline, especially the boundary between verified checks, effects, and deployments."

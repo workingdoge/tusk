@@ -4,6 +4,7 @@
 .beads/
 .jj/
 .jj-workspaces/
+.codex/
 .codex-prompts/
 result
 result-*

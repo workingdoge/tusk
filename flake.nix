@@ -43,11 +43,23 @@
       };
       tuskLib = import ./lib.nix { lib = nixpkgs.lib; };
       tuskFlakeModule = import ./flake-module.nix { inherit tuskLib; };
-      tuskSkillBundle = pkgs.runCommand "tusk-openai-skill" { } ''
-        mkdir -p "$out"
-        cp -R ${./.agents/skills/tusk}/. "$out/"
-        chmod -R u+w "$out"
-      '';
+      devenvCodexModule = import ./devenv-codex-module.nix { inherit tuskLib; };
+      codexSkillSources = {
+        tusk = ./.agents/skills/tusk;
+        ops = ./.agents/skills/ops;
+        nix = ./.agents/skills/nix;
+      };
+      mkSkillModule = name: {
+        codex.skills.${name}.source = codexSkillSources.${name};
+      };
+      devenvTuskSkillModule = mkSkillModule "tusk";
+      devenvOpsSkillModule = mkSkillModule "ops";
+      devenvNixSkillModule = mkSkillModule "nix";
+      tuskSkillBundle = tuskLib.mkCodexSkillPackage {
+        inherit pkgs;
+        name = "tusk";
+        src = codexSkillSources.tusk;
+      };
       beads = llm-agents.packages.${system}.beads;
       codexPkg = llm-agents.packages.${system}.codex;
       glistixPkg = glistix.packages.${system}.default;
@@ -78,13 +90,13 @@
           fi
           cd "$repo_root"
 
-          deadnix --fail flake.nix flake-module.nix lib.nix
+          deadnix --fail flake.nix devenv-codex-module.nix flake-module.nix lib.nix
           nix eval --raw "path:$repo_root#packages.${system}.rust-toolchain.name" >/dev/null
           nix eval --raw "path:$repo_root#packages.${system}.tusk-ui.name" >/dev/null
           nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "lib.crane.buildDepsOnly is not callable"' "path:$repo_root#lib.crane.buildDepsOnly" >/dev/null
           tusk-flake-ref --repo "$repo_root" --json >/dev/null
           nix develop --no-pure-eval "path:$repo_root" \
-            -c sh -lc "export DEVENV_ROOT=\"$repo_root\"; export BEADS_WORKSPACE_ROOT=\"$repo_root\"; cd \"$repo_root\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null && tusk-tracker --help >/dev/null && glistix --help >/dev/null && erl -eval \"erlang:halt().\" -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null"
+            -c sh -lc "export DEVENV_ROOT=\"$repo_root\"; export BEADS_WORKSPACE_ROOT=\"$repo_root\"; cd \"$repo_root\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null && tusk-tracker --help >/dev/null && glistix --help >/dev/null && erl -eval \"erlang:halt().\" -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null && test -L .codex/skills/tusk/SKILL.md && test -L .codex/skills/ops/SKILL.md && test -L .codex/skills/ops/references/TOOLING.md && test -L .codex/skills/nix/SKILL.md && test -L .codex/skills/nix/scripts/detect-shape.py"
         '';
       };
       tuskTrackerPackage = pkgs.writeShellApplication {
@@ -191,6 +203,13 @@
       devShellModule =
         { ... }:
         {
+          imports = [
+            devenvCodexModule
+            devenvTuskSkillModule
+            devenvOpsSkillModule
+            devenvNixSkillModule
+          ];
+
           packages = [
             codexNixCheck
             glistixPkg
@@ -267,6 +286,12 @@
       lib = {
         crane = craneLib;
         tusk = tuskLib;
+      };
+      devenvModules = {
+        codex = devenvCodexModule;
+        tusk-skill = devenvTuskSkillModule;
+        ops-skill = devenvOpsSkillModule;
+        nix-skill = devenvNixSkillModule;
       };
       flakeModules.tusk = tuskFlakeModule;
       flakeModules.default = tuskFlakeModule;
