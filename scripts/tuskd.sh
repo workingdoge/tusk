@@ -665,20 +665,39 @@ shell_quote() {
   printf '%q' "$1"
 }
 
+extract_json_output() {
+  local output="$1"
+  local candidate=""
+
+  if printf '%s' "${output}" | jq -e . >/dev/null 2>&1; then
+    printf '%s' "${output}"
+    return 0
+  fi
+
+  candidate="$(printf '%s\n' "${output}" | awk 'BEGIN { capture = 0 } /^[[:space:]]*[{[]/ { capture = 1 } capture { print }')"
+  if [ -n "${candidate}" ] && printf '%s' "${candidate}" | jq -e . >/dev/null 2>&1; then
+    printf '%s' "${candidate}"
+    return 0
+  fi
+
+  return 1
+}
+
 render_command_result() {
   local name="$1"
   local exit_code="$2"
   local output="$3"
   local ok_json
+  local parsed_output=""
 
   ok_json=$([ "${exit_code}" -eq 0 ] && echo true || echo false)
 
-  if printf '%s' "${output}" | jq -e . >/dev/null 2>&1; then
+  if parsed_output="$(extract_json_output "${output}")"; then
     jq -cn \
       --arg name "${name}" \
       --argjson ok "${ok_json}" \
       --argjson exit_code "${exit_code}" \
-      --argjson output "${output}" \
+      --argjson output "${parsed_output}" \
       '{name:$name, ok:$ok, exit_code:$exit_code, output:$output}'
     return
   fi
@@ -930,7 +949,20 @@ write_service_record() {
   printf '%s\n' "${record}"
 }
 
-append_receipt() {
+current_service_record() {
+  local repo_root="$1"
+  local path
+
+  path="$(service_path "${repo_root}")"
+  if [ ! -f "${path}" ]; then
+    printf 'null\n'
+    return
+  fi
+
+  cat "${path}"
+}
+
+receipt_record_json() {
   local repo_root="$1"
   local kind="$2"
   local payload_json="$3"
@@ -940,8 +972,28 @@ append_receipt() {
     --arg kind "${kind}" \
     --arg repo_root "${repo_root}" \
     --argjson payload "${payload_json}" \
-    '{timestamp:$timestamp, kind:$kind, repo_root:$repo_root, payload:$payload}' \
-    >>"$(receipts_path "${repo_root}")"
+    '{timestamp:$timestamp, kind:$kind, repo_root:$repo_root, payload:$payload}'
+}
+
+append_receipt() {
+  local repo_root="$1"
+  local kind="$2"
+  local payload_json="$3"
+  local receipt_json
+
+  receipt_json="$(receipt_record_json "${repo_root}" "${kind}" "${payload_json}")"
+  printf '%s\n' "${receipt_json}" >>"$(receipts_path "${repo_root}")"
+}
+
+append_receipt_capture() {
+  local repo_root="$1"
+  local kind="$2"
+  local payload_json="$3"
+  local receipt_json
+
+  receipt_json="$(receipt_record_json "${repo_root}" "${kind}" "${payload_json}")"
+  printf '%s\n' "${receipt_json}" >>"$(receipts_path "${repo_root}")"
+  printf '%s\n' "${receipt_json}"
 }
 
 current_lanes() {
@@ -964,6 +1016,290 @@ current_lane_for_issue() {
   jq -c --arg issue_id "${issue_id}" '
     map(select(.issue_id == $issue_id)) | .[0] // null
   ' <<<"$(current_lanes "${repo_root}")"
+}
+
+issue_receipt_refs() {
+  local repo_root="$1"
+  local issue_id="$2"
+  local path
+
+  path="$(receipts_path "${repo_root}")"
+  if [ -z "${issue_id}" ] || [ ! -f "${path}" ]; then
+    printf '[]\n'
+    return
+  fi
+
+  jq -Rsc --arg issue_id "${issue_id}" '
+    split("\n")
+    | map(select(length > 0) | (try fromjson catch empty))
+    | map(select((.payload.issue_id // "") == $issue_id) | {timestamp, kind})
+  ' <"${path}"
+}
+
+issue_snapshot_from_result() {
+  local result_json="$1"
+
+  jq -c '
+    if .ok and
+       ((.output | type) == "array") and
+       ((.output | length) > 0) and
+       ((.output[0] | type) == "object")
+    then .output[0]
+    else null
+    end
+  ' <<<"${result_json}"
+}
+
+resolve_revision_commit() {
+  local repo_root="$1"
+  local revision="$2"
+  local lookup_output=""
+  local lookup_exit=0
+  local commit=""
+
+  if lookup_output="$(run_in_repo_capture "${repo_root}" jj --repository "${repo_root}" log -r "${revision}" --no-graph -T 'commit_id ++ "\n"')"; then
+    lookup_exit=0
+  else
+    lookup_exit=$?
+  fi
+
+  commit="$(printf '%s' "${lookup_output}" | awk 'NF { print; exit }')"
+
+  jq -cn \
+    --arg revision "${revision}" \
+    --arg output "${lookup_output}" \
+    --arg commit "${commit}" \
+    --argjson ok "$([ "${lookup_exit}" -eq 0 ] && [ -n "${commit}" ] && echo true || echo false)" \
+    '{
+      ok: $ok,
+      revision: $revision,
+      output: (if ($output | length) > 0 then $output else null end),
+      commit: (if ($commit | length) > 0 then $commit else null end)
+    }'
+}
+
+json_bool() {
+  if [ "${1:-false}" = "true" ]; then
+    printf 'true\n'
+  else
+    printf 'false\n'
+  fi
+}
+
+new_transition_carrier() {
+  local repo_root="$1"
+  local kind="$2"
+  local payload_json="${3:-null}"
+
+  jq -cn \
+    --arg generated_at "$(now_iso8601)" \
+    --arg repo_root "${repo_root}" \
+    --arg service_key "$(service_key "${repo_root}")" \
+    --arg workspace_root "$(workspace_root_dir "${repo_root}")" \
+    --arg request_id "$$-$(date +%s)" \
+    --arg kind "${kind}" \
+    --argjson payload "${payload_json}" \
+    '{
+      generated_at: $generated_at,
+      repo: {
+        root: $repo_root,
+        service_key: $service_key,
+        workspace_root: $workspace_root,
+        request_id: $request_id
+      },
+      tracker: null,
+      service: null,
+      issue: null,
+      lane: null,
+      workspace: null,
+      witnesses: [],
+      intent: {
+        kind: $kind,
+        payload: $payload
+      },
+      admission: null,
+      realization: null,
+      receipts: {
+        prior: [],
+        emitted: null
+      }
+    }'
+}
+
+carrier_set_tracker() {
+  local carrier_json="$1"
+  local tracker_json="$2"
+  jq -c --argjson tracker "${tracker_json}" '.tracker = $tracker' <<<"${carrier_json}"
+}
+
+carrier_set_service() {
+  local carrier_json="$1"
+  local service_json="$2"
+  jq -c --argjson service "${service_json}" '.service = $service' <<<"${carrier_json}"
+}
+
+carrier_set_issue() {
+  local carrier_json="$1"
+  local issue_json="$2"
+  jq -c --argjson issue "${issue_json}" '.issue = $issue' <<<"${carrier_json}"
+}
+
+carrier_set_lane() {
+  local carrier_json="$1"
+  local lane_json="$2"
+  jq -c --argjson lane "${lane_json}" '.lane = $lane' <<<"${carrier_json}"
+}
+
+carrier_set_workspace() {
+  local carrier_json="$1"
+  local workspace_json="$2"
+  jq -c --argjson workspace "${workspace_json}" '.workspace = $workspace' <<<"${carrier_json}"
+}
+
+carrier_set_receipt_refs() {
+  local carrier_json="$1"
+  local prior_json="$2"
+  jq -c --argjson prior "${prior_json}" '.receipts.prior = $prior' <<<"${carrier_json}"
+}
+
+carrier_add_witness() {
+  local carrier_json="$1"
+  local kind="$2"
+  local ok_json="$3"
+  local message="$4"
+  local details_json="${5:-null}"
+
+  jq -c \
+    --arg kind "${kind}" \
+    --argjson ok "${ok_json}" \
+    --arg message "${message}" \
+    --argjson details "${details_json}" \
+    '.witnesses += [{
+      kind: $kind,
+      ok: $ok,
+      message: (if ($message | length) > 0 then $message else null end),
+      details: $details
+    }]' \
+    <<<"${carrier_json}"
+}
+
+carrier_set_admission() {
+  local carrier_json="$1"
+  local admitted_json="$2"
+  local reason="$3"
+  local consulted_json="${4:-[]}"
+
+  jq -c \
+    --argjson admitted "${admitted_json}" \
+    --arg reason "${reason}" \
+    --argjson consulted "${consulted_json}" \
+    '.admission = {
+      admitted: $admitted,
+      reason: (if ($reason | length) > 0 then $reason else null end),
+      consulted: $consulted
+    }' \
+    <<<"${carrier_json}"
+}
+
+carrier_set_realization() {
+  local carrier_json="$1"
+  local realization_json="$2"
+  jq -c --argjson realization "${realization_json}" '.realization = $realization' <<<"${carrier_json}"
+}
+
+carrier_set_emitted_receipt() {
+  local carrier_json="$1"
+  local receipt_json="$2"
+  jq -c --argjson receipt "${receipt_json}" '.receipts.emitted = $receipt' <<<"${carrier_json}"
+}
+
+transition_service_snapshot() {
+  local repo_root="$1"
+  local socket_path="$2"
+
+  jq -cn \
+    --arg socket_path "${socket_path}" \
+    --argjson record "$(current_service_record "${repo_root}")" \
+    --argjson leases "$(current_leases "${repo_root}")" \
+    --argjson backend "$(backend_runtime_snapshot "${repo_root}")" \
+    '{
+      socket_path: $socket_path,
+      record: $record,
+      leases: $leases,
+      backend: $backend
+    }'
+}
+
+transition_workspace_snapshot() {
+  local workspace_name="$1"
+  local workspace_path="$2"
+  local base_rev="${3:-}"
+  local base_commit="${4:-}"
+  local revision="${5:-}"
+  local exists=false
+
+  if [ -n "${workspace_path}" ] && [ -e "${workspace_path}" ]; then
+    exists=true
+  fi
+
+  jq -cn \
+    --arg workspace_name "${workspace_name}" \
+    --arg workspace_path "${workspace_path}" \
+    --arg base_rev "${base_rev}" \
+    --arg base_commit "${base_commit}" \
+    --arg revision "${revision}" \
+    --argjson exists "$(json_bool "${exists}")" \
+    '{
+      name: (if ($workspace_name | length) > 0 then $workspace_name else null end),
+      path: (if ($workspace_path | length) > 0 then $workspace_path else null end),
+      exists: $exists,
+      base_rev: (if ($base_rev | length) > 0 then $base_rev else null end),
+      base_commit: (if ($base_commit | length) > 0 then $base_commit else null end),
+      revision: (if ($revision | length) > 0 then $revision else null end)
+    }'
+}
+
+transition_rejected_result() {
+  local carrier_json="$1"
+
+  jq -cn \
+    --argjson carrier "${carrier_json}" \
+    '{
+      ok: false,
+      error: {
+        message: ($carrier.admission.reason // "transition rejected"),
+        carrier: $carrier
+      }
+    }'
+}
+
+transition_failure_result() {
+  local carrier_json="$1"
+  local message="$2"
+  local details_json="${3:-null}"
+
+  jq -cn \
+    --arg message "${message}" \
+    --argjson carrier "${carrier_json}" \
+    --argjson details "${details_json}" \
+    '{
+      ok: false,
+      error: {
+        message: $message,
+        carrier: $carrier,
+        details: $details
+      }
+    }'
+}
+
+transition_success_result() {
+  local carrier_json="$1"
+  local payload_json="$2"
+
+  jq -cn \
+    --argjson carrier "${carrier_json}" \
+    --argjson payload "${payload_json}" \
+    '{ok:true, carrier:$carrier, payload:$payload}'
 }
 
 upsert_lane_state() {
@@ -1922,6 +2258,880 @@ archive_lane_transition() {
   jq -cn --argjson payload "${payload_json}" '{ok:true, payload:$payload}'
 }
 
+refresh_transition_board() {
+  local repo_root="$1"
+  local socket_path="$2"
+
+  tracker_status_projection "${repo_root}" "${socket_path}" >/dev/null
+  board_status_projection "${repo_root}"
+}
+
+restore_lane_state_snapshot() {
+  local repo_root="$1"
+  local lane_json="$2"
+
+  if [ -z "${lane_json}" ] || [ "${lane_json}" = "null" ]; then
+    return 0
+  fi
+
+  upsert_lane_state "${repo_root}" "${lane_json}"
+}
+
+rollback_launch_artifacts() {
+  local repo_root="$1"
+  local issue_id="$2"
+  local workspace_name="$3"
+  local workspace_path="$4"
+  local remove_lane_exit=0
+  local forget_output=""
+  local forget_exit=0
+  local remove_output=""
+  local remove_exit=0
+
+  if [ -n "${issue_id}" ]; then
+    remove_lane_state "${repo_root}" "${issue_id}" >/dev/null 2>&1 || remove_lane_exit=$?
+  fi
+
+  if [ -n "${workspace_name}" ]; then
+    if forget_output="$(run_in_repo_capture "${repo_root}" jj --repository "${repo_root}" workspace forget "${workspace_name}")"; then
+      forget_exit=0
+    else
+      forget_exit=$?
+    fi
+  fi
+
+  if [ -n "${workspace_path}" ] && [ -e "${workspace_path}" ]; then
+    if remove_output="$(run_in_repo_capture "${repo_root}" rm -rf -- "${workspace_path}")"; then
+      remove_exit=0
+    else
+      remove_exit=$?
+    fi
+  fi
+
+  jq -cn \
+    --arg issue_id "${issue_id}" \
+    --arg workspace_name "${workspace_name}" \
+    --arg workspace_path "${workspace_path}" \
+    --argjson remove_lane_exit "${remove_lane_exit}" \
+    --argjson forget_exit "${forget_exit}" \
+    --arg forget_output "${forget_output}" \
+    --argjson remove_exit "${remove_exit}" \
+    --arg remove_output "${remove_output}" \
+    '{
+      issue_id: $issue_id,
+      workspace_name: $workspace_name,
+      workspace_path: $workspace_path,
+      remove_lane_exit: $remove_lane_exit,
+      forget_workspace: {
+        exit_code: $forget_exit,
+        output: (if ($forget_output | length) > 0 then $forget_output else null end)
+      },
+      remove_workspace: {
+        exit_code: $remove_exit,
+        output: (if ($remove_output | length) > 0 then $remove_output else null end)
+      }
+    }'
+}
+
+build_claim_issue_carrier() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local carrier
+  local issue_show_result="null"
+  local ready_result="null"
+  local issue_json="null"
+  local issue_exists=false
+  local issue_status=""
+  local ready_claimable=false
+  local admission_reason=""
+
+  carrier="$(new_transition_carrier "${repo_root}" "claim_issue" "$(jq -cn --arg issue_id "${issue_id}" '{issue_id:$issue_id}')")"
+  carrier="$(carrier_set_service "${carrier}" "$(transition_service_snapshot "${repo_root}" "${socket_path}")")"
+  carrier="$(carrier_set_receipt_refs "${carrier}" "$(issue_receipt_refs "${repo_root}" "${issue_id}")")"
+
+  if [ -n "${issue_id}" ]; then
+    issue_show_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_issue_show" issue show "${issue_id}")"
+    ready_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_ready" ready)"
+  fi
+
+  carrier="$(carrier_set_tracker "${carrier}" "$(jq -cn --argjson issue_show "${issue_show_result}" --argjson ready "${ready_result}" '{issue_show:$issue_show, ready:$ready}')")"
+
+  issue_json="$(issue_snapshot_from_result "${issue_show_result}")"
+  if [ "${issue_json}" != "null" ]; then
+    issue_exists=true
+    issue_status="$(jq -r '.status // ""' <<<"${issue_json}")"
+    carrier="$(carrier_set_issue "${carrier}" "${issue_json}")"
+  fi
+
+  if [ -n "${issue_id}" ] && jq -e --arg issue_id "${issue_id}" '.ok and ((.output | type) == "array") and any(.output[]?; (.id // "") == $issue_id)' >/dev/null <<<"${ready_result}"; then
+    ready_claimable=true
+  fi
+
+  carrier="$(carrier_add_witness "${carrier}" "issue_id" "$(json_bool "$([ -n "${issue_id}" ] && echo true || echo false)")" "issue_id is required" "$(jq -cn --arg issue_id "${issue_id}" '{issue_id:$issue_id}')")"
+  carrier="$(carrier_add_witness "${carrier}" "issue_exists" "$(json_bool "${issue_exists}")" "issue must exist" "$(jq -cn --argjson issue "${issue_json}" '{issue:$issue}')")"
+  carrier="$(carrier_add_witness "${carrier}" "issue_status_open" "$(json_bool "$([ "${issue_status}" = "open" ] && echo true || echo false)")" "issue must be open before claim" "$(jq -cn --arg status "${issue_status}" '{status:$status}')")"
+  carrier="$(carrier_add_witness "${carrier}" "issue_ready" "$(json_bool "${ready_claimable}")" "issue must be ready to claim" "$(jq -cn --argjson ready "${ready_result}" '{ready:$ready}')")"
+
+  if [ -z "${issue_id}" ]; then
+    admission_reason="claim_issue requires issue_id"
+  elif [ "${issue_exists}" != true ]; then
+    admission_reason="claim_issue requires an existing issue"
+  elif [ "${issue_status}" != "open" ]; then
+    admission_reason="claim_issue requires an open issue"
+  elif [ "${ready_claimable}" != true ]; then
+    admission_reason="claim_issue requires a ready issue"
+  fi
+
+  carrier="$(carrier_set_admission "${carrier}" "$(json_bool "$([ -z "${admission_reason}" ] && echo true || echo false)")" "${admission_reason}" '["structural","runtime"]')"
+  printf '%s\n' "${carrier}"
+}
+
+build_close_issue_carrier() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local reason="$4"
+  local carrier
+  local issue_show_result="null"
+  local issue_json="null"
+  local issue_exists=false
+  local issue_status=""
+  local lane_json="null"
+  local no_live_lane=true
+  local admission_reason=""
+
+  carrier="$(new_transition_carrier "${repo_root}" "close_issue" "$(jq -cn --arg issue_id "${issue_id}" --arg reason "${reason}" '{issue_id:$issue_id, reason:$reason}')")"
+  carrier="$(carrier_set_service "${carrier}" "$(transition_service_snapshot "${repo_root}" "${socket_path}")")"
+  carrier="$(carrier_set_receipt_refs "${carrier}" "$(issue_receipt_refs "${repo_root}" "${issue_id}")")"
+
+  if [ -n "${issue_id}" ]; then
+    issue_show_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_issue_show" issue show "${issue_id}")"
+    lane_json="$(current_lane_for_issue "${repo_root}" "${issue_id}")"
+  fi
+
+  carrier="$(carrier_set_tracker "${carrier}" "$(jq -cn --argjson issue_show "${issue_show_result}" '{issue_show:$issue_show}')")"
+
+  issue_json="$(issue_snapshot_from_result "${issue_show_result}")"
+  if [ "${issue_json}" != "null" ]; then
+    issue_exists=true
+    issue_status="$(jq -r '.status // ""' <<<"${issue_json}")"
+    carrier="$(carrier_set_issue "${carrier}" "${issue_json}")"
+  fi
+
+  if [ "${lane_json}" != "null" ]; then
+    no_live_lane=false
+    carrier="$(carrier_set_lane "${carrier}" "${lane_json}")"
+  fi
+
+  carrier="$(carrier_add_witness "${carrier}" "issue_id" "$(json_bool "$([ -n "${issue_id}" ] && echo true || echo false)")" "issue_id is required" "$(jq -cn --arg issue_id "${issue_id}" '{issue_id:$issue_id}')")"
+  carrier="$(carrier_add_witness "${carrier}" "close_reason" "$(json_bool "$([ -n "${reason}" ] && echo true || echo false)")" "close reason is required" "$(jq -cn --arg reason "${reason}" '{reason:$reason}')")"
+  carrier="$(carrier_add_witness "${carrier}" "issue_exists" "$(json_bool "${issue_exists}")" "issue must exist" "$(jq -cn --argjson issue "${issue_json}" '{issue:$issue}')")"
+  carrier="$(carrier_add_witness "${carrier}" "issue_not_closed" "$(json_bool "$([ "${issue_status}" != "closed" ] && echo true || echo false)")" "issue must not already be closed" "$(jq -cn --arg status "${issue_status}" '{status:$status}')")"
+  carrier="$(carrier_add_witness "${carrier}" "no_live_lane" "$(json_bool "${no_live_lane}")" "close_issue requires the live lane to be archived first" "$(jq -cn --argjson lane "${lane_json}" '{lane:$lane}')")"
+
+  if [ -z "${issue_id}" ]; then
+    admission_reason="close_issue requires issue_id"
+  elif [ -z "${reason}" ]; then
+    admission_reason="close_issue requires reason"
+  elif [ "${issue_exists}" != true ]; then
+    admission_reason="close_issue requires an existing issue"
+  elif [ "${issue_status}" = "closed" ]; then
+    admission_reason="close_issue requires an open or in-progress issue"
+  elif [ "${no_live_lane}" != true ]; then
+    admission_reason="close_issue requires the live lane to be archived first"
+  fi
+
+  carrier="$(carrier_set_admission "${carrier}" "$(json_bool "$([ -z "${admission_reason}" ] && echo true || echo false)")" "${admission_reason}" '["structural","authority"]')"
+  printf '%s\n' "${carrier}"
+}
+
+build_launch_lane_carrier() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local base_rev="$4"
+  local slug_arg="${5:-}"
+  local carrier
+  local issue_show_result="null"
+  local issue_json="null"
+  local issue_exists=false
+  local issue_status=""
+  local issue_title=""
+  local lane_json="null"
+  local no_live_lane=true
+  local slug=""
+  local workspace_name=""
+  local workspace_path=""
+  local workspace_absent=true
+  local base_lookup_json="null"
+  local base_commit=""
+  local admission_reason=""
+
+  carrier="$(new_transition_carrier "${repo_root}" "launch_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg base_rev "${base_rev}" --arg slug "${slug_arg}" '{issue_id:$issue_id, base_rev:$base_rev, slug:$slug}')")"
+  carrier="$(carrier_set_service "${carrier}" "$(transition_service_snapshot "${repo_root}" "${socket_path}")")"
+  carrier="$(carrier_set_receipt_refs "${carrier}" "$(issue_receipt_refs "${repo_root}" "${issue_id}")")"
+
+  if [ -n "${issue_id}" ]; then
+    issue_show_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_issue_show" issue show "${issue_id}")"
+    lane_json="$(current_lane_for_issue "${repo_root}" "${issue_id}")"
+  fi
+
+  issue_json="$(issue_snapshot_from_result "${issue_show_result}")"
+  if [ "${issue_json}" != "null" ]; then
+    issue_exists=true
+    issue_status="$(jq -r '.status // ""' <<<"${issue_json}")"
+    issue_title="$(jq -r '.title // ""' <<<"${issue_json}")"
+    carrier="$(carrier_set_issue "${carrier}" "${issue_json}")"
+  fi
+
+  if [ "${lane_json}" != "null" ]; then
+    no_live_lane=false
+    carrier="$(carrier_set_lane "${carrier}" "${lane_json}")"
+  fi
+
+  slug="${slug_arg}"
+  if [ -z "${slug}" ]; then
+    slug="$(slugify_fragment "${issue_title}")"
+  fi
+  if [ -z "${slug}" ]; then
+    slug="lane"
+  fi
+
+  workspace_name="${issue_id}-${slug}"
+  workspace_path="$(workspace_root_dir "${repo_root}")/${workspace_name}"
+  if [ -e "${workspace_path}" ]; then
+    workspace_absent=false
+  fi
+
+  if [ -n "${base_rev}" ]; then
+    base_lookup_json="$(resolve_revision_commit "${repo_root}" "${base_rev}")"
+    base_commit="$(jq -r '.commit // ""' <<<"${base_lookup_json}")"
+  fi
+
+  carrier="$(carrier_set_tracker "${carrier}" "$(jq -cn --argjson issue_show "${issue_show_result}" '{issue_show:$issue_show}')")"
+  carrier="$(carrier_set_workspace "${carrier}" "$(transition_workspace_snapshot "${workspace_name}" "${workspace_path}" "${base_rev}" "${base_commit}")")"
+
+  carrier="$(carrier_add_witness "${carrier}" "issue_id" "$(json_bool "$([ -n "${issue_id}" ] && echo true || echo false)")" "issue_id is required" "$(jq -cn --arg issue_id "${issue_id}" '{issue_id:$issue_id}')")"
+  carrier="$(carrier_add_witness "${carrier}" "base_rev" "$(json_bool "$([ -n "${base_rev}" ] && echo true || echo false)")" "base_rev is required" "$(jq -cn --arg base_rev "${base_rev}" '{base_rev:$base_rev}')")"
+  carrier="$(carrier_add_witness "${carrier}" "issue_exists" "$(json_bool "${issue_exists}")" "issue must exist" "$(jq -cn --argjson issue "${issue_json}" '{issue:$issue}')")"
+  carrier="$(carrier_add_witness "${carrier}" "issue_in_progress" "$(json_bool "$([ "${issue_status}" = "in_progress" ] && echo true || echo false)")" "launch_lane requires a claimed in_progress issue" "$(jq -cn --arg status "${issue_status}" '{status:$status}')")"
+  carrier="$(carrier_add_witness "${carrier}" "no_live_lane" "$(json_bool "${no_live_lane}")" "launch_lane requires no existing live lane" "$(jq -cn --argjson lane "${lane_json}" '{lane:$lane}')")"
+  carrier="$(carrier_add_witness "${carrier}" "base_rev_resolves" "$(jq -r '.ok // false' <<<"${base_lookup_json}")" "base_rev must resolve to a commit" "$(jq -cn --argjson base_lookup "${base_lookup_json}" '{base_lookup:$base_lookup}')")"
+  carrier="$(carrier_add_witness "${carrier}" "workspace_absent" "$(json_bool "${workspace_absent}")" "workspace path must be absent before launch" "$(jq -cn --arg workspace_name "${workspace_name}" --arg workspace_path "${workspace_path}" '{workspace_name:$workspace_name, workspace_path:$workspace_path}')")"
+
+  if [ -z "${issue_id}" ]; then
+    admission_reason="launch_lane requires issue_id"
+  elif [ -z "${base_rev}" ]; then
+    admission_reason="launch_lane requires base_rev"
+  elif [ "${issue_exists}" != true ]; then
+    admission_reason="launch_lane requires an existing issue"
+  elif [ "${issue_status}" != "in_progress" ]; then
+    admission_reason="launch_lane requires a claimed in_progress issue"
+  elif [ "${no_live_lane}" != true ]; then
+    admission_reason="launch_lane requires no existing live lane"
+  elif ! jq -e '.ok == true' >/dev/null <<<"${base_lookup_json}"; then
+    admission_reason="base_rev did not resolve to a commit"
+  elif [ "${workspace_absent}" != true ]; then
+    admission_reason="workspace path already exists"
+  fi
+
+  carrier="$(carrier_set_admission "${carrier}" "$(json_bool "$([ -z "${admission_reason}" ] && echo true || echo false)")" "${admission_reason}" '["structural","runtime"]')"
+  printf '%s\n' "${carrier}"
+}
+
+build_handoff_lane_carrier() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local revision="$4"
+  local note="${5:-}"
+  local carrier
+  local lane_json="null"
+  local lane_exists=false
+  local stored_status=""
+  local revision_lookup_json="null"
+  local admission_reason=""
+
+  carrier="$(new_transition_carrier "${repo_root}" "handoff_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg revision "${revision}" --arg note "${note}" '{issue_id:$issue_id, revision:$revision, note:$note}')")"
+  carrier="$(carrier_set_service "${carrier}" "$(transition_service_snapshot "${repo_root}" "${socket_path}")")"
+  carrier="$(carrier_set_receipt_refs "${carrier}" "$(issue_receipt_refs "${repo_root}" "${issue_id}")")"
+
+  if [ -n "${issue_id}" ]; then
+    lane_json="$(current_lane_for_issue "${repo_root}" "${issue_id}")"
+  fi
+  if [ "${lane_json}" != "null" ]; then
+    lane_exists=true
+    stored_status="$(jq -r '.status // ""' <<<"${lane_json}")"
+    carrier="$(carrier_set_lane "${carrier}" "${lane_json}")"
+  fi
+
+  if [ -n "${revision}" ]; then
+    revision_lookup_json="$(resolve_revision_commit "${repo_root}" "${revision}")"
+  fi
+
+  carrier="$(carrier_set_workspace "${carrier}" "$(transition_workspace_snapshot "" "$(jq -r '.workspace_path // ""' <<<"${lane_json}")" "" "" "$(jq -r '.commit // ""' <<<"${revision_lookup_json}")")")"
+  carrier="$(carrier_add_witness "${carrier}" "issue_id" "$(json_bool "$([ -n "${issue_id}" ] && echo true || echo false)")" "issue_id is required" "$(jq -cn --arg issue_id "${issue_id}" '{issue_id:$issue_id}')")"
+  carrier="$(carrier_add_witness "${carrier}" "revision" "$(json_bool "$([ -n "${revision}" ] && echo true || echo false)")" "revision is required" "$(jq -cn --arg revision "${revision}" '{revision:$revision}')")"
+  carrier="$(carrier_add_witness "${carrier}" "lane_exists" "$(json_bool "${lane_exists}")" "handoff_lane requires an existing lane record" "$(jq -cn --argjson lane "${lane_json}" '{lane:$lane}')")"
+  carrier="$(carrier_add_witness "${carrier}" "lane_handoffable" "$(json_bool "$([ "${stored_status}" != "finished" ] && echo true || echo false)")" "handoff_lane requires a non-finished lane" "$(jq -cn --arg status "${stored_status}" '{status:$status}')")"
+  carrier="$(carrier_add_witness "${carrier}" "revision_resolves" "$(jq -r '.ok // false' <<<"${revision_lookup_json}")" "revision must resolve to a commit" "$(jq -cn --argjson revision_lookup "${revision_lookup_json}" '{revision_lookup:$revision_lookup}')")"
+
+  if [ -z "${issue_id}" ]; then
+    admission_reason="handoff_lane requires issue_id"
+  elif [ -z "${revision}" ]; then
+    admission_reason="handoff_lane requires revision"
+  elif [ "${lane_exists}" != true ]; then
+    admission_reason="handoff_lane requires an existing lane record"
+  elif [ "${stored_status}" = "finished" ]; then
+    admission_reason="handoff_lane requires a non-finished lane"
+  elif ! jq -e '.ok == true' >/dev/null <<<"${revision_lookup_json}"; then
+    admission_reason="revision did not resolve to a commit"
+  fi
+
+  carrier="$(carrier_set_admission "${carrier}" "$(json_bool "$([ -z "${admission_reason}" ] && echo true || echo false)")" "${admission_reason}" '["structural","runtime"]')"
+  printf '%s\n' "${carrier}"
+}
+
+build_finish_lane_carrier() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local outcome="$4"
+  local note="${5:-}"
+  local carrier
+  local lane_json="null"
+  local lane_exists=false
+  local stored_status=""
+  local finishable=false
+  local admission_reason=""
+
+  carrier="$(new_transition_carrier "${repo_root}" "finish_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg outcome "${outcome}" --arg note "${note}" '{issue_id:$issue_id, outcome:$outcome, note:$note}')")"
+  carrier="$(carrier_set_service "${carrier}" "$(transition_service_snapshot "${repo_root}" "${socket_path}")")"
+  carrier="$(carrier_set_receipt_refs "${carrier}" "$(issue_receipt_refs "${repo_root}" "${issue_id}")")"
+
+  if [ -n "${issue_id}" ]; then
+    lane_json="$(current_lane_for_issue "${repo_root}" "${issue_id}")"
+  fi
+  if [ "${lane_json}" != "null" ]; then
+    lane_exists=true
+    stored_status="$(jq -r '.status // ""' <<<"${lane_json}")"
+    carrier="$(carrier_set_lane "${carrier}" "${lane_json}")"
+  fi
+
+  if [ "${stored_status}" = "launched" ] || [ "${stored_status}" = "handoff" ]; then
+    finishable=true
+  fi
+
+  carrier="$(carrier_add_witness "${carrier}" "issue_id" "$(json_bool "$([ -n "${issue_id}" ] && echo true || echo false)")" "issue_id is required" "$(jq -cn --arg issue_id "${issue_id}" '{issue_id:$issue_id}')")"
+  carrier="$(carrier_add_witness "${carrier}" "outcome" "$(json_bool "$([ -n "${outcome}" ] && echo true || echo false)")" "outcome is required" "$(jq -cn --arg outcome "${outcome}" '{outcome:$outcome}')")"
+  carrier="$(carrier_add_witness "${carrier}" "lane_exists" "$(json_bool "${lane_exists}")" "finish_lane requires an existing lane record" "$(jq -cn --argjson lane "${lane_json}" '{lane:$lane}')")"
+  carrier="$(carrier_add_witness "${carrier}" "lane_finishable" "$(json_bool "${finishable}")" "finish_lane requires a launched or handed-off lane" "$(jq -cn --arg status "${stored_status}" '{status:$status}')")"
+
+  if [ -z "${issue_id}" ]; then
+    admission_reason="finish_lane requires issue_id"
+  elif [ -z "${outcome}" ]; then
+    admission_reason="finish_lane requires outcome"
+  elif [ "${lane_exists}" != true ]; then
+    admission_reason="finish_lane requires an existing lane record"
+  elif [ "${finishable}" != true ]; then
+    admission_reason="finish_lane requires a launched or handed-off lane"
+  fi
+
+  carrier="$(carrier_set_admission "${carrier}" "$(json_bool "$([ -z "${admission_reason}" ] && echo true || echo false)")" "${admission_reason}" '["structural","runtime"]')"
+  printf '%s\n' "${carrier}"
+}
+
+build_archive_lane_carrier() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local note="${4:-}"
+  local carrier
+  local lane_json="null"
+  local lane_exists=false
+  local stored_status=""
+  local workspace_path=""
+  local workspace_removed=true
+  local admission_reason=""
+
+  carrier="$(new_transition_carrier "${repo_root}" "archive_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg note "${note}" '{issue_id:$issue_id, note:$note}')")"
+  carrier="$(carrier_set_service "${carrier}" "$(transition_service_snapshot "${repo_root}" "${socket_path}")")"
+  carrier="$(carrier_set_receipt_refs "${carrier}" "$(issue_receipt_refs "${repo_root}" "${issue_id}")")"
+
+  if [ -n "${issue_id}" ]; then
+    lane_json="$(current_lane_for_issue "${repo_root}" "${issue_id}")"
+  fi
+  if [ "${lane_json}" != "null" ]; then
+    lane_exists=true
+    stored_status="$(jq -r '.status // ""' <<<"${lane_json}")"
+    workspace_path="$(jq -r '.workspace_path // ""' <<<"${lane_json}")"
+    carrier="$(carrier_set_lane "${carrier}" "${lane_json}")"
+  fi
+
+  if [ -n "${workspace_path}" ] && [ -d "${workspace_path}" ]; then
+    workspace_removed=false
+  fi
+
+  carrier="$(carrier_set_workspace "${carrier}" "$(transition_workspace_snapshot "" "${workspace_path}")")"
+  carrier="$(carrier_add_witness "${carrier}" "issue_id" "$(json_bool "$([ -n "${issue_id}" ] && echo true || echo false)")" "issue_id is required" "$(jq -cn --arg issue_id "${issue_id}" '{issue_id:$issue_id}')")"
+  carrier="$(carrier_add_witness "${carrier}" "lane_exists" "$(json_bool "${lane_exists}")" "archive_lane requires an existing lane record" "$(jq -cn --argjson lane "${lane_json}" '{lane:$lane}')")"
+  carrier="$(carrier_add_witness "${carrier}" "lane_finished" "$(json_bool "$([ "${stored_status}" = "finished" ] && echo true || echo false)")" "archive_lane requires a finished lane" "$(jq -cn --arg status "${stored_status}" '{status:$status}')")"
+  carrier="$(carrier_add_witness "${carrier}" "workspace_removed" "$(json_bool "${workspace_removed}")" "archive_lane requires the lane workspace to be removed first" "$(jq -cn --arg workspace_path "${workspace_path}" '{workspace_path:$workspace_path}')")"
+
+  if [ -z "${issue_id}" ]; then
+    admission_reason="archive_lane requires issue_id"
+  elif [ "${lane_exists}" != true ]; then
+    admission_reason="archive_lane requires an existing lane record"
+  elif [ "${stored_status}" != "finished" ]; then
+    admission_reason="archive_lane requires a finished lane"
+  elif [ "${workspace_removed}" != true ]; then
+    admission_reason="archive_lane requires the lane workspace to be removed first"
+  fi
+
+  carrier="$(carrier_set_admission "${carrier}" "$(json_bool "$([ -z "${admission_reason}" ] && echo true || echo false)")" "${admission_reason}" '["structural","runtime","replay"]')"
+  printf '%s\n' "${carrier}"
+}
+
+realize_claim_issue_transition() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local carrier_json="$3"
+  local issue_id
+  local claim_result
+  local issue_json
+  local realization_json
+  local board_json
+  local board_summary
+  local receipt_payload
+  local receipt_json
+  local payload_json
+
+  issue_id="$(jq -r '.intent.payload.issue_id // ""' <<<"${carrier_json}")"
+  claim_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_issue_claim" issue claim "${issue_id}")"
+  if ! jq -e --arg issue_id "${issue_id}" '
+      .ok and
+      ((.output | type) == "array") and
+      ((.output | length) > 0) and
+      ((.output[0] | type) == "object") and
+      ((.output[0].id // "") == $issue_id)
+    ' >/dev/null <<<"${claim_result}"; then
+    realization_json="$(jq -cn --argjson tracker "${claim_result}" '{kind:"tracker_issue_claim", tracker:$tracker}')"
+    carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+    transition_failure_result "${carrier_json}" "tracker issue claim failed" "$(jq -cn --argjson tracker "${claim_result}" '{tracker:$tracker}')"
+    return 0
+  fi
+
+  issue_json="$(jq -c '.output[0]' <<<"${claim_result}")"
+  carrier_json="$(carrier_set_issue "${carrier_json}" "${issue_json}")"
+  realization_json="$(jq -cn --argjson tracker "${claim_result}" '{kind:"tracker_issue_claim", tracker:$tracker}')"
+  carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+
+  board_json="$(refresh_transition_board "${repo_root}" "${socket_path}")"
+  board_summary="$(jq -c '.summary // null' <<<"${board_json}")"
+  receipt_payload="$(jq -cn --arg issue_id "${issue_id}" --argjson issue "${issue_json}" --argjson board_summary "${board_summary}" '{issue_id:$issue_id, issue:$issue, board_summary:$board_summary}')"
+  receipt_json="$(append_receipt_capture "${repo_root}" "issue.claim" "${receipt_payload}")"
+  carrier_json="$(carrier_set_emitted_receipt "${carrier_json}" "${receipt_json}")"
+
+  payload_json="$(jq -cn --arg repo_root "${repo_root}" --arg issue_id "${issue_id}" --argjson issue "${issue_json}" --argjson board_summary "${board_summary}" '{repo_root:$repo_root, issue_id:$issue_id, issue:$issue, board_summary:$board_summary}')"
+  transition_success_result "${carrier_json}" "${payload_json}"
+}
+
+realize_close_issue_transition() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local carrier_json="$3"
+  local issue_id
+  local reason
+  local close_result
+  local issue_json
+  local realization_json
+  local board_json
+  local board_summary
+  local receipt_payload
+  local receipt_json
+  local payload_json
+
+  issue_id="$(jq -r '.intent.payload.issue_id // ""' <<<"${carrier_json}")"
+  reason="$(jq -r '.intent.payload.reason // ""' <<<"${carrier_json}")"
+
+  close_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_issue_close" issue close "${issue_id}" --reason "${reason}")"
+  if ! jq -e --arg issue_id "${issue_id}" '
+      .ok and
+      ((.output | type) == "array") and
+      ((.output | length) > 0) and
+      ((.output[0] | type) == "object") and
+      ((.output[0].id // "") == $issue_id) and
+      ((.output[0].status // "") == "closed")
+    ' >/dev/null <<<"${close_result}"; then
+    realization_json="$(jq -cn --argjson tracker "${close_result}" '{kind:"tracker_issue_close", tracker:$tracker}')"
+    carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+    transition_failure_result "${carrier_json}" "tracker issue close failed" "$(jq -cn --argjson tracker "${close_result}" '{tracker:$tracker}')"
+    return 0
+  fi
+
+  issue_json="$(jq -c '.output[0]' <<<"${close_result}")"
+  carrier_json="$(carrier_set_issue "${carrier_json}" "${issue_json}")"
+  realization_json="$(jq -cn --argjson tracker "${close_result}" '{kind:"tracker_issue_close", tracker:$tracker}')"
+  carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+
+  board_json="$(refresh_transition_board "${repo_root}" "${socket_path}")"
+  board_summary="$(jq -c '.summary // null' <<<"${board_json}")"
+  receipt_payload="$(jq -cn --arg issue_id "${issue_id}" --arg reason "${reason}" --argjson issue "${issue_json}" --argjson board_summary "${board_summary}" '{issue_id:$issue_id, reason:$reason, issue:$issue, board_summary:$board_summary}')"
+  receipt_json="$(append_receipt_capture "${repo_root}" "issue.close" "${receipt_payload}")"
+  carrier_json="$(carrier_set_emitted_receipt "${carrier_json}" "${receipt_json}")"
+
+  payload_json="$(jq -cn --arg repo_root "${repo_root}" --arg issue_id "${issue_id}" --arg reason "${reason}" --argjson issue "${issue_json}" --argjson board_summary "${board_summary}" '{repo_root:$repo_root, issue_id:$issue_id, reason:$reason, issue:$issue, board_summary:$board_summary}')"
+  transition_success_result "${carrier_json}" "${payload_json}"
+}
+
+realize_launch_lane_transition() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local carrier_json="$3"
+  local issue_id
+  local issue_title
+  local issue_json
+  local workspace_name
+  local workspace_path
+  local base_rev
+  local base_commit
+  local add_output=""
+  local add_exit=0
+  local describe_output=""
+  local describe_exit=0
+  local rollback_json="null"
+  local lane_record
+  local realization_json
+  local board_json
+  local board_summary
+  local lanes_json
+  local receipt_payload
+  local receipt_json=""
+  local payload_json
+
+  issue_id="$(jq -r '.intent.payload.issue_id // ""' <<<"${carrier_json}")"
+  base_rev="$(jq -r '.intent.payload.base_rev // ""' <<<"${carrier_json}")"
+  issue_json="$(jq -c '.issue // null' <<<"${carrier_json}")"
+  issue_title="$(jq -r '.issue.title // ""' <<<"${carrier_json}")"
+  workspace_name="$(jq -r '.workspace.name // ""' <<<"${carrier_json}")"
+  workspace_path="$(jq -r '.workspace.path // ""' <<<"${carrier_json}")"
+  base_commit="$(jq -r '.workspace.base_commit // ""' <<<"${carrier_json}")"
+
+  mkdir -p "$(workspace_root_dir "${repo_root}")"
+  if add_output="$(run_in_repo_capture "${repo_root}" jj --repository "${repo_root}" workspace add "${workspace_path}" --name "${workspace_name}" -r "${base_rev}")"; then
+    add_exit=0
+  else
+    add_exit=$?
+  fi
+  if [ "${add_exit}" -ne 0 ]; then
+    realization_json="$(jq -cn --arg workspace_name "${workspace_name}" --arg workspace_path "${workspace_path}" --arg base_rev "${base_rev}" --arg output "${add_output}" '{kind:"jj_workspace_add", workspace_name:$workspace_name, workspace_path:$workspace_path, base_rev:$base_rev, output:$output}')"
+    carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+    transition_failure_result "${carrier_json}" "jj workspace add failed" "$(jq -cn --arg workspace_name "${workspace_name}" --arg workspace_path "${workspace_path}" --arg base_rev "${base_rev}" --arg output "${add_output}" '{workspace_name:$workspace_name, workspace_path:$workspace_path, base_rev:$base_rev, output:$output}')"
+    return 0
+  fi
+
+  if describe_output="$(run_in_repo_capture "${repo_root}" jj --repository "${workspace_path}" describe -m "${issue_id}: wip")"; then
+    describe_exit=0
+  else
+    describe_exit=$?
+  fi
+  if [ "${describe_exit}" -ne 0 ]; then
+    rollback_json="$(rollback_launch_artifacts "${repo_root}" "${issue_id}" "${workspace_name}" "${workspace_path}")"
+    realization_json="$(jq -cn --arg workspace_name "${workspace_name}" --arg workspace_path "${workspace_path}" --arg base_rev "${base_rev}" --arg add_output "${add_output}" --arg describe_output "${describe_output}" --argjson rollback "${rollback_json}" '{kind:"launch_lane", workspace_name:$workspace_name, workspace_path:$workspace_path, base_rev:$base_rev, add_output:$add_output, describe_output:$describe_output, rollback:$rollback}')"
+    carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+    transition_failure_result "${carrier_json}" "jj describe failed after workspace creation" "$(jq -cn --arg workspace_name "${workspace_name}" --arg workspace_path "${workspace_path}" --arg output "${describe_output}" --argjson rollback "${rollback_json}" '{workspace_name:$workspace_name, workspace_path:$workspace_path, output:$output, rollback:$rollback}')"
+    return 0
+  fi
+
+  lane_record="$(jq -cn --arg issue_id "${issue_id}" --arg issue_title "${issue_title}" --arg workspace_name "${workspace_name}" --arg workspace_path "${workspace_path}" --arg base_rev "${base_rev}" --arg base_commit "${base_commit}" --arg launched_at "$(now_iso8601)" '{issue_id:$issue_id, issue_title:$issue_title, status:"launched", workspace_name:$workspace_name, workspace_path:$workspace_path, base_rev:$base_rev, base_commit:$base_commit, launched_at:$launched_at}')"
+  if ! upsert_lane_state "${repo_root}" "${lane_record}"; then
+    rollback_json="$(rollback_launch_artifacts "${repo_root}" "${issue_id}" "${workspace_name}" "${workspace_path}")"
+    realization_json="$(jq -cn --argjson lane "${lane_record}" --argjson rollback "${rollback_json}" '{kind:"launch_lane", lane:$lane, rollback:$rollback}')"
+    carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+    transition_failure_result "${carrier_json}" "failed to persist lane state" "$(jq -cn --argjson lane "${lane_record}" --argjson rollback "${rollback_json}" '{lane:$lane, rollback:$rollback}')"
+    return 0
+  fi
+
+  board_json="$(refresh_transition_board "${repo_root}" "${socket_path}")"
+  board_summary="$(jq -c '.summary // null' <<<"${board_json}")"
+  lanes_json="$(jq -c '.lanes // []' <<<"${board_json}")"
+  receipt_payload="$(jq -cn --arg issue_id "${issue_id}" --arg issue_title "${issue_title}" --arg workspace_name "${workspace_name}" --arg workspace_path "${workspace_path}" --arg base_rev "${base_rev}" --arg base_commit "${base_commit}" --argjson issue "${issue_json}" --argjson board_summary "${board_summary}" '{issue_id:$issue_id, issue_title:$issue_title, workspace_name:$workspace_name, workspace_path:$workspace_path, base_rev:$base_rev, base_commit:$base_commit, issue:$issue, board_summary:$board_summary}')"
+
+  if ! receipt_json="$(append_receipt_capture "${repo_root}" "lane.launch" "${receipt_payload}")"; then
+    rollback_json="$(rollback_launch_artifacts "${repo_root}" "${issue_id}" "${workspace_name}" "${workspace_path}")"
+    realization_json="$(jq -cn --argjson lane "${lane_record}" --argjson rollback "${rollback_json}" '{kind:"launch_lane", lane:$lane, rollback:$rollback}')"
+    carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+    transition_failure_result "${carrier_json}" "failed to append lane.launch receipt" "$(jq -cn --argjson rollback "${rollback_json}" '{rollback:$rollback}')"
+    return 0
+  fi
+
+  carrier_json="$(carrier_set_lane "${carrier_json}" "${lane_record}")"
+  carrier_json="$(carrier_set_realization "${carrier_json}" "$(jq -cn --arg workspace_name "${workspace_name}" --arg workspace_path "${workspace_path}" --arg base_rev "${base_rev}" --arg base_commit "${base_commit}" --arg add_output "${add_output}" --arg describe_output "${describe_output}" '{kind:"launch_lane", workspace_name:$workspace_name, workspace_path:$workspace_path, base_rev:$base_rev, base_commit:$base_commit, add_output:$add_output, describe_output:$describe_output}')")"
+  carrier_json="$(carrier_set_emitted_receipt "${carrier_json}" "${receipt_json}")"
+
+  payload_json="$(jq -cn --arg repo_root "${repo_root}" --arg issue_id "${issue_id}" --arg issue_title "${issue_title}" --arg workspace_name "${workspace_name}" --arg workspace_path "${workspace_path}" --arg base_rev "${base_rev}" --arg base_commit "${base_commit}" --argjson issue "${issue_json}" --argjson lanes "${lanes_json}" --argjson board_summary "${board_summary}" '{repo_root:$repo_root, issue_id:$issue_id, issue_title:$issue_title, issue:$issue, workspace_name:$workspace_name, workspace_path:$workspace_path, base_rev:$base_rev, base_commit:$base_commit, lanes:$lanes, board_summary:$board_summary}')"
+  transition_success_result "${carrier_json}" "${payload_json}"
+}
+
+realize_handoff_lane_transition() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local carrier_json="$3"
+  local issue_id
+  local note
+  local previous_lane_json
+  local resolved_revision
+  local updated_lane_json
+  local realization_json
+  local board_json
+  local board_summary
+  local lanes_json
+  local receipt_payload
+  local receipt_json=""
+  local payload_json
+
+  issue_id="$(jq -r '.intent.payload.issue_id // ""' <<<"${carrier_json}")"
+  note="$(jq -r '.intent.payload.note // ""' <<<"${carrier_json}")"
+  previous_lane_json="$(jq -c '.lane // null' <<<"${carrier_json}")"
+  resolved_revision="$(jq -r '.workspace.revision // ""' <<<"${carrier_json}")"
+
+  updated_lane_json="$(jq -c --arg status "handoff" --arg handoff_revision "${resolved_revision}" --arg handed_off_at "$(now_iso8601)" --arg handoff_note "${note}" '(. + {status:$status, handoff_revision:$handoff_revision, handed_off_at:$handed_off_at}) | if ($handoff_note | length) > 0 then . + {handoff_note:$handoff_note} else del(.handoff_note) end' <<<"${previous_lane_json}")"
+  if ! upsert_lane_state "${repo_root}" "${updated_lane_json}"; then
+    realization_json="$(jq -cn --argjson lane "${updated_lane_json}" '{kind:"handoff_lane", lane:$lane}')"
+    carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+    transition_failure_result "${carrier_json}" "failed to persist handed-off lane state" "$(jq -cn --argjson lane "${updated_lane_json}" '{lane:$lane}')"
+    return 0
+  fi
+
+  board_json="$(refresh_transition_board "${repo_root}" "${socket_path}")"
+  board_summary="$(jq -c '.summary // null' <<<"${board_json}")"
+  lanes_json="$(jq -c '.lanes // []' <<<"${board_json}")"
+  receipt_payload="$(jq -cn --arg issue_id "${issue_id}" --arg revision "${resolved_revision}" --arg note "${note}" --argjson lane "${updated_lane_json}" --argjson board_summary "${board_summary}" '{issue_id:$issue_id, revision:$revision, note:$note, lane:$lane, board_summary:$board_summary}')"
+
+  if ! receipt_json="$(append_receipt_capture "${repo_root}" "lane.handoff" "${receipt_payload}")"; then
+    restore_lane_state_snapshot "${repo_root}" "${previous_lane_json}" >/dev/null 2>&1 || true
+    realization_json="$(jq -cn --argjson lane "${updated_lane_json}" --argjson restored_lane "${previous_lane_json}" '{kind:"handoff_lane", lane:$lane, restored_lane:$restored_lane}')"
+    carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+    transition_failure_result "${carrier_json}" "failed to append lane.handoff receipt" "$(jq -cn --argjson restored_lane "${previous_lane_json}" '{restored_lane:$restored_lane}')"
+    return 0
+  fi
+
+  carrier_json="$(carrier_set_lane "${carrier_json}" "${updated_lane_json}")"
+  carrier_json="$(carrier_set_realization "${carrier_json}" "$(jq -cn --arg revision "${resolved_revision}" --arg note "${note}" '{kind:"handoff_lane", revision:$revision, note:$note}')")"
+  carrier_json="$(carrier_set_emitted_receipt "${carrier_json}" "${receipt_json}")"
+
+  payload_json="$(jq -cn --arg repo_root "${repo_root}" --arg issue_id "${issue_id}" --arg revision "${resolved_revision}" --arg note "${note}" --argjson lane "${updated_lane_json}" --argjson lanes "${lanes_json}" --argjson board_summary "${board_summary}" '{repo_root:$repo_root, issue_id:$issue_id, revision:$revision, note:$note, lane:$lane, lanes:$lanes, board_summary:$board_summary}')"
+  transition_success_result "${carrier_json}" "${payload_json}"
+}
+
+realize_finish_lane_transition() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local carrier_json="$3"
+  local issue_id
+  local outcome
+  local note
+  local previous_lane_json
+  local updated_lane_json
+  local realization_json
+  local board_json
+  local board_summary
+  local lanes_json
+  local receipt_payload
+  local receipt_json=""
+  local payload_json
+
+  issue_id="$(jq -r '.intent.payload.issue_id // ""' <<<"${carrier_json}")"
+  outcome="$(jq -r '.intent.payload.outcome // ""' <<<"${carrier_json}")"
+  note="$(jq -r '.intent.payload.note // ""' <<<"${carrier_json}")"
+  previous_lane_json="$(jq -c '.lane // null' <<<"${carrier_json}")"
+
+  updated_lane_json="$(jq -c --arg status "finished" --arg outcome "${outcome}" --arg finished_at "$(now_iso8601)" --arg finish_note "${note}" '(. + {status:$status, outcome:$outcome, finished_at:$finished_at}) | if ($finish_note | length) > 0 then . + {finish_note:$finish_note} else del(.finish_note) end' <<<"${previous_lane_json}")"
+  if ! upsert_lane_state "${repo_root}" "${updated_lane_json}"; then
+    realization_json="$(jq -cn --argjson lane "${updated_lane_json}" '{kind:"finish_lane", lane:$lane}')"
+    carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+    transition_failure_result "${carrier_json}" "failed to persist finished lane state" "$(jq -cn --argjson lane "${updated_lane_json}" '{lane:$lane}')"
+    return 0
+  fi
+
+  board_json="$(refresh_transition_board "${repo_root}" "${socket_path}")"
+  board_summary="$(jq -c '.summary // null' <<<"${board_json}")"
+  lanes_json="$(jq -c '.lanes // []' <<<"${board_json}")"
+  receipt_payload="$(jq -cn --arg issue_id "${issue_id}" --arg outcome "${outcome}" --arg note "${note}" --argjson lane "${updated_lane_json}" --argjson board_summary "${board_summary}" '{issue_id:$issue_id, outcome:$outcome, note:$note, lane:$lane, board_summary:$board_summary}')"
+
+  if ! receipt_json="$(append_receipt_capture "${repo_root}" "lane.finish" "${receipt_payload}")"; then
+    restore_lane_state_snapshot "${repo_root}" "${previous_lane_json}" >/dev/null 2>&1 || true
+    realization_json="$(jq -cn --argjson lane "${updated_lane_json}" --argjson restored_lane "${previous_lane_json}" '{kind:"finish_lane", lane:$lane, restored_lane:$restored_lane}')"
+    carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+    transition_failure_result "${carrier_json}" "failed to append lane.finish receipt" "$(jq -cn --argjson restored_lane "${previous_lane_json}" '{restored_lane:$restored_lane}')"
+    return 0
+  fi
+
+  carrier_json="$(carrier_set_lane "${carrier_json}" "${updated_lane_json}")"
+  carrier_json="$(carrier_set_realization "${carrier_json}" "$(jq -cn --arg outcome "${outcome}" --arg note "${note}" '{kind:"finish_lane", outcome:$outcome, note:$note}')")"
+  carrier_json="$(carrier_set_emitted_receipt "${carrier_json}" "${receipt_json}")"
+
+  payload_json="$(jq -cn --arg repo_root "${repo_root}" --arg issue_id "${issue_id}" --arg outcome "${outcome}" --arg note "${note}" --argjson lane "${updated_lane_json}" --argjson lanes "${lanes_json}" --argjson board_summary "${board_summary}" '{repo_root:$repo_root, issue_id:$issue_id, outcome:$outcome, note:$note, lane:$lane, lanes:$lanes, board_summary:$board_summary}')"
+  transition_success_result "${carrier_json}" "${payload_json}"
+}
+
+realize_archive_lane_transition() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local carrier_json="$3"
+  local issue_id
+  local note
+  local archived_lane_json
+  local realization_json
+  local board_json
+  local board_summary
+  local lanes_json
+  local receipt_payload
+  local receipt_json=""
+  local payload_json
+
+  issue_id="$(jq -r '.intent.payload.issue_id // ""' <<<"${carrier_json}")"
+  note="$(jq -r '.intent.payload.note // ""' <<<"${carrier_json}")"
+  archived_lane_json="$(jq -c '.lane // null' <<<"${carrier_json}")"
+
+  if ! remove_lane_state "${repo_root}" "${issue_id}"; then
+    realization_json="$(jq -cn --arg issue_id "${issue_id}" '{kind:"archive_lane", issue_id:$issue_id}')"
+    carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+    transition_failure_result "${carrier_json}" "failed to remove live lane state" "$(jq -cn --arg issue_id "${issue_id}" '{issue_id:$issue_id}')"
+    return 0
+  fi
+
+  board_json="$(refresh_transition_board "${repo_root}" "${socket_path}")"
+  board_summary="$(jq -c '.summary // null' <<<"${board_json}")"
+  lanes_json="$(jq -c '.lanes // []' <<<"${board_json}")"
+  receipt_payload="$(jq -cn --arg issue_id "${issue_id}" --arg note "${note}" --argjson lane "${archived_lane_json}" --argjson board_summary "${board_summary}" '{issue_id:$issue_id, note:$note, lane:$lane, board_summary:$board_summary}')"
+
+  if ! receipt_json="$(append_receipt_capture "${repo_root}" "lane.archive" "${receipt_payload}")"; then
+    restore_lane_state_snapshot "${repo_root}" "${archived_lane_json}" >/dev/null 2>&1 || true
+    realization_json="$(jq -cn --arg issue_id "${issue_id}" --argjson restored_lane "${archived_lane_json}" '{kind:"archive_lane", issue_id:$issue_id, restored_lane:$restored_lane}')"
+    carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+    transition_failure_result "${carrier_json}" "failed to append lane.archive receipt" "$(jq -cn --argjson restored_lane "${archived_lane_json}" '{restored_lane:$restored_lane}')"
+    return 0
+  fi
+
+  carrier_json="$(carrier_set_realization "${carrier_json}" "$(jq -cn --arg issue_id "${issue_id}" --arg note "${note}" '{kind:"archive_lane", issue_id:$issue_id, note:$note}')")"
+  carrier_json="$(carrier_set_emitted_receipt "${carrier_json}" "${receipt_json}")"
+
+  payload_json="$(jq -cn --arg repo_root "${repo_root}" --arg issue_id "${issue_id}" --arg note "${note}" --argjson archived_lane "${archived_lane_json}" --argjson lanes "${lanes_json}" --argjson board_summary "${board_summary}" '{repo_root:$repo_root, issue_id:$issue_id, note:$note, archived_lane:$archived_lane, lanes:$lanes, board_summary:$board_summary}')"
+  transition_success_result "${carrier_json}" "${payload_json}"
+}
+
+run_transition_action() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local kind="$3"
+  shift 3
+  local build_fn=""
+  local realize_fn=""
+  local lock_dir=""
+  local carrier_json=""
+  local action_result=""
+
+  case "${kind}" in
+    claim_issue)
+      build_fn=build_claim_issue_carrier
+      realize_fn=realize_claim_issue_transition
+      ;;
+    close_issue)
+      build_fn=build_close_issue_carrier
+      realize_fn=realize_close_issue_transition
+      ;;
+    launch_lane)
+      build_fn=build_launch_lane_carrier
+      realize_fn=realize_launch_lane_transition
+      ;;
+    handoff_lane)
+      build_fn=build_handoff_lane_carrier
+      realize_fn=realize_handoff_lane_transition
+      ;;
+    finish_lane)
+      build_fn=build_finish_lane_carrier
+      realize_fn=realize_finish_lane_transition
+      ;;
+    archive_lane)
+      build_fn=build_archive_lane_carrier
+      realize_fn=realize_archive_lane_transition
+      ;;
+    *)
+      jq -cn --arg kind "${kind}" '{ok:false, error:{message:"unknown transition kind", kind:$kind}}'
+      return 0
+      ;;
+  esac
+
+  ensure_state_files "${repo_root}"
+  lock_dir="$(acquire_service_lock "${repo_root}")"
+
+  if ! carrier_json="$("${build_fn}" "${repo_root}" "${socket_path}" "$@")"; then
+    release_service_lock "${lock_dir}"
+    jq -cn --arg kind "${kind}" '{ok:false, error:{message:"failed to build transition carrier", kind:$kind}}'
+    return 0
+  fi
+
+  if ! jq -e '.admission.admitted == true' >/dev/null <<<"${carrier_json}"; then
+    release_service_lock "${lock_dir}"
+    transition_rejected_result "${carrier_json}"
+    return 0
+  fi
+
+  if ! action_result="$("${realize_fn}" "${repo_root}" "${socket_path}" "${carrier_json}")"; then
+    release_service_lock "${lock_dir}"
+    transition_failure_result "${carrier_json}" "transition realization failed"
+    return 0
+  fi
+
+  release_service_lock "${lock_dir}"
+  printf '%s\n' "${action_result}"
+}
+
+cmd_transition_action() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local kind="$3"
+  shift 3
+  local action_result
+
+  action_result="$(run_transition_action "${repo_root}" "${socket_path}" "${kind}" "$@")"
+  if jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
+    jq -c '.payload' <<<"${action_result}"
+    return 0
+  fi
+
+  jq -c '.' <<<"${action_result}"
+  return 1
+}
+
+render_transition_request_response() {
+  local request_id="$1"
+  local kind="$2"
+  local action_result="$3"
+  local message=""
+  local payload="null"
+
+  if jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
+    payload="$(jq -c '.payload' <<<"${action_result}")"
+    jq -cn \
+      --arg request_id "${request_id}" \
+      --arg kind "${kind}" \
+      --argjson payload "${payload}" \
+      '{request_id:$request_id, ok:true, kind:$kind, payload:$payload}'
+    return 0
+  fi
+
+  message="$(jq -r '.error.message // "request failed"' <<<"${action_result}")"
+  jq -cn \
+    --arg request_id "${request_id}" \
+    --arg kind "${kind}" \
+    --arg message "${message}" \
+    --argjson details "${action_result}" \
+    '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message, details:$details}}'
+}
+
 respond_once() {
   local repo_root="$1"
   local socket_path="$2"
@@ -1971,95 +3181,47 @@ respond_once() {
       ;;
     claim_issue)
       issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
-      action_result="$(claim_issue_transition "${repo_root}" "${socket_path}" "${issue_id}")"
-      if ! jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
-        jq -cn \
-          --arg request_id "${request_id}" \
-          --arg kind "${kind}" \
-          --arg message "$(jq -r '.error.message // "request failed"' <<<"${action_result}")" \
-          --argjson details "${action_result}" \
-          '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message, details:$details}}'
-        return 0
-      fi
-      payload="$(jq -c '.payload' <<<"${action_result}")"
+      action_result="$(run_transition_action "${repo_root}" "${socket_path}" "${kind}" "${issue_id}")"
+      render_transition_request_response "${request_id}" "${kind}" "${action_result}"
+      return 0
       ;;
     close_issue)
       issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
       reason="$(printf '%s' "${request_line}" | jq -r '.payload.reason // ""')"
-      action_result="$(close_issue_transition "${repo_root}" "${socket_path}" "${issue_id}" "${reason}")"
-      if ! jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
-        jq -cn \
-          --arg request_id "${request_id}" \
-          --arg kind "${kind}" \
-          --arg message "$(jq -r '.error.message // "request failed"' <<<"${action_result}")" \
-          --argjson details "${action_result}" \
-          '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message, details:$details}}'
-        return 0
-      fi
-      payload="$(jq -c '.payload' <<<"${action_result}")"
+      action_result="$(run_transition_action "${repo_root}" "${socket_path}" "${kind}" "${issue_id}" "${reason}")"
+      render_transition_request_response "${request_id}" "${kind}" "${action_result}"
+      return 0
       ;;
     launch_lane)
       issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
       base_rev="$(printf '%s' "${request_line}" | jq -r '.payload.base_rev // ""')"
       slug="$(printf '%s' "${request_line}" | jq -r '.payload.slug // ""')"
-      action_result="$(launch_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${base_rev}" "${slug}")"
-      if ! jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
-        jq -cn \
-          --arg request_id "${request_id}" \
-          --arg kind "${kind}" \
-          --arg message "$(jq -r '.error.message // "request failed"' <<<"${action_result}")" \
-          --argjson details "${action_result}" \
-          '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message, details:$details}}'
-        return 0
-      fi
-      payload="$(jq -c '.payload' <<<"${action_result}")"
+      action_result="$(run_transition_action "${repo_root}" "${socket_path}" "${kind}" "${issue_id}" "${base_rev}" "${slug}")"
+      render_transition_request_response "${request_id}" "${kind}" "${action_result}"
+      return 0
       ;;
     handoff_lane)
       issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
       revision="$(printf '%s' "${request_line}" | jq -r '.payload.revision // ""')"
       note="$(printf '%s' "${request_line}" | jq -r '.payload.note // ""')"
-      action_result="$(handoff_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${revision}" "${note}")"
-      if ! jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
-        jq -cn \
-          --arg request_id "${request_id}" \
-          --arg kind "${kind}" \
-          --arg message "$(jq -r '.error.message // "request failed"' <<<"${action_result}")" \
-          --argjson details "${action_result}" \
-          '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message, details:$details}}'
-        return 0
-      fi
-      payload="$(jq -c '.payload' <<<"${action_result}")"
+      action_result="$(run_transition_action "${repo_root}" "${socket_path}" "${kind}" "${issue_id}" "${revision}" "${note}")"
+      render_transition_request_response "${request_id}" "${kind}" "${action_result}"
+      return 0
       ;;
     finish_lane)
       issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
       outcome="$(printf '%s' "${request_line}" | jq -r '.payload.outcome // ""')"
       note="$(printf '%s' "${request_line}" | jq -r '.payload.note // ""')"
-      action_result="$(finish_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${outcome}" "${note}")"
-      if ! jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
-        jq -cn \
-          --arg request_id "${request_id}" \
-          --arg kind "${kind}" \
-          --arg message "$(jq -r '.error.message // "request failed"' <<<"${action_result}")" \
-          --argjson details "${action_result}" \
-          '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message, details:$details}}'
-        return 0
-      fi
-      payload="$(jq -c '.payload' <<<"${action_result}")"
+      action_result="$(run_transition_action "${repo_root}" "${socket_path}" "${kind}" "${issue_id}" "${outcome}" "${note}")"
+      render_transition_request_response "${request_id}" "${kind}" "${action_result}"
+      return 0
       ;;
     archive_lane)
       issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
       note="$(printf '%s' "${request_line}" | jq -r '.payload.note // ""')"
-      action_result="$(archive_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${note}")"
-      if ! jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
-        jq -cn \
-          --arg request_id "${request_id}" \
-          --arg kind "${kind}" \
-          --arg message "$(jq -r '.error.message // "request failed"' <<<"${action_result}")" \
-          --argjson details "${action_result}" \
-          '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message, details:$details}}'
-        return 0
-      fi
-      payload="$(jq -c '.payload' <<<"${action_result}")"
+      action_result="$(run_transition_action "${repo_root}" "${socket_path}" "${kind}" "${issue_id}" "${note}")"
+      render_transition_request_response "${request_id}" "${kind}" "${action_result}"
+      return 0
       ;;
     ping)
       payload="$(jq -cn --arg repo_root "${repo_root}" --arg timestamp "$(now_iso8601)" '{repo_root:$repo_root, timestamp:$timestamp, status:"ok"}')"
@@ -2117,16 +3279,7 @@ cmd_claim_issue() {
   local repo_root="$1"
   local socket_path="$2"
   local issue_id="$3"
-  local action_result
-
-  action_result="$(claim_issue_transition "${repo_root}" "${socket_path}" "${issue_id}")"
-  if jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
-    jq -c '.payload' <<<"${action_result}"
-    return 0
-  fi
-
-  jq -c '.' <<<"${action_result}"
-  return 1
+  cmd_transition_action "${repo_root}" "${socket_path}" "claim_issue" "${issue_id}"
 }
 
 cmd_close_issue() {
@@ -2134,16 +3287,7 @@ cmd_close_issue() {
   local socket_path="$2"
   local issue_id="$3"
   local reason="$4"
-  local action_result
-
-  action_result="$(close_issue_transition "${repo_root}" "${socket_path}" "${issue_id}" "${reason}")"
-  if jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
-    jq -c '.payload' <<<"${action_result}"
-    return 0
-  fi
-
-  jq -c '.' <<<"${action_result}"
-  return 1
+  cmd_transition_action "${repo_root}" "${socket_path}" "close_issue" "${issue_id}" "${reason}"
 }
 
 cmd_launch_lane() {
@@ -2152,16 +3296,7 @@ cmd_launch_lane() {
   local issue_id="$3"
   local base_rev="$4"
   local slug="${5:-}"
-  local action_result
-
-  action_result="$(launch_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${base_rev}" "${slug}")"
-  if jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
-    jq -c '.payload' <<<"${action_result}"
-    return 0
-  fi
-
-  jq -c '.' <<<"${action_result}"
-  return 1
+  cmd_transition_action "${repo_root}" "${socket_path}" "launch_lane" "${issue_id}" "${base_rev}" "${slug}"
 }
 
 cmd_handoff_lane() {
@@ -2170,16 +3305,7 @@ cmd_handoff_lane() {
   local issue_id="$3"
   local revision="$4"
   local note="${5:-}"
-  local action_result
-
-  action_result="$(handoff_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${revision}" "${note}")"
-  if jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
-    jq -c '.payload' <<<"${action_result}"
-    return 0
-  fi
-
-  jq -c '.' <<<"${action_result}"
-  return 1
+  cmd_transition_action "${repo_root}" "${socket_path}" "handoff_lane" "${issue_id}" "${revision}" "${note}"
 }
 
 cmd_finish_lane() {
@@ -2188,16 +3314,7 @@ cmd_finish_lane() {
   local issue_id="$3"
   local outcome="$4"
   local note="${5:-}"
-  local action_result
-
-  action_result="$(finish_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${outcome}" "${note}")"
-  if jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
-    jq -c '.payload' <<<"${action_result}"
-    return 0
-  fi
-
-  jq -c '.' <<<"${action_result}"
-  return 1
+  cmd_transition_action "${repo_root}" "${socket_path}" "finish_lane" "${issue_id}" "${outcome}" "${note}"
 }
 
 cmd_archive_lane() {
@@ -2205,16 +3322,7 @@ cmd_archive_lane() {
   local socket_path="$2"
   local issue_id="$3"
   local note="${4:-}"
-  local action_result
-
-  action_result="$(archive_lane_transition "${repo_root}" "${socket_path}" "${issue_id}" "${note}")"
-  if jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
-    jq -c '.payload' <<<"${action_result}"
-    return 0
-  fi
-
-  jq -c '.' <<<"${action_result}"
-  return 1
+  cmd_transition_action "${repo_root}" "${socket_path}" "archive_lane" "${issue_id}" "${note}"
 }
 
 cmd_serve() {
