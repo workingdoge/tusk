@@ -91,6 +91,18 @@ bookmark_git_commit() {
   git -C "${repo_root}" rev-parse -q --verify "refs/heads/${bookmark}" 2>/dev/null || true
 }
 
+remote_bookmark_git_commit() {
+  local repo_root="$1"
+  local remote_name="$2"
+  local bookmark="$3"
+
+  if [ -z "${remote_name}" ]; then
+    return
+  fi
+
+  git -C "${repo_root}" rev-parse -q --verify "refs/remotes/${remote_name}/${bookmark}" 2>/dev/null || true
+}
+
 normalize_remote_url() {
   local raw_url="$1"
   local trimmed="${raw_url%.git}"
@@ -120,18 +132,21 @@ print_text() {
   local bookmark="$2"
   local jj_commit="$3"
   local git_commit="$4"
-  local local_path_ref="$5"
-  local local_git_ref="$6"
-  local remote_name="$7"
-  local remote_url="$8"
-  local publish_ref="$9"
-  local note="${10}"
+  local remote_git_commit="$5"
+  local local_path_ref="$6"
+  local local_git_ref="$7"
+  local remote_name="$8"
+  local remote_url="$9"
+  local publish_ref="${10}"
+  local note="${11}"
 
   cat <<EOF
 repo_root=${repo_root}
 bookmark=${bookmark}
 bookmark_jj_commit=${jj_commit}
 bookmark_git_commit=${git_commit}
+bookmark_published_to_remote=$([ -n "${remote_git_commit}" ] && [ "${remote_git_commit}" = "${git_commit}" ] && printf true || printf false)
+publish_remote_git_commit=${remote_git_commit}
 local_path_ref=${local_path_ref}
 local_git_ref=${local_git_ref}
 publish_remote_name=${remote_name}
@@ -146,18 +161,20 @@ print_json() {
   local bookmark="$2"
   local jj_commit="$3"
   local git_commit="$4"
-  local local_path_ref="$5"
-  local local_git_ref="$6"
-  local remote_name="$7"
-  local remote_url="$8"
-  local publish_ref="$9"
-  local note="${10}"
+  local remote_git_commit="$5"
+  local local_path_ref="$6"
+  local local_git_ref="$7"
+  local remote_name="$8"
+  local remote_url="$9"
+  local publish_ref="${10}"
+  local note="${11}"
 
   jq -cn \
     --arg repo_root "${repo_root}" \
     --arg bookmark "${bookmark}" \
     --arg jj_commit "${jj_commit}" \
     --arg git_commit "${git_commit}" \
+    --arg remote_git_commit "${remote_git_commit}" \
     --arg local_path_ref "${local_path_ref}" \
     --arg local_git_ref "${local_git_ref}" \
     --arg remote_name "${remote_name}" \
@@ -170,7 +187,8 @@ print_json() {
           name: $bookmark,
           jj_commit: (if $jj_commit == "" then null else $jj_commit end),
           git_commit: (if $git_commit == "" then null else $git_commit end),
-          exported_to_git: ($git_commit != "")
+          exported_to_git: ($git_commit != ""),
+          published_to_remote: ($remote_git_commit != "" and $remote_git_commit == $git_commit)
         },
         refs: {
           local_path: $local_path_ref,
@@ -183,7 +201,8 @@ print_json() {
           else
             {
               name: (if $remote_name == "" then null else $remote_name end),
-              url: $remote_url
+              url: $remote_url,
+              bookmark_git_commit: (if $remote_git_commit == "" then null else $remote_git_commit end)
             }
           end
         ),
@@ -201,6 +220,7 @@ main() {
   local repo_root=""
   local jj_commit=""
   local git_commit=""
+  local remote_git_commit=""
   local local_path_ref=""
   local local_git_ref=""
   local normalized_remote_url=""
@@ -269,6 +289,10 @@ main() {
     fi
   fi
 
+  if [ -n "${remote_name}" ]; then
+    remote_git_commit="$(remote_bookmark_git_commit "${repo_root}" "${remote_name}" "${bookmark}")"
+  fi
+
   if [ -z "${note}" ]; then
     if [ -z "${jj_commit}" ]; then
       note="bookmark ${bookmark} does not exist in jj yet"
@@ -276,6 +300,8 @@ main() {
       note="bookmark ${bookmark} exists in jj but is not exported to Git; run jj git export after setting it"
     elif [ -z "${remote_url}" ]; then
       note="no git remote configured; local refs are ready, publish_ref will appear once a remote exists"
+    elif [ -n "${remote_git_commit}" ] && [ "${remote_git_commit}" = "${git_commit}" ]; then
+      note="publish_ref matches ${remote_name}/${bookmark}"
     else
       note="push refs/heads/${bookmark} to ${remote_name:-the configured remote} before consuming publish_ref elsewhere"
     fi
@@ -283,14 +309,14 @@ main() {
 
   if [ "${output_json}" = "true" ]; then
     print_json \
-      "${repo_root}" "${bookmark}" "${jj_commit}" "${git_commit}" \
+      "${repo_root}" "${bookmark}" "${jj_commit}" "${git_commit}" "${remote_git_commit}" \
       "${local_path_ref}" "${local_git_ref}" "${remote_name}" "${remote_url}" \
       "${publish_ref}" "${note}"
     return
   fi
 
   print_text \
-    "${repo_root}" "${bookmark}" "${jj_commit}" "${git_commit}" \
+    "${repo_root}" "${bookmark}" "${jj_commit}" "${git_commit}" "${remote_git_commit}" \
     "${local_path_ref}" "${local_git_ref}" "${remote_name}" "${remote_url}" \
     "${publish_ref}" "${note}"
 }
