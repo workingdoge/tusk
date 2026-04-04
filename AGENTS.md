@@ -1,6 +1,6 @@
 # Agent Instructions
 
-These instructions apply to `/Users/arj/dev/blackhole/tusk`.
+These instructions apply to the canonical `tusk` repo checkout.
 
 ## Workflow
 
@@ -8,6 +8,7 @@ These instructions apply to `/Users/arj/dev/blackhole/tusk`.
 - The dev shell provides a flake-owned `bd` wrapper, `tusk-flake-ref`, `tusk-tracker`, `dolt`, `jj`, `deadnix`, `statix`, `nil`, `nixd`, `nix-tree`, `nix-output-monitor`, `nixfmt`, `codex`, `tuskd`, `glistix`, `gleam`, `erl`, `rebar3`, a `rust-overlay` toolchain for `cargo`/`rustc`/`rustfmt`, and `rust-analyzer`.
 - Run `devenv up` inside the dev shell to ensure repo-scoped tracker services when `.beads/` exists. `tuskd ensure` owns backend reuse and host-local coordination; shells must not stop Dolt on exit.
 - Use this repo to develop `tusk` as a standalone flake and skill/tooling home; keep consumer-specific `bd-*` wrappers in the consuming repo unless they are intentionally promoted.
+- When changing the canonical repo home, prefer a fresh `jj git clone --colocate` from the exported `tusk-flake` line and re-bootstrap local `.beads/` runtime state there instead of moving the live `.jj/` directory in place.
 - Use `glistix` for Nix-target Gleam work; the shell also keeps upstream `gleam` available for generic tooling and language-server compatibility checks.
 - Use `lib.crane` from the flake for Rust package definitions so Rust builds share the same pinned `rust-overlay` toolchain as the shell, and run packaged Rust apps via `nix build` / `nix run` instead of mutating manifests ad hoc from outside Nix.
 - `tuskd` writes repo-local service state under `.beads/tuskd/` and a host-local registry under `$TUSK_HOST_STATE_ROOT`, `$XDG_STATE_HOME/tusk`, or `~/Library/Caches/tusk` on macOS.
