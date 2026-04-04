@@ -48,7 +48,7 @@ nix run .#tuskd -- finish-lane --repo "$PWD" --issue-id tusk-123 --outcome compl
 nix run .#tuskd -- archive-lane --repo "$PWD" --issue-id tusk-123 --note "lane compacted into receipts"
 nix build .#tusk-ui
 nix run .#tusk-ui -- --help
-# in tusk-ui: b focuses the board, j/k or Up/Down move across ready+claimed actionable issues, c claims the selected ready issue, l launches the selected claimed issue
+# in tusk-ui: b focuses the board, j/k or Up/Down move across ready issues, claimed issues, and active lanes; c claims the selected ready issue, l launches the selected claimed issue, and f finishes the selected active lane
 ```
 
 ## Repo Shape
@@ -67,7 +67,7 @@ nix run .#tusk-ui -- --help
 - lane records can transition to handoff state with `handoff_revision`, `handed_off_at`, and an optional `handoff_note`.
 - lane records can transition to finished state with `outcome`, `finished_at`, and an optional `finish_note`; finished lanes remain explicit even after their workspaces are removed.
 - `archive-lane` removes a finished lane from live lane state only after its workspace is gone; receipts remain the audit surface for archived lanes.
-- `crates/tusk-ui/` contains the Rust `ratatui` control-plane client crate and renders tracker, board, lane, and receipt projections from `tuskd`; the first interactive board actions are claim on a selected ready issue and launch on a selected claimed issue, with `--base-rev` controlling the launch target revision.
+- `crates/tusk-ui/` contains the Rust `ratatui` control-plane client crate and renders tracker, board, lane, and receipt projections from `tuskd`; the first interactive board actions are claim on a selected ready issue, launch on a selected claimed issue, and finish on a selected active lane, with `--base-rev` controlling the launch target revision.
 
 ## Change Rules
 
@@ -87,7 +87,7 @@ nix run .#tusk-ui -- --help
 - `nix run .#tuskd -- --help`
 - `nix build .#tusk-ui`
 - `nix run .#tusk-ui -- --help`
-- a PTY-driven `tusk-ui` session can focus the board, claim a disposable ready issue with `c`, then launch it with `l --base-rev <rev>` semantics from the configured `--base-rev`, after which `board-status` shows a launched lane and the created workspace can be cleaned up
+- a PTY-driven `tusk-ui` session can focus the board, claim a disposable ready issue with `c`, launch it with `l`, then finish the selected active lane with `f`, after which `board-status` shows the finished lane before cleanup
 - `nix eval --raw path:.#packages.aarch64-darwin.rust-toolchain.name`
 - `nix eval --raw path:.#packages.aarch64-darwin.tusk-ui.name`
 - `nix flake metadata "git+file://$PWD?ref=tusk-flake"`

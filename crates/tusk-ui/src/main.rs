@@ -146,10 +146,11 @@ Keys:
   Tab          focus next pane
   Shift+Tab    focus previous pane
   t / b / e    focus tracker, board, or receipts
-  j / k        move actionable-issue selection in the board
-  Up / Down    move actionable-issue selection in the board
+  j / k        move selectable issue/lane selection in the board
+  Up / Down    move selectable issue/lane selection in the board
   c            claim the selected ready issue from the board
   l            launch a lane for the selected claimed issue
+  f            finish the selected active lane as completed
 "
     );
 }
@@ -216,6 +217,13 @@ impl ProtocolClient {
         self.query_with_payload(
             "launch_lane",
             json!({ "issue_id": issue_id, "base_rev": base_rev }),
+        )
+    }
+
+    fn finish_lane(&self, issue_id: &str, outcome: &str) -> Result<FinishLanePayload> {
+        self.query_with_payload(
+            "finish_lane",
+            json!({ "issue_id": issue_id, "outcome": outcome }),
         )
     }
 
@@ -292,7 +300,7 @@ struct App {
     status_line: String,
     should_quit: bool,
     focus: Focus,
-    selected_action_issue_id: Option<String>,
+    selected_board_item_id: Option<String>,
     tracker: PanelState<TrackerStatus>,
     board: PanelState<BoardStatus>,
     receipts: PanelState<ReceiptsStatus>,
@@ -308,7 +316,7 @@ impl App {
             status_line: "press r to refresh, b to focus the board, q to quit".to_owned(),
             should_quit: false,
             focus: Focus::Tracker,
-            selected_action_issue_id: None,
+            selected_board_item_id: None,
             tracker: PanelState::default(),
             board: PanelState::default(),
             receipts: PanelState::default(),
@@ -351,12 +359,12 @@ impl App {
 
     fn sync_board_selection(&mut self) {
         let Some(board) = self.board.value.as_ref() else {
-            self.selected_action_issue_id = None;
+            self.selected_board_item_id = None;
             return;
         };
 
-        self.selected_action_issue_id =
-            normalized_action_selection(board, self.selected_action_issue_id.as_deref());
+        self.selected_board_item_id =
+            normalized_board_selection(board, self.selected_board_item_id.as_deref());
     }
 
     fn move_board_selection(&mut self, delta: isize) {
@@ -365,20 +373,19 @@ impl App {
             return;
         };
 
-        let Some(next) =
-            step_action_selection(board, self.selected_action_issue_id.as_deref(), delta)
+        let Some(next) = step_board_selection(board, self.selected_board_item_id.as_deref(), delta)
         else {
-            self.selected_action_issue_id = None;
-            self.status_line = "no actionable issues to select".to_owned();
+            self.selected_board_item_id = None;
+            self.status_line = "no selectable board items".to_owned();
             return;
         };
 
-        self.selected_action_issue_id = Some(next.clone());
+        self.selected_board_item_id = Some(next.clone());
         self.status_line = format!("selected {next}");
     }
 
     fn claim_selected_issue(&mut self) {
-        let Some(issue_id) = self.selected_action_issue_id.clone() else {
+        let Some(issue_id) = self.selected_board_item_id.clone() else {
             self.status_line = "no ready issue selected to claim".to_owned();
             return;
         };
@@ -386,11 +393,11 @@ impl App {
             self.status_line = "board data is unavailable".to_owned();
             return;
         };
-        let Some(actionable) = selected_actionable_issue(board, Some(issue_id.as_str())) else {
-            self.status_line = "selected issue is no longer actionable".to_owned();
+        let Some(item) = selected_board_item(board, Some(issue_id.as_str())) else {
+            self.status_line = "selected board item is no longer available".to_owned();
             return;
         };
-        if actionable.bucket != ActionableBucket::Ready {
+        if item.kind() != BoardItemKind::ReadyIssue {
             self.status_line = format!("selected issue {issue_id} is not ready to claim");
             return;
         }
@@ -410,7 +417,7 @@ impl App {
     }
 
     fn launch_selected_issue(&mut self) {
-        let Some(issue_id) = self.selected_action_issue_id.clone() else {
+        let Some(issue_id) = self.selected_board_item_id.clone() else {
             self.status_line = "no claimed issue selected to launch".to_owned();
             return;
         };
@@ -418,11 +425,11 @@ impl App {
             self.status_line = "board data is unavailable".to_owned();
             return;
         };
-        let Some(actionable) = selected_actionable_issue(board, Some(issue_id.as_str())) else {
-            self.status_line = "selected issue is no longer actionable".to_owned();
+        let Some(item) = selected_board_item(board, Some(issue_id.as_str())) else {
+            self.status_line = "selected board item is no longer available".to_owned();
             return;
         };
-        if actionable.bucket != ActionableBucket::Claimed {
+        if item.kind() != BoardItemKind::ClaimedIssue {
             self.status_line = format!("selected issue {issue_id} is not claimed yet");
             return;
         }
@@ -441,6 +448,35 @@ impl App {
         }
     }
 
+    fn finish_selected_lane(&mut self) {
+        let Some(issue_id) = self.selected_board_item_id.clone() else {
+            self.status_line = "no active lane selected to finish".to_owned();
+            return;
+        };
+        let Some(board) = self.board.value.as_ref() else {
+            self.status_line = "board data is unavailable".to_owned();
+            return;
+        };
+        let Some(item) = selected_board_item(board, Some(issue_id.as_str())) else {
+            self.status_line = "selected board item is no longer available".to_owned();
+            return;
+        };
+        if item.kind() != BoardItemKind::ActiveLane {
+            self.status_line = format!("selected item {issue_id} is not an active lane");
+            return;
+        }
+
+        match self.client.finish_lane(&issue_id, "completed") {
+            Ok(payload) => {
+                self.refresh();
+                self.status_line = format!("finished {} as {}", payload.issue_id, payload.outcome);
+            }
+            Err(error) => {
+                self.status_line = format!("finish failed for {issue_id}: {error:#}");
+            }
+        }
+    }
+
     fn handle_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
@@ -448,6 +484,7 @@ impl App {
                 self.should_quit = true
             }
             KeyCode::Char('c') if self.focus == Focus::Board => self.claim_selected_issue(),
+            KeyCode::Char('f') if self.focus == Focus::Board => self.finish_selected_lane(),
             KeyCode::Char('l') if self.focus == Focus::Board => self.launch_selected_issue(),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('p') => self.ping(),
@@ -544,6 +581,12 @@ struct LaunchLanePayload {
     issue_id: String,
     workspace_name: String,
     base_rev: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FinishLanePayload {
+    issue_id: String,
+    outcome: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -702,7 +745,7 @@ fn render(frame: &mut Frame, app: &App) {
             }),
             Span::raw("  "),
             Span::styled(
-                "t/b/e focus  Tab cycle  j/k move  c claim  l launch  r refresh  p ping  q quit",
+                "t/b/e focus  Tab cycle  j/k move  c claim  l launch  f finish  r refresh  p ping  q quit",
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -732,7 +775,7 @@ fn render_tracker(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
 fn render_board(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     let block = pane_block("Board", app.focus == Focus::Board);
     let lines = match (&app.board.value, &app.board.error) {
-        (Some(board), _) => board_lines(board, app.selected_action_issue_id.as_deref()),
+        (Some(board), _) => board_lines(board, app.selected_board_item_id.as_deref()),
         (_, Some(error)) => error_lines(error),
         _ => vec![Line::from("waiting for board data")],
     };
@@ -830,7 +873,7 @@ fn tracker_lines(tracker: &TrackerStatus) -> Vec<Line<'static>> {
     lines
 }
 
-fn board_lines(board: &BoardStatus, selected_action_issue_id: Option<&str>) -> Vec<Line<'static>> {
+fn board_lines(board: &BoardStatus, selected_board_item_id: Option<&str>) -> Vec<Line<'static>> {
     let mut lines = vec![
         kv_line("repo", board.repo_root.clone()),
         kv_line("updated", board.generated_at.clone()),
@@ -847,7 +890,7 @@ fn board_lines(board: &BoardStatus, selected_action_issue_id: Option<&str>) -> V
         &mut lines,
         "ready issues",
         &board.ready_issues,
-        selected_action_issue_id,
+        selected_board_item_id,
     );
 
     lines.push(Line::from(""));
@@ -855,7 +898,7 @@ fn board_lines(board: &BoardStatus, selected_action_issue_id: Option<&str>) -> V
         &mut lines,
         "claimed issues",
         &board.claimed_issues,
-        selected_action_issue_id,
+        selected_board_item_id,
     );
 
     lines.push(Line::from(""));
@@ -866,7 +909,7 @@ fn board_lines(board: &BoardStatus, selected_action_issue_id: Option<&str>) -> V
 
     lines.push(Line::from(""));
     lines.push(title_line("lanes"));
-    lines.extend(lane_lines(&board.lanes));
+    lines.extend(lane_lines(&board.lanes, selected_board_item_id));
 
     lines.push(Line::from(""));
     lines.push(title_line("workspaces"));
@@ -918,83 +961,130 @@ fn issue_line(issue: &BoardIssue, selected_issue_id: Option<&str>) -> Line<'stat
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ActionableBucket {
-    Ready,
-    Claimed,
+enum BoardItemKind {
+    ReadyIssue,
+    ClaimedIssue,
+    ActiveLane,
 }
 
 #[derive(Clone, Copy, Debug)]
-struct ActionableIssueRef<'a> {
-    bucket: ActionableBucket,
-    issue: &'a BoardIssue,
+enum BoardItemRef<'a> {
+    ReadyIssue(&'a BoardIssue),
+    ClaimedIssue(&'a BoardIssue),
+    ActiveLane(&'a LaneEntry),
 }
 
-fn actionable_issues(board: &BoardStatus) -> Vec<ActionableIssueRef<'_>> {
-    let mut issues = Vec::with_capacity(board.ready_issues.len() + board.claimed_issues.len());
-    issues.extend(board.ready_issues.iter().map(|issue| ActionableIssueRef {
-        bucket: ActionableBucket::Ready,
-        issue,
-    }));
-    issues.extend(board.claimed_issues.iter().map(|issue| ActionableIssueRef {
-        bucket: ActionableBucket::Claimed,
-        issue,
-    }));
-    issues
+impl<'a> BoardItemRef<'a> {
+    fn kind(self) -> BoardItemKind {
+        match self {
+            Self::ReadyIssue(_) => BoardItemKind::ReadyIssue,
+            Self::ClaimedIssue(_) => BoardItemKind::ClaimedIssue,
+            Self::ActiveLane(_) => BoardItemKind::ActiveLane,
+        }
+    }
+
+    fn id(self) -> &'a str {
+        match self {
+            Self::ReadyIssue(issue) | Self::ClaimedIssue(issue) => issue.id.as_str(),
+            Self::ActiveLane(lane) => lane.issue_id.as_str(),
+        }
+    }
 }
 
-fn selected_actionable_issue<'a>(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LaneGroup {
+    Active,
+    Finished,
+    Stale,
+}
+
+fn lane_group(lane: &LaneEntry) -> LaneGroup {
+    let observed_status = lane
+        .observed_status
+        .as_deref()
+        .unwrap_or(lane.status.as_str());
+    if observed_status == "stale" {
+        LaneGroup::Stale
+    } else if lane.status == "finished" || observed_status == "finished" {
+        LaneGroup::Finished
+    } else {
+        LaneGroup::Active
+    }
+}
+
+fn active_lanes(board: &BoardStatus) -> Vec<&LaneEntry> {
+    let mut lanes = board
+        .lanes
+        .iter()
+        .filter(|lane| lane_group(lane) == LaneGroup::Active)
+        .collect::<Vec<_>>();
+    lanes.sort_by(|left, right| left.issue_id.cmp(&right.issue_id));
+    lanes
+}
+
+fn board_items(board: &BoardStatus) -> Vec<BoardItemRef<'_>> {
+    let mut items = Vec::with_capacity(
+        board.ready_issues.len() + board.claimed_issues.len() + board.lanes.len(),
+    );
+    items.extend(board.ready_issues.iter().map(BoardItemRef::ReadyIssue));
+    items.extend(board.claimed_issues.iter().map(BoardItemRef::ClaimedIssue));
+    items.extend(
+        active_lanes(board)
+            .into_iter()
+            .map(BoardItemRef::ActiveLane),
+    );
+    items
+}
+
+fn selected_board_item<'a>(
     board: &'a BoardStatus,
-    selected_issue_id: Option<&str>,
-) -> Option<ActionableIssueRef<'a>> {
-    let selected_issue_id = selected_issue_id?;
-    actionable_issues(board)
+    selected_board_item_id: Option<&str>,
+) -> Option<BoardItemRef<'a>> {
+    let selected_board_item_id = selected_board_item_id?;
+    board_items(board)
         .into_iter()
-        .find(|actionable| actionable.issue.id == selected_issue_id)
+        .find(|item| item.id() == selected_board_item_id)
 }
 
-fn normalized_action_selection(
+fn normalized_board_selection(
     board: &BoardStatus,
-    selected_issue_id: Option<&str>,
+    selected_board_item_id: Option<&str>,
 ) -> Option<String> {
-    let actionable = actionable_issues(board);
-    if actionable.is_empty() {
+    let items = board_items(board);
+    if items.is_empty() {
         return None;
     }
 
-    if let Some(selected) = selected_actionable_issue(board, selected_issue_id) {
-        return Some(selected.issue.id.clone());
+    if let Some(selected) = selected_board_item(board, selected_board_item_id) {
+        return Some(selected.id().to_owned());
     }
 
-    Some(actionable[0].issue.id.clone())
+    Some(items[0].id().to_owned())
 }
 
-fn step_action_selection(
+fn step_board_selection(
     board: &BoardStatus,
-    selected_issue_id: Option<&str>,
+    selected_board_item_id: Option<&str>,
     delta: isize,
 ) -> Option<String> {
-    let actionable = actionable_issues(board);
-    if actionable.is_empty() {
+    let items = board_items(board);
+    if items.is_empty() {
         return None;
     }
 
-    let current_index = selected_issue_id
-        .and_then(|selected| {
-            actionable
-                .iter()
-                .position(|issue| issue.issue.id == selected)
-        })
+    let current_index = selected_board_item_id
+        .and_then(|selected| items.iter().position(|item| item.id() == selected))
         .unwrap_or(0);
 
     let step = delta.unsigned_abs();
-    let max_index = actionable.len().saturating_sub(1);
+    let max_index = items.len().saturating_sub(1);
     let next_index = if delta.is_negative() {
         current_index.saturating_sub(step)
     } else {
         current_index.saturating_add(step).min(max_index)
     };
 
-    Some(actionable[next_index].issue.id.clone())
+    Some(items[next_index].id().to_owned())
 }
 
 fn summary_lines(summary: &BoardSummary) -> Vec<Line<'static>> {
@@ -1027,7 +1117,7 @@ fn summary_lines(summary: &BoardSummary) -> Vec<Line<'static>> {
     ]
 }
 
-fn lane_lines(lanes: &[LaneEntry]) -> Vec<Line<'static>> {
+fn lane_lines(lanes: &[LaneEntry], selected_board_item_id: Option<&str>) -> Vec<Line<'static>> {
     if lanes.is_empty() {
         return vec![Line::from("none")];
     }
@@ -1040,40 +1130,38 @@ fn lane_lines(lanes: &[LaneEntry]) -> Vec<Line<'static>> {
     ordered.sort_by(|left, right| left.issue_id.cmp(&right.issue_id));
 
     for lane in ordered {
-        let observed_status = lane
-            .observed_status
-            .clone()
-            .unwrap_or_else(|| lane.status.clone());
-
-        if observed_status == "stale" {
-            stale.push(lane);
-        } else if lane.status == "finished" || observed_status == "finished" {
-            finished.push(lane);
-        } else {
-            active.push(lane);
+        match lane_group(&lane) {
+            LaneGroup::Active => active.push(lane),
+            LaneGroup::Finished => finished.push(lane),
+            LaneGroup::Stale => stale.push(lane),
         }
     }
 
     let mut lines = Vec::new();
     if !active.is_empty() {
-        append_lane_section(&mut lines, "active lanes", &active);
+        append_lane_section(&mut lines, "active lanes", &active, selected_board_item_id);
     }
     if !finished.is_empty() {
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
-        append_lane_section(&mut lines, "finished lanes", &finished);
+        append_lane_section(&mut lines, "finished lanes", &finished, None);
     }
     if !stale.is_empty() {
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
-        append_lane_section(&mut lines, "stale lanes", &stale);
+        append_lane_section(&mut lines, "stale lanes", &stale, None);
     }
     lines
 }
 
-fn append_lane_section(lines: &mut Vec<Line<'static>>, title: &str, lanes: &[LaneEntry]) {
+fn append_lane_section(
+    lines: &mut Vec<Line<'static>>,
+    title: &str,
+    lanes: &[LaneEntry],
+    selected_issue_id: Option<&str>,
+) {
     lines.push(title_line(title));
 
     if lanes.is_empty() {
@@ -1083,6 +1171,15 @@ fn append_lane_section(lines: &mut Vec<Line<'static>>, title: &str, lanes: &[Lan
 
     for lane in lanes {
         let mut detail_parts = vec![format!("status {}", lane.status)];
+        let selected = selected_issue_id == Some(lane.issue_id.as_str());
+        let prefix = if selected { "> " } else { "  " };
+        let style = if selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
         if let Some(observed_status) = &lane.observed_status {
             if observed_status != &lane.status {
                 detail_parts.push(format!("observed {}", observed_status));
@@ -1097,9 +1194,9 @@ fn append_lane_section(lines: &mut Vec<Line<'static>>, title: &str, lanes: &[Lan
             "workspace missing".to_owned()
         });
 
-        lines.push(Line::from(format!(
-            "{} {}",
-            lane.issue_id, lane.issue_title
+        lines.push(Line::from(Span::styled(
+            format!("{}{} {}", prefix, lane.issue_id, lane.issue_title),
+            style,
         )));
         lines.push(Line::from(format!("  {}", detail_parts.join(" | "))));
 
@@ -1410,7 +1507,38 @@ mod tests {
     }
 
     #[test]
-    fn selection_helpers_follow_actionable_issue_order() {
+    fn board_lines_mark_selected_active_lane() {
+        let board = BoardStatus {
+            repo_root: "/tmp/repo".to_owned(),
+            generated_at: "2026-03-26T00:00:00Z".to_owned(),
+            summary: None,
+            ready_issues: vec![],
+            claimed_issues: vec![],
+            blocked_issues: vec![],
+            deferred_issues: vec![],
+            lanes: vec![LaneEntry {
+                issue_id: "tusk-live".to_owned(),
+                issue_title: "live lane".to_owned(),
+                status: "launched".to_owned(),
+                observed_status: Some("launched".to_owned()),
+                workspace_exists: Some(true),
+                outcome: None,
+                workspace_name: Some("tusk-live-lane".to_owned()),
+            }],
+            workspaces: vec![],
+        };
+
+        let rendered = board_lines(&board, Some("tusk-live"))
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("> tusk-live live lane"));
+    }
+
+    #[test]
+    fn selection_helpers_follow_board_item_order() {
         let board = BoardStatus {
             repo_root: "/tmp/repo".to_owned(),
             generated_at: "2026-03-26T00:00:00Z".to_owned(),
@@ -1434,32 +1562,52 @@ mod tests {
             }],
             blocked_issues: vec![],
             deferred_issues: vec![],
-            lanes: vec![],
+            lanes: vec![LaneEntry {
+                issue_id: "tusk-d".to_owned(),
+                issue_title: "launched lane".to_owned(),
+                status: "launched".to_owned(),
+                observed_status: Some("launched".to_owned()),
+                workspace_exists: Some(true),
+                outcome: None,
+                workspace_name: Some("tusk-d-lane".to_owned()),
+            }],
             workspaces: vec![],
         };
 
         assert_eq!(
-            normalized_action_selection(&board, None),
+            normalized_board_selection(&board, None),
             Some("tusk-a".to_owned())
         );
         assert_eq!(
-            step_action_selection(&board, Some("tusk-a"), 1),
+            step_board_selection(&board, Some("tusk-a"), 1),
             Some("tusk-b".to_owned())
         );
         assert_eq!(
-            step_action_selection(&board, Some("tusk-b"), 1),
+            step_board_selection(&board, Some("tusk-b"), 1),
             Some("tusk-c".to_owned())
         );
         assert_eq!(
-            step_action_selection(&board, Some("tusk-c"), 1),
+            step_board_selection(&board, Some("tusk-c"), 1),
+            Some("tusk-d".to_owned())
+        );
+        assert_eq!(
+            step_board_selection(&board, Some("tusk-d"), 1),
+            Some("tusk-d".to_owned())
+        );
+        assert_eq!(
+            step_board_selection(&board, Some("tusk-d"), -1),
             Some("tusk-c".to_owned())
         );
         assert_eq!(
-            step_action_selection(&board, Some("tusk-c"), -1),
+            normalized_board_selection(&board, Some("tusk-d")),
+            Some("tusk-d".to_owned())
+        );
+        assert_eq!(
+            step_board_selection(&board, Some("tusk-c"), -1),
             Some("tusk-b".to_owned())
         );
         assert_eq!(
-            step_action_selection(&board, Some("tusk-b"), -1),
+            step_board_selection(&board, Some("tusk-b"), -1),
             Some("tusk-a".to_owned())
         );
     }
