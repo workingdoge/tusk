@@ -1086,6 +1086,14 @@ json_bool() {
   fi
 }
 
+transition_test_fail_phase() {
+  local kind="$1"
+  local phase="$2"
+  local requested="${TUSKD_TEST_FAIL_PHASE:-}"
+
+  [ -n "${requested}" ] && [ "${requested}" = "${kind}:${phase}" ]
+}
+
 new_transition_carrier() {
   local repo_root="$1"
   local kind="$2"
@@ -2831,6 +2839,14 @@ realize_launch_lane_transition() {
     return 0
   fi
 
+  if transition_test_fail_phase "launch_lane" "after_workspace_add"; then
+    rollback_json="$(rollback_launch_artifacts "${repo_root}" "${issue_id}" "${workspace_name}" "${workspace_path}")"
+    realization_json="$(jq -cn --arg workspace_name "${workspace_name}" --arg workspace_path "${workspace_path}" --arg base_rev "${base_rev}" --arg add_output "${add_output}" --argjson rollback "${rollback_json}" '{kind:"launch_lane", workspace_name:$workspace_name, workspace_path:$workspace_path, base_rev:$base_rev, add_output:$add_output, rollback:$rollback, injected_failure_phase:"after_workspace_add"}')"
+    carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+    transition_failure_result "${carrier_json}" "injected transition failure after workspace add" "$(jq -cn --arg workspace_name "${workspace_name}" --arg workspace_path "${workspace_path}" --argjson rollback "${rollback_json}" '{workspace_name:$workspace_name, workspace_path:$workspace_path, rollback:$rollback}')"
+    return 0
+  fi
+
   if describe_output="$(run_in_repo_capture "${repo_root}" jj --repository "${workspace_path}" describe -m "${issue_id}: wip")"; then
     describe_exit=0
   else
@@ -3369,7 +3385,7 @@ cmd_query() {
   local payload_json="$4"
   local request_json
 
-  if ! printf '%s' "${payload_json}" | jq -e . >/dev/null 2>&1; then
+  if ! printf '%s' "${payload_json}" | jq -e 'type' >/dev/null 2>&1; then
     fail "query --payload must be valid JSON"
   fi
 

@@ -41,6 +41,7 @@ tuskd --help
 nix run .#tuskd -- ensure --repo "$PWD"
 nix run .#tuskd -- status --repo "$PWD"
 nix run .#tuskd -- board-status --repo "$PWD"
+nix run .#tuskd-transition-tests -- --source-repo "$PWD"
 nix run .#tuskd -- claim-issue --repo "$PWD" --issue-id tusk-123
 nix run .#tuskd -- close-issue --repo "$PWD" --issue-id tusk-123 --reason "completed in visible commit"
 nix run .#tuskd -- launch-lane --repo "$PWD" --issue-id tusk-123 --base-rev main
@@ -67,6 +68,7 @@ nix run .#tusk-ui -- --help
 - `.agents/skills/nix/` contains the repo-local source of truth for the shared `nix` skill.
 - `scripts/tusk-tracker.sh` contains the flake-owned tracker boundary; the current implementation is a `bd` adapter so `tuskd` no longer shells out to raw `bd` commands directly.
 - `scripts/tuskd.sh` contains the local control-plane service skeleton, Unix-socket protocol handler, and repo-scoped Dolt backend registry/coordination logic.
+- `scripts/tuskd-transition-tests.sh` clones an isolated colocated temp repo, replays the current lane diff onto it, and runs automated lifecycle, concurrency, and rollback checks against that repo's own flake-owned `bd`/`tuskd` surface.
 - `.beads/tuskd/lanes.json` holds first-class lane state for the current repo; `board-status` reads lane truth from there, derives stale-vs-live workspace observations, and carries ready, claimed, blocked, and deferred issue buckets alongside lanes.
 - lane records can transition to handoff state with `handoff_revision`, `handed_off_at`, and an optional `handoff_note`.
 - lane records can transition to finished state with `outcome`, `finished_at`, and an optional `finish_note`; finished lanes remain explicit even after their workspaces are removed.
@@ -102,6 +104,7 @@ nix run .#tusk-ui -- --help
 - `nix run path:.#tuskd -- ensure --repo "$PWD"`
 - `nix run path:.#tuskd -- status --repo "$PWD"`
 - `nix run path:.#tuskd -- board-status --repo "$PWD"`
+- `nix run path:.#tuskd-transition-tests -- --source-repo "$PWD"`
 - disposable claimed, blocked, and deferred issues appear in the expected `board-status` sections before any lane is launched
 - `nix run path:.#tuskd -- claim-issue --repo "$PWD" --issue-id <issue-id>` on a disposable issue
 - `nix run path:.#tuskd -- close-issue --repo "$PWD" --issue-id <issue-id> --reason "<reason>"` on a disposable issue

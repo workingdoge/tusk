@@ -78,6 +78,7 @@
           pkgs.rebar3
           pkgs.rust-analyzer
           tuskFlakeRefPackage
+          tuskdTransitionTestsPackage
           tuskTrackerPackage
           rustToolchain
         ];
@@ -96,7 +97,7 @@
           nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "lib.crane.buildDepsOnly is not callable"' "path:$repo_root#lib.crane.buildDepsOnly" >/dev/null
           tusk-flake-ref --repo "$repo_root" --json >/dev/null
           nix develop --no-pure-eval "path:$repo_root" \
-            -c sh -lc "export DEVENV_ROOT=\"$repo_root\"; export BEADS_WORKSPACE_ROOT=\"$repo_root\"; cd \"$repo_root\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null && tusk-tracker --help >/dev/null && glistix --help >/dev/null && erl -eval \"erlang:halt().\" -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null && test -L .codex/skills/tusk/SKILL.md && test -L .codex/skills/ops/SKILL.md && test -L .codex/skills/ops/references/TOOLING.md && test -L .codex/skills/nix/SKILL.md && test -L .codex/skills/nix/scripts/detect-shape.py"
+            -c sh -lc "export DEVENV_ROOT=\"$repo_root\"; export BEADS_WORKSPACE_ROOT=\"$repo_root\"; cd \"$repo_root\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null && tusk-tracker --help >/dev/null && tuskd-transition-tests --help >/dev/null && glistix --help >/dev/null && erl -eval \"erlang:halt().\" -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null && test -L .codex/skills/tusk/SKILL.md && test -L .codex/skills/ops/SKILL.md && test -L .codex/skills/ops/references/TOOLING.md && test -L .codex/skills/nix/SKILL.md && test -L .codex/skills/nix/scripts/detect-shape.py"
         '';
       };
       tuskTrackerPackage = pkgs.writeShellApplication {
@@ -123,6 +124,20 @@
         ];
         text = ''
           exec bash ${./scripts/tuskd.sh} "$@"
+        '';
+      };
+      tuskdTransitionTestsPackage = pkgs.writeShellApplication {
+        name = "tuskd-transition-tests";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.git
+          pkgs.gnugrep
+          pkgs.jq
+          pkgs.jujutsu
+          pkgs.nix
+        ];
+        text = ''
+          exec bash ${./scripts/tuskd-transition-tests.sh} "$@"
         '';
       };
       repoBeads = pkgs.writeShellApplication {
@@ -238,6 +253,7 @@
             tuskFlakeRefPackage
             tuskTrackerPackage
             tuskdPackage
+            tuskdTransitionTestsPackage
             rustToolchain
           ];
 
@@ -256,6 +272,7 @@
             echo "  tusk-flake-ref --json"
             echo "  tusk-tracker --help"
             echo "  tuskd --help"
+            echo "  tuskd-transition-tests --help"
             echo "  nix build path:.#tusk-ui"
             echo "  nix run path:.#tusk-ui -- --help"
             echo "  nix eval path:.#packages.${system}.rust-toolchain.name"
@@ -301,6 +318,7 @@
         beads = repoBeads;
         tusk-flake-ref = tuskFlakeRefPackage;
         tusk-tracker = tuskTrackerPackage;
+        tuskd-transition-tests = tuskdTransitionTestsPackage;
         tusk-ui = tuskUiPackage;
         tusk-openai-skill = tuskSkillBundle;
       };
@@ -333,6 +351,10 @@
         tuskd = {
           type = "app";
           program = "${tuskdPackage}/bin/tuskd";
+        };
+        tuskd-transition-tests = {
+          type = "app";
+          program = "${tuskdTransitionTestsPackage}/bin/tuskd-transition-tests";
         };
         tusk-tracker = {
           type = "app";
