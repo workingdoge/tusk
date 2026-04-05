@@ -1,0 +1,66 @@
+[
+  {
+    "query": "my flake broke and I want to know what outputs it still exports",
+    "should_trigger": true
+  },
+  {
+    "query": "where does networking.hostName come from on this nixos host?",
+    "should_trigger": true
+  },
+  {
+    "query": "why does this darwin configuration set a different shell than I expect?",
+    "should_trigger": true
+  },
+  {
+    "query": "show me the actual value of home.username for this home-manager config",
+    "should_trigger": true
+  },
+  {
+    "query": "attribute 'foo' missing in my nixosConfigurations trace",
+    "should_trigger": true
+  },
+  {
+    "query": "The option 'programs.zed.enable' does not exist in my config",
+    "should_trigger": true
+  },
+  {
+    "query": "this Den repo feels like a fibration; is that fair?",
+    "should_trigger": true
+  },
+  {
+    "query": "is this repo using Den or plain flakes?",
+    "should_trigger": true
+  },
+  {
+    "query": "I need to understand how den.ctx transitions into user and hm-user",
+    "should_trigger": true
+  },
+  {
+    "query": "can you explain what this Nix expression evaluates to and why?",
+    "should_trigger": true
+  },
+  {
+    "query": "write a Python script that downloads a web page",
+    "should_trigger": false
+  },
+  {
+    "query": "compare apartment prices in Cambridge",
+    "should_trigger": false
+  },
+  {
+    "query": "fix my Linux Wi-Fi driver after the kernel update",
+    "should_trigger": false
+  },
+  {
+    "query": "recommend a keyboard for programming",
+    "should_trigger": false
+  },
+  {
+    "query": "write a Nix package for this Rust crate and publish it to nixpkgs",
+    "should_trigger": false
+  },
+  {
+    "query": "make a bash script that greps the whole docs folder for TODO comments",
+    "should_trigger": false
+  }
+]
