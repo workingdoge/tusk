@@ -94,13 +94,29 @@
           echo "Installed tusk skill to $target_dir"
         '';
       };
+      initTuskControlPlane = pkgs.writeShellApplication {
+        name = "init-tusk-control-plane";
+        runtimeInputs = [
+          beads
+          pkgs.coreutils
+          pkgs.findutils
+          pkgs.git
+          pkgs.gnugrep
+          pkgs.jujutsu
+        ];
+        text = builtins.readFile ./scripts/init-tusk-control-plane.sh;
+      };
       devShellModule =
         { ... }:
         {
+          devenv.cli.version = "2.0.4";
+          process.manager.implementation = "process-compose";
+
           packages = [
             beads
             codexNixCheck
             installTuskOpenaiSkill
+            initTuskControlPlane
             pkgs.deadnix
             pkgs.direnv
             pkgs.dolt
@@ -127,6 +143,7 @@
             echo "  bd ready --json"
             echo "  jj st"
             echo "  codex-nix-check"
+            echo "  init-tusk-control-plane /tmp/example-control-plane"
             echo "  install-tusk-openai-skill"
             echo "  nix develop --no-pure-eval path:. -c sh -lc 'cd \"$DEVENV_ROOT\" && bd version && jj --version && dolt version'"
           '';
@@ -177,6 +194,10 @@
         install-tusk-openai-skill = {
           type = "app";
           program = "${installTuskOpenaiSkill}/bin/install-tusk-openai-skill";
+        };
+        init-tusk-control-plane = {
+          type = "app";
+          program = "${initTuskControlPlane}/bin/init-tusk-control-plane";
         };
       };
 

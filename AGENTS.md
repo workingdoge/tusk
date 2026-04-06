@@ -1,6 +1,6 @@
 # Agent Instructions
 
-These instructions apply to `/Users/arj/dev/blackhole/tusk`.
+These instructions apply to `/Users/arj/dev/tusk`.
 
 ## Workflow
 
@@ -20,6 +20,7 @@ bd status --json
 jj st
 nix build .#tusk-openai-skill
 nix run .#install-tusk-openai-skill
+nix run .#init-tusk-control-plane -- /tmp/example-control-plane
 nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && bd version && jj --version && dolt version'
 codex-nix-check
 ```
@@ -36,6 +37,7 @@ codex-nix-check
 
 - Keep `tusk` core generic. Consumer-specific runtime bindings and tracker wrappers belong in the consuming repo until they clearly generalize.
 - Prefer `codex-nix-check` and a shell smoke test after changing the flake or module surface.
+- Prefer `nix run .#init-tusk-control-plane -- <target-dir>` when bootstrapping a new cross-repo `bd` + `jj` control plane.
 - If you initialize `.beads/` here for dogfooding, treat it as this repo's own tracker, not as an extension of `config`. The tracker state is local and ignored by Git in this repo.
 
 ## Verification
@@ -43,5 +45,6 @@ codex-nix-check
 - `codex-nix-check`
 - `nix build .#tusk-openai-skill`
 - `nix run .#install-tusk-openai-skill`
+- `nix run .#init-tusk-control-plane -- /tmp/example-control-plane`
 - `nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && bd version && jj --version && dolt version'`
 - `nix run path:.#beads -- status --json`
