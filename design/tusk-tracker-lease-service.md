@@ -353,6 +353,10 @@ inside a single script.
 
 This service should be treated as a subsystem of `tusk`, not as a random helper.
 
+See also [`design/tusk-transition-carrier.md`](./tusk-transition-carrier.md)
+for the broader runtime law that places service admission and receipts inside
+the same carried transition seam as issue and lane actions.
+
 One way to read it in the current operational vocabulary:
 
 - witness:

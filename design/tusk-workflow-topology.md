@@ -375,6 +375,10 @@ without forcing a giant new database on day one.
 
 The commands should be understood as projections of the topology:
 
+See also [`design/tusk-transition-carrier.md`](./tusk-transition-carrier.md)
+for the primitive carried object that should drive control-plane transitions
+over these projections.
+
 - `bd-board`: issue + lane projection
 - future `tusk deps`: dependency projection
 - future `tusk tracker status`: service projection
@@ -384,6 +388,10 @@ The commands should be understood as projections of the topology:
 This keeps the command surface honest.
 
 We should prefer adding projections over inventing new hidden state.
+
+The missing runtime seam is therefore not "another board view." It is one
+transition carrier that can move between issue, lane, service, and receipt
+authorities without collapsing them.
 
 ## Phased Implementation
 

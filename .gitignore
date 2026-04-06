@@ -4,10 +4,22 @@
 .beads/
 .jj/
 .jj-workspaces/
+.codex/
 .codex-prompts/
 result
 result-*
+crates/*/target/
 
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# Root-level Dolt spillover from broken tracker/runtime startup
+/dolt/
+/dolt-monitor.pid
+/dolt-monitor.pid.lock
+/dolt-server.activity
+/dolt-server.lock
+/dolt-server.log
+/dolt-server.pid
+/dolt-server.port

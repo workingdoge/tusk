@@ -335,6 +335,10 @@ declarations before any backend code is emitted.
 
 Keep this distinction hard:
 
+See also [`design/tusk-transition-carrier.md`](./tusk-transition-carrier.md)
+for the runtime-side carried seam that applies this semantic spine to the
+existing `tuskd` transition surface.
+
 ### Semantic core
 
 - verified base entries
@@ -398,6 +402,11 @@ These should stay explicit for now:
 
 4. Receipt enrichment
    v0 receipts exist structurally, but not yet as a full runtime record.
+
+5. Transition carrier
+   The runtime-side carried transition object and admission law now live in
+   [`design/tusk-transition-carrier.md`](./tusk-transition-carrier.md); the
+   current shell implementation still needs to be rewritten around that seam.
 
 These are acceptable holes.
 They should not block the schema rewrite.

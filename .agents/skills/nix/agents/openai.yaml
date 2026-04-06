@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nix"
+  short_description: "Author and interrogate Nix and Den flakes"
+  default_prompt: "Use $nix to inspect, debug, or reshape this flake or Den configuration, including Pi-first Den authoring when relevant."
