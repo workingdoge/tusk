@@ -1,19 +1,14 @@
 use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{Frame, layout::Rect};
 
 use crate::app::{App, ViewMode};
-use crate::theme::{error_lines, kv_line, pane_block, title_line};
+use crate::theme::{error_lines, kv_line, title_line};
 use crate::viewmodel::TrackerViewModel;
 
 use super::board::summary_lines;
-use super::{panel_title, prepend_panel_notice};
+use super::{panel_title, prepend_panel_notice, render_scrolled_lines_panel};
 
 pub(crate) fn render_tracker(frame: &mut Frame, area: Rect, app: &App) {
-    let block = pane_block(
-        panel_title("Tracker Service", &app.tracker, app.refresh_interval()),
-        app.view == ViewMode::Tracker,
-    );
     let lines = match (app.tracker_viewmodel(), &app.tracker.error) {
         (Some(tracker), _) => {
             let mut lines = tracker_lines(&tracker);
@@ -24,11 +19,13 @@ pub(crate) fn render_tracker(frame: &mut Frame, area: Rect, app: &App) {
         _ => vec![Line::from("waiting for tracker data")],
     };
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false }),
+    render_scrolled_lines_panel(
+        frame,
         area,
+        panel_title("Tracker Service", &app.tracker, app.refresh_interval()),
+        lines,
+        app.view == ViewMode::Tracker,
+        app.current_scroll_offset(),
     );
 }
 

@@ -9,6 +9,10 @@ use crate::types::{
     BoardIssue, BoardStatus, ClaimIssuePayload, FinishLanePayload, LaneEntry, LaunchLanePayload,
     OperatorSnapshot, PingStatus, ReceiptsStatus, TrackerStatus,
 };
+use crate::views::board::{board_lines, selected_line_offset};
+use crate::views::home::{home_context_lines, home_history_lines, home_next_lines, home_now_lines};
+use crate::views::receipts::receipt_lines;
+use crate::views::tracker::tracker_lines;
 use crate::viewmodel::{
     BoardViewModel, HomeViewModel, ReceiptsViewModel, TrackerViewModel, board_viewmodel,
     home_viewmodel, receipts_viewmodel, tracker_viewmodel,
@@ -26,6 +30,7 @@ pub(crate) struct App {
     pub(crate) should_quit: bool,
     pub(crate) view: ViewMode,
     pub(crate) selected_board_item_id: Option<String>,
+    scroll: ScrollOffsets,
     overlay: Option<OverlayState>,
     pub(crate) home: PanelState<OperatorSnapshot>,
     pub(crate) tracker: PanelState<TrackerStatus>,
@@ -50,6 +55,7 @@ impl App {
             should_quit: false,
             view: ViewMode::Home,
             selected_board_item_id: None,
+            scroll: ScrollOffsets::default(),
             overlay: None,
             home: PanelState::default(),
             tracker: PanelState::default(),
@@ -187,11 +193,13 @@ impl App {
         }
 
         match self.view {
-            ViewMode::Home => "o/t/b/e view  Tab cycle  ? help  b board  r refresh  p ping  q quit",
-            ViewMode::Board => {
-                "o/t/b/e view  Tab cycle  ? help  j/k move  c claim  l launch  f finish  r refresh  p ping  q quit"
+            ViewMode::Home => {
+                "o/t/b/e view  Tab cycle  ? help  j/k scroll  PgUp/PgDn page  g/G edge  b board  r refresh  p ping  q quit"
             }
-            _ => "o/t/b/e view  Tab cycle  ? help  r refresh  p ping  q quit",
+            ViewMode::Board => {
+                "o/t/b/e view  Tab cycle  ? help  j/k move  PgUp/PgDn page  g/G edge  c claim  l launch  f finish  r refresh  p ping  q quit"
+            }
+            _ => "o/t/b/e view  Tab cycle  ? help  j/k scroll  PgUp/PgDn page  g/G edge  r refresh  p ping  q quit",
         }
     }
 
@@ -217,6 +225,15 @@ impl App {
             ViewMode::Tracker => self.tracker.is_refreshing(),
             ViewMode::Board => self.board.is_refreshing(),
             ViewMode::Receipts => self.receipts.is_refreshing(),
+        }
+    }
+
+    pub(crate) fn current_scroll_offset(&self) -> u16 {
+        match self.view {
+            ViewMode::Home => self.scroll.home,
+            ViewMode::Tracker => self.scroll.tracker,
+            ViewMode::Board => self.scroll.board,
+            ViewMode::Receipts => self.scroll.receipts,
         }
     }
 
@@ -247,6 +264,12 @@ impl App {
             KeyCode::Char('r') => Some(UiAction::Refresh),
             KeyCode::Char('p') => Some(UiAction::Ping),
             KeyCode::Char('?') | KeyCode::Char('h') => Some(UiAction::ShowHelp),
+            KeyCode::Char('j') | KeyCode::Down if self.view != ViewMode::Board => {
+                Some(UiAction::Scroll(1))
+            }
+            KeyCode::Char('k') | KeyCode::Up if self.view != ViewMode::Board => {
+                Some(UiAction::Scroll(-1))
+            }
             KeyCode::Char('o') => Some(UiAction::SwitchView(ViewMode::Home)),
             KeyCode::Char('t') => Some(UiAction::SwitchView(ViewMode::Tracker)),
             KeyCode::Char('b') => Some(UiAction::SwitchView(ViewMode::Board)),
@@ -257,6 +280,10 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up if self.view == ViewMode::Board => {
                 Some(UiAction::MoveBoardSelection(-1))
             }
+            KeyCode::PageDown => Some(UiAction::ScrollPage(10)),
+            KeyCode::PageUp => Some(UiAction::ScrollPage(-10)),
+            KeyCode::Char('g') => Some(UiAction::ScrollToTop),
+            KeyCode::Char('G') => Some(UiAction::ScrollToBottom),
             KeyCode::Tab => Some(UiAction::CycleView(Direction::Forward)),
             KeyCode::BackTab => Some(UiAction::CycleView(Direction::Backward)),
             _ => None,
@@ -282,6 +309,10 @@ impl App {
                 self.view = self.view.previous();
                 self.request_view_refresh("view refresh");
             }
+            UiAction::Scroll(delta) => self.scroll_current_view(delta),
+            UiAction::ScrollPage(delta) => self.scroll_current_view(delta),
+            UiAction::ScrollToTop => self.scroll_current_view_to_top(),
+            UiAction::ScrollToBottom => self.scroll_current_view_to_bottom(),
             UiAction::MoveBoardSelection(delta) => self.move_board_selection(delta),
             UiAction::Claim(issue_id) => self.open_claim_overlay(&issue_id),
             UiAction::Launch(issue_id, base_rev) => self.open_launch_overlay(&issue_id, &base_rev),
@@ -322,11 +353,13 @@ impl App {
     fn sync_board_selection(&mut self) {
         let Some(board) = self.board.value.as_ref() else {
             self.selected_board_item_id = None;
+            self.scroll.board = 0;
             return;
         };
 
         self.selected_board_item_id =
             normalized_board_selection(board, self.selected_board_item_id.as_deref());
+        self.sync_board_scroll();
     }
 
     fn move_board_selection(&mut self, delta: isize) {
@@ -343,6 +376,7 @@ impl App {
         };
 
         self.selected_board_item_id = Some(next.clone());
+        self.sync_board_scroll();
         self.status_line = format!("selected {next}");
     }
 
@@ -644,6 +678,82 @@ impl App {
             BoardItemRef::ActiveLane(lane) => lane.issue_title.clone(),
         })
     }
+
+    fn current_scroll_offset_mut(&mut self) -> &mut u16 {
+        match self.view {
+            ViewMode::Home => &mut self.scroll.home,
+            ViewMode::Tracker => &mut self.scroll.tracker,
+            ViewMode::Board => &mut self.scroll.board,
+            ViewMode::Receipts => &mut self.scroll.receipts,
+        }
+    }
+
+    fn current_view_line_count(&self) -> usize {
+        match self.view {
+            ViewMode::Home => self
+                .home_viewmodel()
+                .map(|home| {
+                    home_now_lines(&home).len()
+                        + home_next_lines(&home).len()
+                        + home_history_lines(&home).len()
+                        + home_context_lines(&home).len()
+                })
+                .unwrap_or(1),
+            ViewMode::Tracker => self
+                .tracker_viewmodel()
+                .map(|tracker| tracker_lines(&tracker).len())
+                .unwrap_or(1),
+            ViewMode::Board => self
+                .board_viewmodel()
+                .map(|board| board_lines(&board).len())
+                .unwrap_or(1),
+            ViewMode::Receipts => self
+                .receipts_viewmodel()
+                .map(|receipts| receipt_lines(&receipts, &self.receipts).len())
+                .unwrap_or(1),
+        }
+    }
+
+    fn scroll_current_view(&mut self, delta: isize) {
+        let max_offset = self.current_view_line_count().saturating_sub(1) as u16;
+        let current = *self.current_scroll_offset_mut();
+        let next = if delta.is_negative() {
+            current.saturating_sub(delta.unsigned_abs() as u16)
+        } else {
+            current.saturating_add(delta as u16).min(max_offset)
+        };
+        *self.current_scroll_offset_mut() = next;
+        self.status_line = format!("{} scroll {}", self.view.label(), next);
+    }
+
+    fn scroll_current_view_to_top(&mut self) {
+        *self.current_scroll_offset_mut() = 0;
+        self.status_line = format!("{} scroll top", self.view.label());
+    }
+
+    fn scroll_current_view_to_bottom(&mut self) {
+        let max_offset = self.current_view_line_count().saturating_sub(1) as u16;
+        *self.current_scroll_offset_mut() = max_offset;
+        self.status_line = format!("{} scroll {}", self.view.label(), max_offset);
+    }
+
+    fn sync_board_scroll(&mut self) {
+        let Some(board) = self.board_viewmodel() else {
+            return;
+        };
+
+        if let Some(line) = selected_line_offset(&board) {
+            self.scroll.board = line.saturating_sub(2) as u16;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ScrollOffsets {
+    home: u16,
+    tracker: u16,
+    board: u16,
+    receipts: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -696,6 +806,8 @@ impl OverlayState {
             "Global".to_owned(),
             "  o / t / b / e  switch views".to_owned(),
             "  Tab / Shift+Tab cycle views".to_owned(),
+            "  PageUp / PageDown scroll the current panel".to_owned(),
+            "  g / G          jump to top or bottom of the current panel".to_owned(),
             "  r              refresh the cockpit".to_owned(),
             "  p              ping the service".to_owned(),
             "  q              quit tusk-ui".to_owned(),
@@ -706,16 +818,20 @@ impl OverlayState {
         match view {
             ViewMode::Home => {
                 body.push("Home".to_owned());
+                body.push("  j / k or Up / Down scroll the briefing".to_owned());
                 body.push("  Read the current briefing, next move, and recent history".to_owned());
                 body.push("  Press b to jump into the board for action".to_owned());
             }
             ViewMode::Tracker => {
                 body.push("Tracker".to_owned());
+                body.push("  j / k or Up / Down scroll tracker details".to_owned());
                 body.push("  Inspect service health, leases, and backend state".to_owned());
             }
             ViewMode::Board => {
                 body.push("Board".to_owned());
                 body.push("  j / k or Up / Down  move selection".to_owned());
+                body.push("  PageUp / PageDown   scroll the board without changing selection".to_owned());
+                body.push("  g / G               jump to top or bottom of the board".to_owned());
                 body.push("  c                  confirm claim for selected ready issue".to_owned());
                 body.push(
                     "  l                  confirm lane launch for selected claimed issue"
@@ -727,6 +843,7 @@ impl OverlayState {
             }
             ViewMode::Receipts => {
                 body.push("Receipts".to_owned());
+                body.push("  j / k or Up / Down scroll recent receipts".to_owned());
                 body.push("  Review recent authoritative transitions from tuskd".to_owned());
             }
         }
@@ -1012,7 +1129,10 @@ mod tests {
     use super::{App, ViewMode, normalized_board_selection, step_board_selection};
     use crate::action::{Direction, UiAction};
     use crate::protocol::ProtocolClient;
-    use crate::types::{BoardIssue, BoardStatus, LaneEntry};
+    use crate::types::{
+        BackendStatus, BoardIssue, BoardStatus, HealthStatus, LaneEntry, TrackerProtocol,
+        TuskdState,
+    };
 
     fn board_fixture() -> BoardStatus {
         BoardStatus {
@@ -1133,6 +1253,29 @@ mod tests {
     }
 
     #[test]
+    fn action_for_key_maps_scroll_intents_outside_board() {
+        let mut app = test_app();
+        app.view = ViewMode::Home;
+
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            Ok(Some(UiAction::Scroll(1)))
+        );
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+            Ok(Some(UiAction::ScrollPage(10)))
+        );
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)),
+            Ok(Some(UiAction::ScrollToTop))
+        );
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)),
+            Ok(Some(UiAction::ScrollToBottom))
+        );
+    }
+
+    #[test]
     fn dispatch_action_updates_view_and_selection_without_rendering() {
         let mut app = test_app();
         app.board.value = Some(board_fixture());
@@ -1143,9 +1286,48 @@ mod tests {
 
         app.dispatch_action(UiAction::MoveBoardSelection(1));
         assert_eq!(app.selected_board_item_id.as_deref(), Some("tusk-b"));
+        assert!(app.scroll.board > 0);
 
         app.dispatch_action(UiAction::CycleView(Direction::Forward));
         assert_eq!(app.view, ViewMode::Receipts);
+    }
+
+    #[test]
+    fn dispatch_action_updates_scroll_state_without_rendering() {
+        let mut app = test_app();
+        app.view = ViewMode::Tracker;
+
+        app.dispatch_action(UiAction::Scroll(3));
+        assert_eq!(app.current_scroll_offset(), 0);
+
+        app.tracker.value = Some(crate::types::TrackerStatus {
+            repo_root: "/tmp/repo".to_owned(),
+            protocol: TrackerProtocol {
+                endpoint: "/tmp/repo/.beads/tuskd/tuskd.sock".to_owned(),
+            },
+            tuskd: TuskdState {
+                mode: "idle".to_owned(),
+                pid: None,
+            },
+            health: HealthStatus {
+                status: "healthy".to_owned(),
+                checked_at: "2026-03-26T00:00:00Z".to_owned(),
+                backend: Some(BackendStatus {
+                    running: Some(true),
+                    pid: Some(1234),
+                    port: Some(32642),
+                    data_dir: Some("/tmp/repo/.beads/dolt".to_owned()),
+                }),
+                summary: None,
+            },
+            active_leases: vec![],
+        });
+
+        app.dispatch_action(UiAction::Scroll(3));
+        assert_eq!(app.current_scroll_offset(), 3);
+
+        app.dispatch_action(UiAction::ScrollToTop);
+        assert_eq!(app.current_scroll_offset(), 0);
     }
 
     #[test]

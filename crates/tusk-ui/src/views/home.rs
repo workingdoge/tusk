@@ -8,7 +8,7 @@ use crate::theme::{error_lines, kv_line, pane_block, source_line, title_line, wa
 use crate::viewmodel::{ContextAnomaly, HistoryItem, HomeViewModel, IssueRef};
 
 use super::board::summary_lines;
-use super::{panel_title, prepend_panel_notice, render_lines_panel};
+use super::{panel_title, prepend_panel_notice, render_scrolled_lines_panel};
 
 pub(crate) fn render_home(frame: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::default()
@@ -28,45 +28,50 @@ pub(crate) fn render_home(frame: &mut Frame, area: Rect, app: &App) {
         (Some(home), _) => {
             let mut now_lines = home_now_lines(&home);
             prepend_panel_notice(&mut now_lines, &app.home);
-            render_lines_panel(
+            render_scrolled_lines_panel(
                 frame,
                 top[0],
                 panel_title("Now", &app.home, app.refresh_interval()),
                 now_lines,
                 false,
+                app.current_scroll_offset(),
             );
 
-            render_lines_panel(
+            render_scrolled_lines_panel(
                 frame,
                 top[1],
                 panel_title("Next", &app.home, app.refresh_interval()),
                 home_next_lines(&home),
                 false,
+                app.current_scroll_offset(),
             );
 
-            render_lines_panel(
+            render_scrolled_lines_panel(
                 frame,
                 bottom[0],
                 panel_title("History", &app.home, app.refresh_interval()),
                 home_history_lines(&home),
                 false,
+                app.current_scroll_offset(),
             );
 
-            render_lines_panel(
+            render_scrolled_lines_panel(
                 frame,
                 bottom[1],
                 panel_title("Context", &app.home, app.refresh_interval()),
                 home_context_lines(&home),
                 false,
+                app.current_scroll_offset(),
             );
         }
         (_, Some(error)) => {
-            render_lines_panel(
+            render_scrolled_lines_panel(
                 frame,
                 area,
                 panel_title("Home", &app.home, app.refresh_interval()),
                 error_lines(error),
                 false,
+                app.current_scroll_offset(),
             );
         }
         _ => {

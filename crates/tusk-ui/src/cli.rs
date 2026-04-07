@@ -81,8 +81,10 @@ Keys:
   Shift+Tab    focus previous view
   o / t / b / e
                focus home, tracker, board, or receipts
-  j / k        move selectable issue/lane selection in the board
-  Up / Down    move selectable issue/lane selection in the board
+  j / k        scroll the current panel, or move board selection on the board
+  Up / Down    scroll the current panel, or move board selection on the board
+  PageUp/Down  scroll the current panel by a page
+  g / G        jump to the top or bottom of the current panel
   c            claim the selected ready issue from the board
   l            launch a lane for the selected claimed issue
   f            finish the selected active lane as completed

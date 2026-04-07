@@ -67,16 +67,18 @@ pub(crate) fn prepend_panel_notice<T>(lines: &mut Vec<Line<'static>>, panel: &Pa
     lines.insert(0, line);
 }
 
-pub(crate) fn render_lines_panel(
+pub(crate) fn render_scrolled_lines_panel(
     frame: &mut Frame,
     area: Rect,
     title: Line<'static>,
     lines: Vec<Line<'static>>,
     focused: bool,
+    scroll: u16,
 ) {
     frame.render_widget(
         Paragraph::new(lines)
             .block(pane_block(title, focused))
+            .scroll((scroll, 0))
             .wrap(Wrap { trim: false }),
         area,
     );

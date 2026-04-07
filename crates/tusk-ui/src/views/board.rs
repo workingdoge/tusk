@@ -1,17 +1,12 @@
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{Frame, layout::Rect};
 
-use super::{panel_title, prepend_panel_notice};
+use super::{panel_title, prepend_panel_notice, render_scrolled_lines_panel};
 use crate::app::{App, ViewMode};
-use crate::theme::{error_lines, kv_line, pane_block, selected_item_style, text_style, title_line};
+use crate::theme::{error_lines, kv_line, selected_item_style, text_style, title_line};
 use crate::viewmodel::{BoardViewModel, IssueItem, LaneItem, SummaryView};
 
 pub(crate) fn render_board(frame: &mut Frame, area: Rect, app: &App) {
-    let block = pane_block(
-        panel_title("Board", &app.board, app.refresh_interval()),
-        app.view == ViewMode::Board,
-    );
     let lines = match (app.board_viewmodel(), &app.board.error) {
         (Some(board), _) => {
             let mut lines = board_lines(&board);
@@ -22,11 +17,13 @@ pub(crate) fn render_board(frame: &mut Frame, area: Rect, app: &App) {
         _ => vec![Line::from("waiting for board data")],
     };
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false }),
+    render_scrolled_lines_panel(
+        frame,
         area,
+        panel_title("Board", &app.board, app.refresh_interval()),
+        lines,
+        app.view == ViewMode::Board,
+        app.current_scroll_offset(),
     );
 }
 
@@ -184,6 +181,95 @@ fn append_lane_section(lines: &mut Vec<Line<'static>>, title: &str, lanes: &[Lan
             lines.push(Line::from(format!("  ws {}", workspace_name)));
         }
     }
+}
+
+pub(crate) fn selected_line_offset(board: &BoardViewModel) -> Option<usize> {
+    let mut line = 0usize;
+    line += 2;
+
+    if let Some(summary) = &board.summary {
+        line += 2 + summary_lines(summary).len();
+    }
+
+    if let Some(selected) = selected_issue_line(&board.ready_issues, line + 2) {
+        return Some(selected);
+    }
+    line += 2 + issue_lines_len(&board.ready_issues);
+
+    if let Some(selected) = selected_issue_line(&board.claimed_issues, line + 2) {
+        return Some(selected);
+    }
+    line += 2 + issue_lines_len(&board.claimed_issues);
+
+    if let Some(selected) = selected_issue_line(&board.blocked_issues, line + 2) {
+        return Some(selected);
+    }
+    line += 2 + issue_lines_len(&board.blocked_issues);
+
+    if let Some(selected) = selected_issue_line(&board.deferred_issues, line + 2) {
+        return Some(selected);
+    }
+    line += 2 + issue_lines_len(&board.deferred_issues);
+
+    line += 2;
+    if let Some(selected) = selected_lane_line(&board.active_lanes, line) {
+        return Some(selected);
+    }
+    line += lane_section_len(&board.active_lanes, !board.active_lanes.is_empty());
+    if !board.active_lanes.is_empty() && !board.finished_lanes.is_empty() {
+        line += 1;
+    }
+    if let Some(selected) = selected_lane_line(&board.finished_lanes, line) {
+        return Some(selected);
+    }
+    line += lane_section_len(&board.finished_lanes, !board.finished_lanes.is_empty());
+    if (!board.active_lanes.is_empty() || !board.finished_lanes.is_empty())
+        && !board.stale_lanes.is_empty()
+    {
+        line += 1;
+    }
+    if let Some(selected) = selected_lane_line(&board.stale_lanes, line) {
+        return Some(selected);
+    }
+
+    None
+}
+
+fn issue_lines_len(issues: &[IssueItem]) -> usize {
+    if issues.is_empty() { 1 } else { issues.len() }
+}
+
+fn selected_issue_line(issues: &[IssueItem], start: usize) -> Option<usize> {
+    issues.iter().position(|issue| issue.selected).map(|idx| start + idx)
+}
+
+fn lane_section_len(lanes: &[LaneItem], present: bool) -> usize {
+    if !present {
+        return 0;
+    }
+    if lanes.is_empty() {
+        2
+    } else {
+        1 + lanes
+            .iter()
+            .map(|lane| 1 + usize::from(lane.workspace_name.is_some()) + 1)
+            .sum::<usize>()
+    }
+}
+
+fn selected_lane_line(lanes: &[LaneItem], start: usize) -> Option<usize> {
+    let mut line = start;
+    for lane in lanes {
+        if lane.selected {
+            return Some(line);
+        }
+        line += 1;
+        line += 1;
+        if lane.workspace_name.is_some() {
+            line += 1;
+        }
+    }
+    None
 }
 
 #[cfg(test)]
