@@ -320,9 +320,11 @@
           pkgs.jujutsu
           pkgs.lsof
           pkgs.socat
+          tuskdCorePackage
           tuskTrackerPackage
         ];
         text = ''
+          export TUSKD_CORE_BIN=${tuskdCorePackage}/bin/tuskd-core
           exec bash ${./scripts/tuskd.sh} "$@"
         '';
       };
@@ -402,6 +404,18 @@
         tuskUiCommonArgs
         // {
           cargoArtifacts = tuskUiCargoArtifacts;
+        }
+      );
+      tuskdCoreSrc = craneLib.cleanCargoSource ./crates/tuskd-core;
+      tuskdCoreCommonArgs = {
+        src = tuskdCoreSrc;
+        strictDeps = true;
+      };
+      tuskdCoreCargoArtifacts = craneLib.buildDepsOnly tuskdCoreCommonArgs;
+      tuskdCorePackage = craneLib.buildPackage (
+        tuskdCoreCommonArgs
+        // {
+          cargoArtifacts = tuskdCoreCargoArtifacts;
         }
       );
       codexNixCheck = pkgs.writeShellApplication {
@@ -549,7 +563,9 @@
             echo "  tusk-flake-ref --json"
             echo "  tusk-tracker --help"
             echo "  tuskd --help"
+            echo "  tuskd core-seam --json"
             echo "  tuskd-transition-tests --help"
+            echo "  nix build path:.#tuskd-core"
             echo "  nix build path:.#tusk-ui"
             echo "  nix run path:.#tusk-ui -- --help"
             echo "  nix eval path:.#packages.${system}.rust-toolchain.name"
@@ -600,6 +616,7 @@
         tusk-clean = tuskClean;
         tusk-flake-ref = tuskFlakeRefPackage;
         tusk-tracker = tuskTrackerPackage;
+        tuskd-core = tuskdCorePackage;
         tuskd-transition-tests = tuskdTransitionTestsPackage;
         tusk-ui = tuskUiPackage;
         tusk-openai-skill = tuskSkillBundle;
@@ -637,6 +654,10 @@
         tuskd = {
           type = "app";
           program = "${tuskdPackage}/bin/tuskd";
+        };
+        tuskd-core = {
+          type = "app";
+          program = "${tuskdCorePackage}/bin/tuskd-core";
         };
         tuskd-transition-tests = {
           type = "app";

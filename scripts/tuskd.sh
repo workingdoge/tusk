@@ -6,6 +6,7 @@ program_name="${0##*/}"
 usage() {
   cat <<'EOF'
 Usage:
+  tuskd core-seam [--json]
   tuskd ensure [--repo PATH] [--socket PATH]
   tuskd status [--repo PATH] [--socket PATH]
   tuskd board-status [--repo PATH]
@@ -20,6 +21,7 @@ Usage:
   tuskd query [--repo PATH] [--socket PATH] --kind KIND [--request-id ID] [--payload JSON]
 
 Commands:
+  core-seam     Print the first Rust-owned backend/service seam contract.
   ensure        Ensure repo-local state exists and tracker health is recorded.
   status        Print the current tracker service projection.
   board-status  Print the current board projection.
@@ -50,6 +52,21 @@ EOF
 fail() {
   echo "${program_name}: $*" >&2
   exit 1
+}
+
+require_tuskd_core_bin() {
+  local bin="${TUSKD_CORE_BIN:-}"
+
+  [ -n "${bin}" ] || fail "TUSKD_CORE_BIN is not set"
+  [ -x "${bin}" ] || fail "TUSKD_CORE_BIN is not executable: ${bin}"
+  printf '%s\n' "${bin}"
+}
+
+exec_tuskd_core() {
+  local bin
+
+  bin="$(require_tuskd_core_bin)"
+  exec "${bin}" "$@"
 }
 
 now_iso8601() {
@@ -3402,6 +3419,10 @@ cmd_query() {
 command="${1:-}"
 if [ $# -gt 0 ]; then
   shift
+fi
+
+if [ "${command}" = "core-seam" ]; then
+  exec_tuskd_core seam "$@"
 fi
 
 repo_arg=""

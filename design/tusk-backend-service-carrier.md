@@ -257,6 +257,17 @@ The shell should remain only:
 That keeps the shell as an adapter edge instead of the daemon's semantic
 center.
 
+## Initial Delegation Surface
+
+The first scaffolded boundary should stay explicit and small.
+
+- the flake exports a dedicated `tuskd-core` package
+- the shell wrapper exports `TUSKD_CORE_BIN`
+- `tuskd core-seam` delegates directly into the Rust binary
+
+That gives the repo one real shell-to-Rust seam before any runtime logic is
+ported.
+
 ## Out Of Scope For This Seam
 
 Do not pull these into the first Rust-owned carrier:
