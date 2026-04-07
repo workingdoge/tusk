@@ -4,7 +4,7 @@ use ratatui::{Frame, layout::Rect};
 
 use super::{panel_title, prepend_panel_notice};
 use crate::app::{App, ViewMode};
-use crate::theme::{error_lines, pane_block};
+use crate::theme::{error_lines, kv_line, pane_block};
 use crate::viewmodel::ReceiptsViewModel;
 
 pub(crate) fn render_receipts(frame: &mut Frame, area: Rect, app: &App) {
@@ -41,27 +41,9 @@ fn receipt_items(
     panel: &crate::app::PanelState<crate::types::ReceiptsStatus>,
 ) -> Vec<ListItem<'static>> {
     let mut items = vec![
-        ListItem::new(Line::from(vec![
-            ratatui::text::Span::styled(
-                "repo ",
-                ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
-            ),
-            ratatui::text::Span::raw(receipts.repo_root.clone()),
-        ])),
-        ListItem::new(Line::from(vec![
-            ratatui::text::Span::styled(
-                "updated ",
-                ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
-            ),
-            ratatui::text::Span::raw(receipts.updated_at.clone()),
-        ])),
-        ListItem::new(Line::from(vec![
-            ratatui::text::Span::styled(
-                "file ",
-                ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
-            ),
-            ratatui::text::Span::raw(receipts.receipts_path.clone()),
-        ])),
+        ListItem::new(kv_line("repo", receipts.repo_root.clone())),
+        ListItem::new(kv_line("updated", receipts.updated_at.clone())),
+        ListItem::new(kv_line("file", receipts.receipts_path.clone())),
     ];
 
     let mut notice_lines = Vec::new();

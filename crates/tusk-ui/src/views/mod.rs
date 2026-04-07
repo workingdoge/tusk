@@ -8,12 +8,15 @@ use std::time::Duration;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Paragraph, Tabs, Wrap};
 
 use crate::app::{App, PanelState, ViewMode};
-use crate::theme::pane_block;
+use crate::theme::{
+    active_tab_style, chrome_block, error_style, muted_style, pane_block, strong_style,
+    subtle_style, success_style, tab_style, text_style, transport_style, warning_style,
+};
 
 pub(crate) fn render(frame: &mut Frame, app: &App) {
     let vertical = Layout::default()
@@ -48,12 +51,9 @@ pub(crate) fn panel_title<T>(
 ) -> Line<'static> {
     let mut spans = vec![Span::raw(title.to_owned())];
 
-    if let Some((label, color)) = panel_freshness_label(panel, refresh_interval) {
+    if let Some((label, style)) = panel_freshness_label(panel, refresh_interval) {
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            format!("[{label}]"),
-            Style::default().fg(color),
-        ));
+        spans.push(Span::styled(format!("[{label}]"), style));
     }
 
     Line::from(spans)
@@ -85,9 +85,9 @@ pub(crate) fn render_lines_panel(
 fn panel_freshness_label<T>(
     panel: &PanelState<T>,
     refresh_interval: Duration,
-) -> Option<(String, Color)> {
+) -> Option<(String, Style)> {
     if panel.is_refreshing() && !panel.has_value() {
-        return Some(("loading".to_owned(), Color::Cyan));
+        return Some(("loading".to_owned(), success_style()));
     }
 
     if panel.is_refreshing() {
@@ -95,7 +95,7 @@ fn panel_freshness_label<T>(
             Some(age) => format!("refreshing | {}", age_label(age)),
             None => "refreshing".to_owned(),
         };
-        return Some((label, Color::Cyan));
+        return Some((label, success_style()));
     }
 
     if panel.stale_message().is_some() {
@@ -103,19 +103,19 @@ fn panel_freshness_label<T>(
             Some(age) => format!("stale | {}", age_label(age)),
             None => "stale".to_owned(),
         };
-        return Some((label, Color::Yellow));
+        return Some((label, warning_style()));
     }
 
     if panel.error.is_some() {
-        return Some(("error".to_owned(), Color::Red));
+        return Some(("error".to_owned(), error_style()));
     }
 
     match panel.age() {
         Some(age) if age > stale_threshold(refresh_interval) => {
-            Some((format!("stale | {}", age_label(age)), Color::Yellow))
+            Some((format!("stale | {}", age_label(age)), warning_style()))
         }
-        Some(age) => Some((age_label(age), Color::DarkGray)),
-        None => Some(("waiting".to_owned(), Color::DarkGray)),
+        Some(age) => Some((age_label(age), muted_style())),
+        None => Some(("waiting".to_owned(), subtle_style())),
     }
 }
 
@@ -123,14 +123,14 @@ fn panel_notice<T>(panel: &PanelState<T>) -> Option<Line<'static>> {
     if let Some(error) = panel.stale_message() {
         return Some(Line::from(Span::styled(
             format!("latest refresh failed; showing last good data: {error}"),
-            Style::default().fg(Color::Yellow),
+            warning_style(),
         )));
     }
 
     if panel.is_refreshing() && panel.has_value() {
         return Some(Line::from(Span::styled(
             "refreshing in background",
-            Style::default().fg(Color::Cyan),
+            success_style(),
         )));
     }
 
@@ -153,7 +153,7 @@ fn age_label(age: Duration) -> String {
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL).title("Control Plane");
+    let block = chrome_block("Control Plane");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -167,23 +167,18 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         .split(rows[0]);
 
     let title = Paragraph::new(Line::from(vec![
-        Span::styled("tusk-ui", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("tusk-ui", strong_style()),
         Span::raw("  "),
-        Span::raw(app.repo_name()),
+        Span::styled(app.repo_name(), text_style()),
         Span::raw("  "),
-        Span::styled(app.client.repo_root.display().to_string(), Style::default().fg(Color::DarkGray)),
+        Span::styled(app.client.repo_root.display().to_string(), subtle_style()),
     ]));
     frame.render_widget(title, top[0]);
 
-    let transport_style = if app.socket_is_live() {
-        Style::default().fg(Color::Green)
-    } else {
-        Style::default().fg(Color::Yellow)
-    };
     let transport = Paragraph::new(Line::from(vec![
-        Span::styled(app.transport_label(), transport_style.add_modifier(Modifier::BOLD)),
+        Span::styled(app.transport_label(), transport_style(app.socket_is_live())),
         Span::raw("  "),
-        Span::styled(app.transport_detail(), Style::default().fg(Color::DarkGray)),
+        Span::styled(app.transport_detail(), subtle_style()),
     ]))
     .alignment(ratatui::layout::Alignment::Right);
     frame.render_widget(transport, top[1]);
@@ -198,17 +193,13 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     let tabs = Tabs::new(titles)
         .select(selected)
         .divider(" ")
-        .highlight_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .style(Style::default().fg(Color::DarkGray));
+        .highlight_style(active_tab_style())
+        .style(tab_style());
     frame.render_widget(tabs, rows[1]);
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL).title("Actions");
+    let block = chrome_block("Actions");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -222,18 +213,18 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         .split(rows[0]);
 
     let hints = Paragraph::new(Line::from(vec![
-        Span::styled("view: ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(app.view.label()),
+        Span::styled("view: ", strong_style()),
+        Span::styled(app.view.label(), text_style()),
         Span::raw("  "),
-        Span::styled(app.footer_actions(), Style::default().fg(Color::DarkGray)),
+        Span::styled(app.footer_actions(), muted_style()),
     ]))
     .wrap(Wrap { trim: false });
     frame.render_widget(hints, top[0]);
 
     let meta = Paragraph::new(Line::from(vec![
-        Span::styled(app.view.label(), Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(app.view.label(), strong_style()),
         Span::raw(" "),
-        Span::styled(current_panel_label(app), Style::default().fg(Color::DarkGray)),
+        Span::styled(current_panel_label(app), muted_style()),
         Span::raw("  "),
         Span::styled(refresh_indicator(app), refresh_indicator_style(app)),
     ]))
@@ -267,9 +258,9 @@ fn refresh_indicator(app: &App) -> String {
 
 fn refresh_indicator_style(app: &App) -> Style {
     if app.any_panel_refreshing() {
-        Style::default().fg(Color::Cyan)
+        success_style()
     } else {
-        Style::default().fg(Color::DarkGray)
+        muted_style()
     }
 }
 

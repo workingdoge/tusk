@@ -1,10 +1,10 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::text::Line;
+use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 use crate::app::App;
+use crate::theme::{muted_style, overlay_block};
 
 pub(crate) fn render_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let Some(overlay) = app.overlay() else {
@@ -21,9 +21,9 @@ pub(crate) fn render_overlay(frame: &mut Frame, area: Rect, app: &App) {
         .map(Line::from)
         .collect::<Vec<_>>();
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
+    lines.push(Line::from(ratatui::text::Span::styled(
         overlay.footer_hint(),
-        Style::default().fg(Color::DarkGray),
+        muted_style(),
     )));
 
     frame.render_widget(
@@ -59,18 +59,4 @@ fn centered_rect(area: Rect, desired_height: u16) -> Rect {
         ])
         .flex(Flex::Center)
         .split(vertical[1])[1]
-}
-
-fn overlay_block(title: &str) -> Block<'static> {
-    Block::default()
-        .title(Line::from(vec![
-            Span::styled(
-                title.to_owned(),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled("overlay", Style::default().fg(Color::Yellow)),
-        ]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
 }

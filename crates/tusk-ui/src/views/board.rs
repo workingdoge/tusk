@@ -1,11 +1,10 @@
-use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{Frame, layout::Rect};
 
 use super::{panel_title, prepend_panel_notice};
 use crate::app::{App, ViewMode};
-use crate::theme::{error_lines, kv_line, pane_block, title_line};
+use crate::theme::{error_lines, kv_line, pane_block, selected_item_style, text_style, title_line};
 use crate::viewmodel::{BoardViewModel, IssueItem, LaneItem, SummaryView};
 
 pub(crate) fn render_board(frame: &mut Frame, area: Rect, app: &App) {
@@ -92,11 +91,9 @@ fn issue_line(issue: &IssueItem) -> Line<'static> {
     let prefix = if issue.selected { "> " } else { "  " };
     let text = format!("{}{} {}{}", prefix, issue.id, issue.title, suffix);
     let style = if issue.selected {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
+        selected_item_style()
     } else {
-        Style::default()
+        text_style()
     };
 
     Line::from(Span::styled(text, style))
@@ -170,11 +167,9 @@ fn append_lane_section(lines: &mut Vec<Line<'static>>, title: &str, lanes: &[Lan
 
         let prefix = if lane.selected { "> " } else { "  " };
         let style = if lane.selected {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+            selected_item_style()
         } else {
-            Style::default()
+            text_style()
         };
 
         lines.push(Line::from(Span::styled(

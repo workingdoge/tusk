@@ -4,7 +4,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::App;
-use crate::theme::{error_lines, kv_line, pane_block, title_line};
+use crate::theme::{error_lines, kv_line, pane_block, source_line, title_line, warning_style};
 use crate::viewmodel::{ContextAnomaly, HistoryItem, HomeViewModel, IssueRef};
 
 use super::board::summary_lines;
@@ -185,10 +185,10 @@ pub(crate) fn home_now_lines(snapshot: &HomeViewModel) -> Vec<Line<'static>> {
                 .as_deref()
                 .map(|value| format!("{value}: "))
                 .unwrap_or_default();
-            lines.push(Line::from(format!(
-                "{}[{}] {}",
-                issue, obstruction.kind, obstruction.message
-            )));
+            lines.push(source_line(
+                &obstruction.source,
+                format!("{}[{}] {}", issue, obstruction.kind, obstruction.message),
+            ));
         }
     }
 
@@ -200,7 +200,7 @@ pub(crate) fn home_next_lines(snapshot: &HomeViewModel) -> Vec<Line<'static>> {
 
     lines.push(title_line("primary move"));
     if let Some(action) = &snapshot.primary_action {
-        lines.push(Line::from(action.message.clone()));
+        lines.push(source_line(&action.source, action.message.clone()));
         if let Some(title) = &action.title {
             let subject = action
                 .issue_id
@@ -289,7 +289,7 @@ pub(crate) fn home_history_lines(snapshot: &HomeViewModel) -> Vec<Line<'static>>
     }
 
     for item in snapshot.history.iter().take(8) {
-        lines.push(Line::from(history_label(item)));
+        lines.push(history_label(item));
     }
 
     lines
@@ -312,16 +312,22 @@ pub(crate) fn home_context_lines(snapshot: &HomeViewModel) -> Vec<Line<'static>>
         for anomaly in &snapshot.context.anomalies {
             match anomaly {
                 ContextAnomaly::RootMismatch { checkout, tracker } => {
-                    lines.push(Line::from(format!(
-                        "checkout {} | tracker {}",
-                        checkout, tracker
+                    lines.push(Line::from(ratatui::text::Span::styled(
+                        format!("checkout {} | tracker {}", checkout, tracker),
+                        warning_style(),
                     )));
                 }
                 ContextAnomaly::BackendUnhealthy { message } => {
-                    lines.push(Line::from(message.clone()));
+                    lines.push(Line::from(ratatui::text::Span::styled(
+                        message.clone(),
+                        warning_style(),
+                    )));
                 }
                 ContextAnomaly::StaleWorkspaces { count } => {
-                    lines.push(Line::from(format!("{count} stale workspaces")));
+                    lines.push(Line::from(ratatui::text::Span::styled(
+                        format!("{count} stale workspaces"),
+                        warning_style(),
+                    )));
                 }
             }
         }
@@ -355,8 +361,8 @@ pub(crate) fn home_context_lines(snapshot: &HomeViewModel) -> Vec<Line<'static>>
     lines
 }
 
-fn history_label(item: &HistoryItem) -> String {
-    item.narrative.clone()
+fn history_label(item: &HistoryItem) -> Line<'static> {
+    source_line(&item.source, item.narrative.clone())
 }
 
 fn issue_ref_label(issue: &IssueRef) -> String {
