@@ -7,6 +7,7 @@ These instructions apply to the canonical `tusk` repo checkout.
 - Use `nix develop --no-pure-eval path:.` or `direnv allow` before tracker or workflow work.
 - The dev shell provides a flake-owned `bd` wrapper, `tusk-flake-ref`, `tusk-tracker`, `dolt`, `jj`, `deadnix`, `statix`, `nil`, `nixd`, `nix-tree`, `nix-output-monitor`, `nixfmt`, `codex`, `tuskd`, `glistix`, `gleam`, `erl`, `rebar3`, a `rust-overlay` toolchain for `cargo`/`rustc`/`rustfmt`, and `rust-analyzer`.
 - Run `devenv up` inside the dev shell to ensure repo-scoped tracker services when `.beads/` exists. `tuskd ensure` owns backend reuse and host-local coordination; shells must not stop Dolt on exit.
+- Bootstrap fresh trackers for `tuskd` with `bd init --server`; embedded Dolt mode is not a valid `tuskd` substrate.
 - Use this repo to develop `tusk` as a standalone flake and skill/tooling home; keep consumer-specific `bd-*` wrappers in the consuming repo unless they are intentionally promoted.
 - When changing the canonical repo home, prefer a fresh `jj git clone --colocate` from the exported `tusk-flake` line and re-bootstrap local `.beads/` runtime state there instead of moving the live `.jj/` directory in place.
 - Use `glistix` for Nix-target Gleam work; the shell also keeps upstream `gleam` available for generic tooling and language-server compatibility checks.

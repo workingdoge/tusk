@@ -524,6 +524,13 @@ fn tracker_uses_server_mode(repo_root: &Path) -> bool {
         == Some("server")
 }
 
+fn tracker_mode(repo_root: &Path) -> Option<String> {
+    read_json_file(&metadata_path(repo_root))
+        .get("dolt_mode")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
 fn configure_backend_endpoint(repo_root: &Path, port: u16) -> Result<(), String> {
     let port_string = port.to_string();
     let mut args: Vec<OsString> = vec![
@@ -824,6 +831,17 @@ fn ensure_state_files(repo_root: &Path) -> Result<(), String> {
 }
 
 fn ensure_backend_connection(repo_root: &Path) -> Result<Value, String> {
+    if tracker_mode(repo_root).as_deref() == Some("embedded") {
+        clear_local_backend_runtime(repo_root);
+        return Ok(json!({
+            "ok": false,
+            "repo_root": repo_root.to_string_lossy().into_owned(),
+            "mode": "embedded",
+            "message": "embedded Dolt mode is unsupported for tuskd; initialize with bd init --server or migrate the tracker to server mode",
+            "runtime": backend_runtime_snapshot(repo_root),
+        }));
+    }
+
     let _startup_lock = DirLock::acquire(host_startup_lock_dir())?;
     let _service_lock = DirLock::acquire(host_lock_dir(repo_root))?;
 

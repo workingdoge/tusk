@@ -96,6 +96,7 @@ service_record_is_live() {
 ensure_service_record() {
   local repo_root="$1"
   local record_json="null"
+  local repair_message=""
 
   record_json="$(service_record "${repo_root}")"
   if service_record_is_live "${repo_root}" "${record_json}"; then
@@ -106,6 +107,10 @@ ensure_service_record() {
   "${real_tuskd}" ensure --repo "${repo_root}" >/dev/null
   record_json="$(service_record "${repo_root}")"
   if ! service_record_is_live "${repo_root}" "${record_json}"; then
+    repair_message="$(jq -r '.health.checks.backend_repair.message // empty' <<<"${record_json}" 2>/dev/null || true)"
+    if [ -n "${repair_message}" ]; then
+      echo "bd: ${repair_message}" >&2
+    fi
     echo "bd: tuskd did not produce a healthy service record for ${repo_root}" >&2
     exit 1
   fi
