@@ -337,7 +337,12 @@ Keep this distinction hard:
 
 See also [`design/tusk-transition-carrier.md`](./tusk-transition-carrier.md)
 for the runtime-side carried seam that applies this semantic spine to the
-existing `tuskd` transition surface.
+existing `tuskd` transition surface, and
+[`design/tusk-governed-transition-kernel.md`](./tusk-governed-transition-kernel.md)
+for the updated kernel vocabulary that separates proposal-side agents from the
+authority-bearing runtime, plus
+[`design/tusk-governed-transition-adapters.md`](./tusk-governed-transition-adapters.md)
+for the adapter map beneath that kernel.
 
 ### Semantic core
 
@@ -406,6 +411,9 @@ These should stay explicit for now:
 5. Transition carrier
    The runtime-side carried transition object and admission law now live in
    [`design/tusk-transition-carrier.md`](./tusk-transition-carrier.md); the
+   governed transition kernel vocabulary now lives in
+   [`design/tusk-governed-transition-kernel.md`](./tusk-governed-transition-kernel.md);
+   the
    first Rust-owned specialization for backend ensure and service publication
    now lives in
    [`design/tusk-backend-service-carrier.md`](./tusk-backend-service-carrier.md),

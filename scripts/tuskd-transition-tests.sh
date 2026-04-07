@@ -135,6 +135,21 @@ current_revision() {
   printf '%s\n' "${revision}"
 }
 
+resolve_existing_base_rev() {
+  local repo_root="$1"
+  local base_rev="$2"
+  local candidate=""
+
+  for candidate in "${base_rev}" "${base_rev}@origin"; do
+    if jj --repository "${repo_root}" log -r "${candidate}" --no-graph -T 'commit_id ++ "\n"' >/dev/null 2>&1; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+
+  fail "Revision \`${base_rev}\` doesn't exist in ${repo_root}"
+}
+
 receipts_path() {
   local repo_root="$1"
   printf '%s/.beads/tuskd/receipts.jsonl\n' "${repo_root}"
@@ -468,7 +483,7 @@ run_inner_tests() {
   mkdir -p "${TUSK_HOST_STATE_ROOT}" "${XDG_STATE_HOME}"
   cd "${repo_root}"
 
-  bd init -p tusk >/dev/null
+  bd init -p tusk --server >/dev/null
   tuskd ensure --repo "${repo_root}" >/dev/null
 
   test_lifecycle_guards "${repo_root}" "${base_rev}"
@@ -483,8 +498,10 @@ run_outer_harness() {
   local base_rev="$2"
   local keep_temp="$3"
   local source_git_root=""
+  local source_base_rev=""
   local temp_root=""
   local temp_repo=""
+  local temp_base_rev=""
   local patch_path=""
   local host_state_root=""
   local diff_is_empty=true
@@ -517,20 +534,22 @@ run_outer_harness() {
 
   note "cloning ${source_git_root} into ${temp_repo}"
   jj git clone --colocate "file://${source_git_root}" "${temp_repo}" >/dev/null
-  jj --repository "${temp_repo}" log -r "${base_rev}" --no-graph -T 'commit_id ++ "\n"' >/dev/null
-  jj --repository "${temp_repo}" new "${base_rev}" -m "tuskd-transition-tests: base" >/dev/null
+  source_base_rev="$(resolve_existing_base_rev "${source_repo}" "${base_rev}")"
+  temp_base_rev="$(resolve_existing_base_rev "${temp_repo}" "${base_rev}")"
 
-  jj --repository "${source_repo}" diff --git --from "${base_rev}" --to @ >"${patch_path}"
+  jj --repository "${temp_repo}" new "${temp_base_rev}" -m "tuskd-transition-tests: base" >/dev/null
+
+  jj --repository "${source_repo}" diff --git --from "${source_base_rev}" --to @ >"${patch_path}"
   if [ -s "${patch_path}" ]; then
     diff_is_empty=false
     git -C "${temp_repo}" apply --whitespace=nowarn "${patch_path}"
   fi
 
   if [ "${diff_is_empty}" = true ]; then
-    note "source diff from ${base_rev} is empty; testing base clone"
+    note "source diff from ${source_base_rev} is empty; testing base clone"
   fi
 
-  if ! TUSKD_TRANSITION_TESTS_BASE_REV="${base_rev}" \
+  if ! TUSKD_TRANSITION_TESTS_BASE_REV="${temp_base_rev}" \
       nix develop --no-pure-eval "path:${temp_repo}" \
         -c bash "$0" --inner-repo "${temp_repo}" --host-state-root "${host_state_root}"; then
     cleanup_preserve_temp=true

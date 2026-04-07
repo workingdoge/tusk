@@ -9,6 +9,15 @@ execution order plus ad hoc JSON updates. The goal is to define the smallest
 stable runtime artifact that can carry one control-plane transition from
 witness collection through receipt emission.
 
+For the updated kernel vocabulary, see
+[`design/tusk-governed-transition-kernel.md`](./tusk-governed-transition-kernel.md).
+That note refines this carrier into:
+
+`proposal -> witness record -> envelope -> admitted execution -> application -> receipt -> projection`
+
+Read this transition-carrier note as the envelope-side runtime note beneath
+that broader kernel model.
+
 ## Intent
 
 `tusk` needs one primitive carried runtime object for local workflow

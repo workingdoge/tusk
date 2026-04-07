@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -22,6 +22,7 @@ Usage:
   tuskd-core lane-state <upsert|remove> ...
   tuskd-core receipt append ...
   tuskd-core action-prepare --repo PATH [--socket PATH] --kind KIND --payload JSON
+  tuskd-core action-run --repo PATH [--socket PATH] --kind KIND --payload JSON
   tuskd-core query --repo PATH [--socket PATH] --kind KIND [--request-id ID] [--payload JSON]
   tuskd-core respond --repo PATH [--socket PATH]
   tuskd-core help
@@ -35,8 +36,9 @@ Commands:
   lane-state      Mutate repo-local lane state through Rust-owned file updates.
   receipt         Append one receipt through the Rust-owned audit seam.
   action-prepare  Build one write-side carrier and admission result.
+  action-run      Execute one write-side coordinator action through the Rust kernel.
   query           Render one read-side protocol response envelope.
-  respond         Read one protocol request from stdin and answer read kinds or write-side delegation.
+  respond         Read one protocol request from stdin and answer it through the Rust protocol surface.
   help            Show this help text.
 ";
 
@@ -515,22 +517,28 @@ where
     run_in_repo_capture(repo_root, "tusk-tracker", args)
 }
 
+fn tracker_uses_server_mode(repo_root: &Path) -> bool {
+    read_json_file(&metadata_path(repo_root))
+        .get("dolt_mode")
+        .and_then(Value::as_str)
+        == Some("server")
+}
+
 fn configure_backend_endpoint(repo_root: &Path, port: u16) -> Result<(), String> {
     let port_string = port.to_string();
-    let data_dir = backend_data_dir(repo_root).to_string_lossy().into_owned();
-    let (exit_code, output) = run_tracker_capture_in_repo(
-        repo_root,
-        [
-            "backend",
-            "configure",
-            "--host",
-            backend_host(),
-            "--port",
-            port_string.as_str(),
-            "--data-dir",
-            data_dir.as_str(),
-        ],
-    )?;
+    let mut args: Vec<OsString> = vec![
+        "backend".into(),
+        "configure".into(),
+        "--host".into(),
+        backend_host().into(),
+        "--port".into(),
+        port_string.into(),
+    ];
+    if !tracker_uses_server_mode(repo_root) {
+        args.push("--data-dir".into());
+        args.push(backend_data_dir(repo_root).as_os_str().to_os_string());
+    }
+    let (exit_code, output) = run_tracker_capture_in_repo(repo_root, args)?;
 
     if exit_code == 0 {
         Ok(())
@@ -890,24 +898,34 @@ fn ensure_backend_connection(repo_root: &Path) -> Result<Value, String> {
     }))
 }
 
-fn ensure_projection(repo_root: &Path, socket_path: &Path) -> Result<Value, String> {
+struct EnsuredService {
+    record: Value,
+    health: Value,
+    leases: Value,
+    mode: String,
+    pid: Option<i32>,
+}
+
+fn perform_ensure(repo_root: &Path, socket_path: &Path) -> Result<EnsuredService, String> {
     ensure_state_files(repo_root)?;
     let health = health_snapshot(repo_root, socket_path, true)?;
     let leases = current_leases(repo_root);
     let server_pid = live_server_pid(repo_root);
     let (mode, pid) = if let Some(pid) = server_pid {
-        ("serving", Some(pid))
+        ("serving".to_string(), Some(pid))
     } else {
-        ("idle", None)
+        ("idle".to_string(), None)
     };
 
-    let record = write_service_record(repo_root, socket_path, mode, pid, &health, &leases)?;
-    let _ = append_receipt(
-        repo_root,
-        "tracker.ensure",
-        json!({ "service": record.clone() }),
-    )?;
-    Ok(record)
+    let record =
+        write_service_record(repo_root, socket_path, mode.as_str(), pid, &health, &leases)?;
+    Ok(EnsuredService {
+        record,
+        health,
+        leases,
+        mode,
+        pid,
+    })
 }
 
 fn status_projection(repo_root: &Path, socket_path: &Path) -> Result<Value, String> {
@@ -1233,7 +1251,8 @@ fn query_response(
 }
 
 #[derive(Clone, Copy)]
-enum ActionKind {
+enum TransitionKind {
+    Ensure,
     ClaimIssue,
     CloseIssue,
     LaunchLane,
@@ -1242,9 +1261,10 @@ enum ActionKind {
     ArchiveLane,
 }
 
-impl ActionKind {
+impl TransitionKind {
     fn parse(kind: &str) -> Option<Self> {
         match kind {
+            "ensure" => Some(Self::Ensure),
             "claim_issue" => Some(Self::ClaimIssue),
             "close_issue" => Some(Self::CloseIssue),
             "launch_lane" => Some(Self::LaunchLane),
@@ -1255,15 +1275,8 @@ impl ActionKind {
         }
     }
 
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::ClaimIssue => "claim_issue",
-            Self::CloseIssue => "close_issue",
-            Self::LaunchLane => "launch_lane",
-            Self::HandoffLane => "handoff_lane",
-            Self::FinishLane => "finish_lane",
-            Self::ArchiveLane => "archive_lane",
-        }
+    fn requires_service_lock(self) -> bool {
+        !matches!(self, Self::Ensure)
     }
 }
 
@@ -1302,6 +1315,32 @@ fn issue_receipt_refs(repo_root: &Path, issue_id: &str) -> Value {
             .and_then(Value::as_str)
             == Some(issue_id)
         {
+            refs.push(json!({
+                "timestamp": value.get("timestamp").cloned().unwrap_or(Value::Null),
+                "kind": value.get("kind").cloned().unwrap_or(Value::Null),
+            }));
+        }
+    }
+
+    Value::Array(refs)
+}
+
+fn receipt_refs_by_kind(repo_root: &Path, kind: &str) -> Value {
+    if kind.is_empty() {
+        return json!([]);
+    }
+
+    let path = receipts_path(repo_root);
+    let Ok(contents) = fs::read_to_string(path) else {
+        return json!([]);
+    };
+
+    let mut refs = Vec::new();
+    for line in contents.lines().filter(|line| !line.is_empty()) {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("kind").and_then(Value::as_str) == Some(kind) {
             refs.push(json!({
                 "timestamp": value.get("timestamp").cloned().unwrap_or(Value::Null),
                 "kind": value.get("kind").cloned().unwrap_or(Value::Null),
@@ -1386,72 +1425,211 @@ fn request_id_seed() -> String {
     format!("{}-{}", current_pid(), Utc::now().timestamp())
 }
 
-fn new_transition_carrier(repo_root: &Path, kind: &str, payload: Value) -> Value {
-    json!({
-        "generated_at": now_iso8601(),
-        "repo": {
-            "root": repo_root.to_string_lossy().into_owned(),
-            "service_key": service_key(repo_root),
-            "workspace_root": workspace_root_dir(repo_root).to_string_lossy().into_owned(),
-            "request_id": request_id_seed(),
-        },
-        "tracker": Value::Null,
-        "service": Value::Null,
-        "issue": Value::Null,
-        "lane": Value::Null,
-        "workspace": Value::Null,
-        "witnesses": [],
-        "intent": {
-            "kind": kind,
-            "payload": payload,
-        },
-        "admission": Value::Null,
-        "realization": Value::Null,
-        "receipts": {
-            "prior": [],
-            "emitted": Value::Null,
-        },
-    })
+#[derive(Clone)]
+struct TransitionProposal {
+    kind: String,
+    payload: Value,
 }
 
-fn carrier_set_field(carrier: &mut Value, field: &str, value: Value) {
-    if let Some(object) = carrier.as_object_mut() {
-        object.insert(field.to_string(), value);
-    }
+#[derive(Clone)]
+struct TransitionWitness {
+    kind: String,
+    ok: bool,
+    message: Value,
+    details: Value,
 }
 
-fn carrier_set_receipt_refs(carrier: &mut Value, prior: Value) {
-    if let Some(receipts) = carrier.get_mut("receipts").and_then(Value::as_object_mut) {
-        receipts.insert("prior".to_string(), prior);
-    }
-}
-
-fn carrier_add_witness(carrier: &mut Value, kind: &str, ok: bool, message: &str, details: Value) {
-    if let Some(witnesses) = carrier.get_mut("witnesses").and_then(Value::as_array_mut) {
-        witnesses.push(json!({
-            "kind": kind,
-            "ok": ok,
-            "message": if message.is_empty() { Value::Null } else { Value::String(message.to_string()) },
-            "details": details,
-        }));
-    }
-}
-
-fn carrier_set_admission(
-    carrier: &mut Value,
-    admitted: bool,
-    reason: Option<&str>,
-    consulted: &[&str],
-) {
-    carrier_set_field(
-        carrier,
-        "admission",
+impl TransitionWitness {
+    fn into_json(self) -> Value {
         json!({
-            "admitted": admitted,
-            "reason": reason.map(Value::from).unwrap_or(Value::Null),
-            "consulted": consulted,
-        }),
-    );
+            "kind": self.kind,
+            "ok": self.ok,
+            "message": self.message,
+            "details": self.details,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct TransitionEnvelope {
+    carrier: Value,
+}
+
+#[derive(Clone)]
+struct PreparedTransition {
+    kind: TransitionKind,
+    envelope: TransitionEnvelope,
+}
+
+#[derive(Clone)]
+struct AdmittedTransition {
+    kind: TransitionKind,
+    envelope: TransitionEnvelope,
+}
+
+impl TransitionEnvelope {
+    fn new(repo_root: &Path, kind: &str, payload: Value) -> Self {
+        Self {
+            carrier: json!({
+                "generated_at": now_iso8601(),
+                "repo": {
+                    "root": repo_root.to_string_lossy().into_owned(),
+                    "service_key": service_key(repo_root),
+                    "workspace_root": workspace_root_dir(repo_root).to_string_lossy().into_owned(),
+                    "request_id": request_id_seed(),
+                },
+                "tracker": Value::Null,
+                "service": Value::Null,
+                "issue": Value::Null,
+                "lane": Value::Null,
+                "workspace": Value::Null,
+                "witnesses": [],
+                "intent": {
+                    "kind": kind,
+                    "payload": payload,
+                },
+                "admission": Value::Null,
+                "realization": Value::Null,
+                "receipts": {
+                    "prior": [],
+                    "emitted": Value::Null,
+                },
+            }),
+        }
+    }
+
+    fn proposal(&self) -> TransitionProposal {
+        let intent = self.carrier.get("intent").cloned().unwrap_or(Value::Null);
+        TransitionProposal {
+            kind: intent
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            payload: intent.get("payload").cloned().unwrap_or(Value::Null),
+        }
+    }
+
+    fn payload_string(&self, field: &str) -> String {
+        payload_string(&self.proposal().payload, field)
+    }
+
+    fn set_field(&mut self, field: &str, value: Value) {
+        if let Some(object) = self.carrier.as_object_mut() {
+            object.insert(field.to_string(), value);
+        }
+    }
+
+    fn set_tracker(&mut self, value: Value) {
+        self.set_field("tracker", value);
+    }
+
+    fn set_service(&mut self, value: Value) {
+        self.set_field("service", value);
+    }
+
+    fn set_issue(&mut self, value: Value) {
+        self.set_field("issue", value);
+    }
+
+    fn set_lane(&mut self, value: Value) {
+        self.set_field("lane", value);
+    }
+
+    fn set_workspace(&mut self, value: Value) {
+        self.set_field("workspace", value);
+    }
+
+    fn set_application(&mut self, value: Value) {
+        self.set_field("realization", value);
+    }
+
+    fn set_receipt_refs(&mut self, prior: Value) {
+        if let Some(receipts) = self
+            .carrier
+            .get_mut("receipts")
+            .and_then(Value::as_object_mut)
+        {
+            receipts.insert("prior".to_string(), prior);
+        }
+    }
+
+    fn set_emitted_receipt(&mut self, receipt: Value) {
+        if let Some(receipts) = self
+            .carrier
+            .get_mut("receipts")
+            .and_then(Value::as_object_mut)
+        {
+            receipts.insert("emitted".to_string(), receipt);
+        }
+    }
+
+    fn add_witness(&mut self, kind: &str, ok: bool, message: &str, details: Value) {
+        if let Some(witnesses) = self
+            .carrier
+            .get_mut("witnesses")
+            .and_then(Value::as_array_mut)
+        {
+            let witness = TransitionWitness {
+                kind: kind.to_string(),
+                ok,
+                message: if message.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(message.to_string())
+                },
+                details,
+            };
+            witnesses.push(witness.into_json());
+        }
+    }
+
+    fn set_admission(&mut self, admitted: bool, reason: Option<&str>, consulted: &[&str]) {
+        self.set_field(
+            "admission",
+            json!({
+                "admitted": admitted,
+                "reason": reason.map(Value::from).unwrap_or(Value::Null),
+                "consulted": consulted,
+            }),
+        );
+    }
+
+    fn admitted(&self) -> bool {
+        self.carrier
+            .get("admission")
+            .and_then(|admission| admission.get("admitted"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    }
+
+    fn admission_reason(&self) -> Option<&str> {
+        self.carrier
+            .get("admission")
+            .and_then(|admission| admission.get("reason"))
+            .and_then(Value::as_str)
+    }
+
+    fn get(&self, field: &str) -> Option<&Value> {
+        self.carrier.get(field)
+    }
+
+    fn into_json(self) -> Value {
+        self.carrier
+    }
+}
+
+impl PreparedTransition {
+    fn admit(self) -> Result<AdmittedTransition, TransitionEnvelope> {
+        if self.envelope.admitted() {
+            Ok(AdmittedTransition {
+                kind: self.kind,
+                envelope: self.envelope,
+            })
+        } else {
+            Err(self.envelope)
+        }
+    }
 }
 
 fn transition_service_snapshot(repo_root: &Path, socket_path: &Path) -> Value {
@@ -1492,16 +1670,12 @@ fn build_claim_issue_carrier(
     repo_root: &Path,
     socket_path: &Path,
     payload: &Value,
-) -> Result<Value, String> {
+) -> Result<TransitionEnvelope, String> {
     let issue_id = payload_string(payload, "issue_id");
     let mut carrier =
-        new_transition_carrier(repo_root, "claim_issue", json!({ "issue_id": issue_id }));
-    carrier_set_field(
-        &mut carrier,
-        "service",
-        transition_service_snapshot(repo_root, socket_path),
-    );
-    carrier_set_receipt_refs(&mut carrier, issue_receipt_refs(repo_root, &issue_id));
+        TransitionEnvelope::new(repo_root, "claim_issue", json!({ "issue_id": issue_id }));
+    carrier.set_service(transition_service_snapshot(repo_root, socket_path));
+    carrier.set_receipt_refs(issue_receipt_refs(repo_root, &issue_id));
 
     let issue_show_result = if issue_id.is_empty() {
         Value::Null
@@ -1518,11 +1692,7 @@ fn build_claim_issue_carrier(
         run_tracker_json_command_in_repo(repo_root, "tracker_ready", ["ready"])?
     };
 
-    carrier_set_field(
-        &mut carrier,
-        "tracker",
-        json!({ "issue_show": issue_show_result, "ready": ready_result }),
-    );
+    carrier.set_tracker(json!({ "issue_show": issue_show_result, "ready": ready_result }));
 
     let issue_json =
         issue_snapshot_from_result(carrier.get("tracker").unwrap().get("issue_show").unwrap());
@@ -1533,7 +1703,7 @@ fn build_claim_issue_carrier(
         .unwrap_or("")
         .to_string();
     if issue_exists {
-        carrier_set_field(&mut carrier, "issue", issue_json.clone());
+        carrier.set_issue(issue_json.clone());
     }
 
     let ready_claimable = carrier
@@ -1559,29 +1729,25 @@ fn build_claim_issue_carrier(
         .cloned()
         .unwrap_or(Value::Null);
 
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "issue_id",
         !issue_id.is_empty(),
         "issue_id is required",
         json!({ "issue_id": issue_id }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "issue_exists",
         issue_exists,
         "issue must exist",
         json!({ "issue": issue_json }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "issue_status_open",
         issue_status == "open",
         "issue must be open before claim",
         json!({ "status": issue_status }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "issue_ready",
         ready_claimable,
         "issue must be ready to claim",
@@ -1600,12 +1766,7 @@ fn build_claim_issue_carrier(
         None
     };
 
-    carrier_set_admission(
-        &mut carrier,
-        reason.is_none(),
-        reason,
-        &["structural", "runtime"],
-    );
+    carrier.set_admission(reason.is_none(), reason, &["structural", "runtime"]);
     Ok(carrier)
 }
 
@@ -1613,20 +1774,16 @@ fn build_close_issue_carrier(
     repo_root: &Path,
     socket_path: &Path,
     payload: &Value,
-) -> Result<Value, String> {
+) -> Result<TransitionEnvelope, String> {
     let issue_id = payload_string(payload, "issue_id");
     let reason = payload_string(payload, "reason");
-    let mut carrier = new_transition_carrier(
+    let mut carrier = TransitionEnvelope::new(
         repo_root,
         "close_issue",
         json!({ "issue_id": issue_id, "reason": reason }),
     );
-    carrier_set_field(
-        &mut carrier,
-        "service",
-        transition_service_snapshot(repo_root, socket_path),
-    );
-    carrier_set_receipt_refs(&mut carrier, issue_receipt_refs(repo_root, &issue_id));
+    carrier.set_service(transition_service_snapshot(repo_root, socket_path));
+    carrier.set_receipt_refs(issue_receipt_refs(repo_root, &issue_id));
 
     let issue_show_result = if issue_id.is_empty() {
         Value::Null
@@ -1643,11 +1800,7 @@ fn build_close_issue_carrier(
         current_lane_for_issue(repo_root, &issue_id)
     };
 
-    carrier_set_field(
-        &mut carrier,
-        "tracker",
-        json!({ "issue_show": issue_show_result }),
-    );
+    carrier.set_tracker(json!({ "issue_show": issue_show_result }));
     let issue_json =
         issue_snapshot_from_result(carrier.get("tracker").unwrap().get("issue_show").unwrap());
     let issue_exists = !issue_json.is_null();
@@ -1657,43 +1810,38 @@ fn build_close_issue_carrier(
         .unwrap_or("")
         .to_string();
     if issue_exists {
-        carrier_set_field(&mut carrier, "issue", issue_json.clone());
+        carrier.set_issue(issue_json.clone());
     }
     let no_live_lane = lane_json.is_null();
     if !no_live_lane {
-        carrier_set_field(&mut carrier, "lane", lane_json.clone());
+        carrier.set_lane(lane_json.clone());
     }
 
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "issue_id",
         !issue_id.is_empty(),
         "issue_id is required",
         json!({ "issue_id": issue_id }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "close_reason",
         !reason.is_empty(),
         "close reason is required",
         json!({ "reason": reason }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "issue_exists",
         issue_exists,
         "issue must exist",
         json!({ "issue": issue_json }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "issue_not_closed",
         issue_status != "closed",
         "issue must not already be closed",
         json!({ "status": issue_status }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "no_live_lane",
         no_live_lane,
         "close_issue requires the live lane to be archived first",
@@ -1714,8 +1862,7 @@ fn build_close_issue_carrier(
         None
     };
 
-    carrier_set_admission(
-        &mut carrier,
+    carrier.set_admission(
         admission_reason.is_none(),
         admission_reason,
         &["structural", "authority"],
@@ -1727,21 +1874,17 @@ fn build_launch_lane_carrier(
     repo_root: &Path,
     socket_path: &Path,
     payload: &Value,
-) -> Result<Value, String> {
+) -> Result<TransitionEnvelope, String> {
     let issue_id = payload_string(payload, "issue_id");
     let base_rev = payload_string(payload, "base_rev");
     let slug_arg = payload_string(payload, "slug");
-    let mut carrier = new_transition_carrier(
+    let mut carrier = TransitionEnvelope::new(
         repo_root,
         "launch_lane",
         json!({ "issue_id": issue_id, "base_rev": base_rev, "slug": slug_arg }),
     );
-    carrier_set_field(
-        &mut carrier,
-        "service",
-        transition_service_snapshot(repo_root, socket_path),
-    );
-    carrier_set_receipt_refs(&mut carrier, issue_receipt_refs(repo_root, &issue_id));
+    carrier.set_service(transition_service_snapshot(repo_root, socket_path));
+    carrier.set_receipt_refs(issue_receipt_refs(repo_root, &issue_id));
 
     let issue_show_result = if issue_id.is_empty() {
         Value::Null
@@ -1771,12 +1914,12 @@ fn build_launch_lane_carrier(
         .unwrap_or("")
         .to_string();
     if issue_exists {
-        carrier_set_field(&mut carrier, "issue", issue_json.clone());
+        carrier.set_issue(issue_json.clone());
     }
 
     let no_live_lane = lane_json.is_null();
     if !no_live_lane {
-        carrier_set_field(&mut carrier, "lane", lane_json.clone());
+        carrier.set_lane(lane_json.clone());
     }
 
     let mut slug = slug_arg.clone();
@@ -1802,75 +1945,60 @@ fn build_launch_lane_carrier(
         .unwrap_or("")
         .to_string();
 
-    carrier_set_field(
-        &mut carrier,
-        "tracker",
-        json!({ "issue_show": issue_show_result }),
-    );
-    carrier_set_field(
-        &mut carrier,
-        "workspace",
-        transition_workspace_snapshot(
-            &workspace_name,
-            &workspace_path,
-            if base_rev.is_empty() {
-                None
-            } else {
-                Some(base_rev.as_str())
-            },
-            if base_commit.is_empty() {
-                None
-            } else {
-                Some(base_commit.as_str())
-            },
-            None,
-        ),
-    );
+    carrier.set_tracker(json!({ "issue_show": issue_show_result }));
+    carrier.set_workspace(transition_workspace_snapshot(
+        &workspace_name,
+        &workspace_path,
+        if base_rev.is_empty() {
+            None
+        } else {
+            Some(base_rev.as_str())
+        },
+        if base_commit.is_empty() {
+            None
+        } else {
+            Some(base_commit.as_str())
+        },
+        None,
+    ));
 
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "issue_id",
         !issue_id.is_empty(),
         "issue_id is required",
         json!({ "issue_id": issue_id }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "base_rev",
         !base_rev.is_empty(),
         "base_rev is required",
         json!({ "base_rev": base_rev }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "issue_exists",
         issue_exists,
         "issue must exist",
         json!({ "issue": issue_json }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "issue_in_progress",
         issue_status == "in_progress",
         "launch_lane requires a claimed in_progress issue",
         json!({ "status": issue_status }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "no_live_lane",
         no_live_lane,
         "launch_lane requires no existing live lane",
         json!({ "lane": lane_json }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "base_rev_resolves",
         base_lookup_json.get("ok").and_then(Value::as_bool) == Some(true),
         "base_rev must resolve to a commit",
         json!({ "base_lookup": base_lookup_json }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "workspace_absent",
         workspace_absent,
         "workspace path must be absent before launch",
@@ -1895,8 +2023,7 @@ fn build_launch_lane_carrier(
         None
     };
 
-    carrier_set_admission(
-        &mut carrier,
+    carrier.set_admission(
         admission_reason.is_none(),
         admission_reason,
         &["structural", "runtime"],
@@ -1908,21 +2035,17 @@ fn build_handoff_lane_carrier(
     repo_root: &Path,
     socket_path: &Path,
     payload: &Value,
-) -> Result<Value, String> {
+) -> Result<TransitionEnvelope, String> {
     let issue_id = payload_string(payload, "issue_id");
     let revision = payload_string(payload, "revision");
     let note = payload_string(payload, "note");
-    let mut carrier = new_transition_carrier(
+    let mut carrier = TransitionEnvelope::new(
         repo_root,
         "handoff_lane",
         json!({ "issue_id": issue_id, "revision": revision, "note": note }),
     );
-    carrier_set_field(
-        &mut carrier,
-        "service",
-        transition_service_snapshot(repo_root, socket_path),
-    );
-    carrier_set_receipt_refs(&mut carrier, issue_receipt_refs(repo_root, &issue_id));
+    carrier.set_service(transition_service_snapshot(repo_root, socket_path));
+    carrier.set_receipt_refs(issue_receipt_refs(repo_root, &issue_id));
 
     let lane_json = if issue_id.is_empty() {
         Value::Null
@@ -1936,7 +2059,7 @@ fn build_handoff_lane_carrier(
         .unwrap_or("")
         .to_string();
     if lane_exists {
-        carrier_set_field(&mut carrier, "lane", lane_json.clone());
+        carrier.set_lane(lane_json.clone());
     }
 
     let revision_lookup_json = if revision.is_empty() {
@@ -1953,52 +2076,43 @@ fn build_handoff_lane_carrier(
         .get("commit")
         .and_then(Value::as_str)
         .unwrap_or("");
-    carrier_set_field(
-        &mut carrier,
-        "workspace",
-        transition_workspace_snapshot(
-            "",
-            &workspace_path,
-            None,
-            None,
-            if revision_commit.is_empty() {
-                None
-            } else {
-                Some(revision_commit)
-            },
-        ),
-    );
+    carrier.set_workspace(transition_workspace_snapshot(
+        "",
+        &workspace_path,
+        None,
+        None,
+        if revision_commit.is_empty() {
+            None
+        } else {
+            Some(revision_commit)
+        },
+    ));
 
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "issue_id",
         !issue_id.is_empty(),
         "issue_id is required",
         json!({ "issue_id": issue_id }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "revision",
         !revision.is_empty(),
         "revision is required",
         json!({ "revision": revision }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "lane_exists",
         lane_exists,
         "handoff_lane requires an existing lane record",
         json!({ "lane": lane_json }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "lane_handoffable",
         stored_status != "finished",
         "handoff_lane requires a non-finished lane",
         json!({ "status": stored_status }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "revision_resolves",
         revision_lookup_json.get("ok").and_then(Value::as_bool) == Some(true),
         "revision must resolve to a commit",
@@ -2019,8 +2133,7 @@ fn build_handoff_lane_carrier(
         None
     };
 
-    carrier_set_admission(
-        &mut carrier,
+    carrier.set_admission(
         admission_reason.is_none(),
         admission_reason,
         &["structural", "runtime"],
@@ -2032,21 +2145,17 @@ fn build_finish_lane_carrier(
     repo_root: &Path,
     socket_path: &Path,
     payload: &Value,
-) -> Result<Value, String> {
+) -> Result<TransitionEnvelope, String> {
     let issue_id = payload_string(payload, "issue_id");
     let outcome = payload_string(payload, "outcome");
     let note = payload_string(payload, "note");
-    let mut carrier = new_transition_carrier(
+    let mut carrier = TransitionEnvelope::new(
         repo_root,
         "finish_lane",
         json!({ "issue_id": issue_id, "outcome": outcome, "note": note }),
     );
-    carrier_set_field(
-        &mut carrier,
-        "service",
-        transition_service_snapshot(repo_root, socket_path),
-    );
-    carrier_set_receipt_refs(&mut carrier, issue_receipt_refs(repo_root, &issue_id));
+    carrier.set_service(transition_service_snapshot(repo_root, socket_path));
+    carrier.set_receipt_refs(issue_receipt_refs(repo_root, &issue_id));
 
     let lane_json = if issue_id.is_empty() {
         Value::Null
@@ -2061,32 +2170,28 @@ fn build_finish_lane_carrier(
         .to_string();
     let finishable = stored_status == "launched" || stored_status == "handoff";
     if lane_exists {
-        carrier_set_field(&mut carrier, "lane", lane_json.clone());
+        carrier.set_lane(lane_json.clone());
     }
 
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "issue_id",
         !issue_id.is_empty(),
         "issue_id is required",
         json!({ "issue_id": issue_id }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "outcome",
         !outcome.is_empty(),
         "outcome is required",
         json!({ "outcome": outcome }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "lane_exists",
         lane_exists,
         "finish_lane requires an existing lane record",
         json!({ "lane": lane_json }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "lane_finishable",
         finishable,
         "finish_lane requires a launched or handed-off lane",
@@ -2105,8 +2210,7 @@ fn build_finish_lane_carrier(
         None
     };
 
-    carrier_set_admission(
-        &mut carrier,
+    carrier.set_admission(
         admission_reason.is_none(),
         admission_reason,
         &["structural", "runtime"],
@@ -2118,20 +2222,16 @@ fn build_archive_lane_carrier(
     repo_root: &Path,
     socket_path: &Path,
     payload: &Value,
-) -> Result<Value, String> {
+) -> Result<TransitionEnvelope, String> {
     let issue_id = payload_string(payload, "issue_id");
     let note = payload_string(payload, "note");
-    let mut carrier = new_transition_carrier(
+    let mut carrier = TransitionEnvelope::new(
         repo_root,
         "archive_lane",
         json!({ "issue_id": issue_id, "note": note }),
     );
-    carrier_set_field(
-        &mut carrier,
-        "service",
-        transition_service_snapshot(repo_root, socket_path),
-    );
-    carrier_set_receipt_refs(&mut carrier, issue_receipt_refs(repo_root, &issue_id));
+    carrier.set_service(transition_service_snapshot(repo_root, socket_path));
+    carrier.set_receipt_refs(issue_receipt_refs(repo_root, &issue_id));
 
     let lane_json = if issue_id.is_empty() {
         Value::Null
@@ -2151,38 +2251,36 @@ fn build_archive_lane_carrier(
         .unwrap_or_default();
     let workspace_removed = workspace_path.as_os_str().is_empty() || !workspace_path.is_dir();
     if lane_exists {
-        carrier_set_field(&mut carrier, "lane", lane_json.clone());
+        carrier.set_lane(lane_json.clone());
     }
 
-    carrier_set_field(
-        &mut carrier,
-        "workspace",
-        transition_workspace_snapshot("", &workspace_path, None, None, None),
-    );
+    carrier.set_workspace(transition_workspace_snapshot(
+        "",
+        &workspace_path,
+        None,
+        None,
+        None,
+    ));
 
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "issue_id",
         !issue_id.is_empty(),
         "issue_id is required",
         json!({ "issue_id": issue_id }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "lane_exists",
         lane_exists,
         "archive_lane requires an existing lane record",
         json!({ "lane": lane_json }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "lane_finished",
         stored_status == "finished",
         "archive_lane requires a finished lane",
         json!({ "status": stored_status }),
     );
-    carrier_add_witness(
-        &mut carrier,
+    carrier.add_witness(
         "workspace_removed",
         workspace_removed,
         "archive_lane requires the lane workspace to be removed first",
@@ -2201,8 +2299,7 @@ fn build_archive_lane_carrier(
         None
     };
 
-    carrier_set_admission(
-        &mut carrier,
+    carrier.set_admission(
         admission_reason.is_none(),
         admission_reason,
         &["structural", "runtime", "replay"],
@@ -2210,58 +2307,106 @@ fn build_archive_lane_carrier(
     Ok(carrier)
 }
 
-fn build_action_carrier(
+fn build_ensure_carrier(
     repo_root: &Path,
     socket_path: &Path,
-    action_kind: ActionKind,
     payload: &Value,
-) -> Result<Value, String> {
-    match action_kind {
-        ActionKind::ClaimIssue => build_claim_issue_carrier(repo_root, socket_path, payload),
-        ActionKind::CloseIssue => build_close_issue_carrier(repo_root, socket_path, payload),
-        ActionKind::LaunchLane => build_launch_lane_carrier(repo_root, socket_path, payload),
-        ActionKind::HandoffLane => build_handoff_lane_carrier(repo_root, socket_path, payload),
-        ActionKind::FinishLane => build_finish_lane_carrier(repo_root, socket_path, payload),
-        ActionKind::ArchiveLane => build_archive_lane_carrier(repo_root, socket_path, payload),
+) -> Result<TransitionEnvelope, String> {
+    let mut carrier = TransitionEnvelope::new(repo_root, "ensure", payload.clone());
+    let service_snapshot = transition_service_snapshot(repo_root, socket_path);
+    let preflight = health_snapshot(repo_root, socket_path, false)?;
+
+    carrier.set_service(service_snapshot.clone());
+    carrier.set_tracker(json!({ "preflight": preflight.clone() }));
+    carrier.set_receipt_refs(receipt_refs_by_kind(repo_root, "tracker.ensure"));
+
+    carrier.add_witness(
+        "backend_observed",
+        preflight.get("backend").is_some(),
+        "backend observation should be available before ensure",
+        json!({ "backend": preflight.get("backend").cloned().unwrap_or(Value::Null) }),
+    );
+    carrier.add_witness(
+        "tracker_checks_observed",
+        preflight.get("checks").is_some(),
+        "tracker checks should be available before ensure",
+        json!({ "checks": preflight.get("checks").cloned().unwrap_or(Value::Null) }),
+    );
+    carrier.add_witness(
+        "service_snapshot_observed",
+        true,
+        "",
+        json!({
+            "record": service_snapshot.get("record").cloned().unwrap_or(Value::Null),
+            "backend": service_snapshot.get("backend").cloned().unwrap_or(Value::Null),
+        }),
+    );
+    carrier.set_admission(true, None, &["runtime"]);
+    Ok(carrier)
+}
+
+fn build_transition_carrier(
+    repo_root: &Path,
+    socket_path: &Path,
+    transition_kind: TransitionKind,
+    payload: &Value,
+) -> Result<TransitionEnvelope, String> {
+    match transition_kind {
+        TransitionKind::Ensure => build_ensure_carrier(repo_root, socket_path, payload),
+        TransitionKind::ClaimIssue => build_claim_issue_carrier(repo_root, socket_path, payload),
+        TransitionKind::CloseIssue => build_close_issue_carrier(repo_root, socket_path, payload),
+        TransitionKind::LaunchLane => build_launch_lane_carrier(repo_root, socket_path, payload),
+        TransitionKind::HandoffLane => build_handoff_lane_carrier(repo_root, socket_path, payload),
+        TransitionKind::FinishLane => build_finish_lane_carrier(repo_root, socket_path, payload),
+        TransitionKind::ArchiveLane => build_archive_lane_carrier(repo_root, socket_path, payload),
     }
 }
 
-fn action_prepare_result(
+fn transition_prepare(
+    repo_root: &Path,
+    socket_path: &Path,
+    kind: &str,
+    payload: &Value,
+) -> Result<Option<PreparedTransition>, String> {
+    let Some(transition_kind) = TransitionKind::parse(kind) else {
+        return Ok(None);
+    };
+    let carrier = build_transition_carrier(repo_root, socket_path, transition_kind, payload)?;
+    Ok(Some(PreparedTransition {
+        kind: transition_kind,
+        envelope: carrier,
+    }))
+}
+
+fn transition_prepare_result(
     repo_root: &Path,
     socket_path: &Path,
     kind: &str,
     payload: &Value,
 ) -> Result<Option<Value>, String> {
-    let Some(action_kind) = ActionKind::parse(kind) else {
+    let Some(prepared) = transition_prepare(repo_root, socket_path, kind, payload)? else {
         return Ok(None);
     };
+    let proposal_kind = prepared.envelope.proposal().kind;
 
-    let carrier = build_action_carrier(repo_root, socket_path, action_kind, payload)?;
-    let admitted = carrier
-        .get("admission")
-        .and_then(|admission| admission.get("admitted"))
-        .and_then(Value::as_bool)
-        == Some(true);
-
-    if admitted {
+    if prepared.envelope.admitted() {
         Ok(Some(json!({
             "ok": true,
             "delegate": {
-                "kind": action_kind.as_str(),
-                "carrier": carrier,
+                "kind": proposal_kind,
+                "carrier": prepared.envelope.clone().into_json(),
             },
         })))
     } else {
-        let message = carrier
-            .get("admission")
-            .and_then(|admission| admission.get("reason"))
-            .and_then(Value::as_str)
+        let message = prepared
+            .envelope
+            .admission_reason()
             .unwrap_or("transition rejected");
         Ok(Some(json!({
             "ok": false,
             "error": {
                 "message": message,
-                "carrier": carrier,
+                "carrier": prepared.envelope.into_json(),
             },
         })))
     }
@@ -2273,7 +2418,7 @@ fn action_protocol_response(request_id: &str, kind: &str, prepared: Value) -> Va
             "request_id": request_id,
             "ok": true,
             "kind": kind,
-            "delegate": prepared.get("delegate").cloned().unwrap_or(Value::Null),
+            "payload": prepared.get("payload").cloned().unwrap_or(Value::Null),
         })
     } else {
         let message = prepared
@@ -2290,6 +2435,769 @@ fn action_protocol_response(request_id: &str, kind: &str, prepared: Value) -> Va
                 "details": prepared,
             },
         })
+    }
+}
+
+fn transition_rejected_result(envelope: TransitionEnvelope) -> Value {
+    let message = envelope.admission_reason().unwrap_or("transition rejected");
+    json!({
+        "ok": false,
+        "error": {
+            "message": message,
+            "carrier": envelope.into_json(),
+        },
+    })
+}
+
+fn transition_failure_result(envelope: TransitionEnvelope, message: &str, details: Value) -> Value {
+    json!({
+        "ok": false,
+        "error": {
+            "message": message,
+            "carrier": envelope.into_json(),
+            "details": details,
+        },
+    })
+}
+
+fn transition_success_result(envelope: TransitionEnvelope, projection: Value) -> Value {
+    json!({
+        "ok": true,
+        "carrier": envelope.into_json(),
+        "payload": projection,
+    })
+}
+
+fn refresh_transition_board(repo_root: &Path, socket_path: &Path) -> Result<Value, String> {
+    board_status_projection(repo_root, socket_path)
+}
+
+fn restore_lane_state_snapshot(repo_root: &Path, lane: &Value) -> Result<(), String> {
+    if lane.is_null() {
+        return Ok(());
+    }
+    lane_state_upsert(repo_root, lane.clone()).map(|_| ())
+}
+
+fn rollback_launch_artifacts(
+    repo_root: &Path,
+    issue_id: &str,
+    workspace_name: &str,
+    workspace_path: &Path,
+) -> Value {
+    let mut remove_lane_exit = 0;
+    if !issue_id.is_empty() && lane_state_remove(repo_root, issue_id).is_err() {
+        remove_lane_exit = 1;
+    }
+
+    let repo_root_str = repo_root.to_string_lossy().into_owned();
+    let (forget_exit, forget_output) = if workspace_name.is_empty() {
+        (0, String::new())
+    } else {
+        match run_in_repo_capture(
+            repo_root,
+            "jj",
+            [
+                "--repository",
+                repo_root_str.as_str(),
+                "workspace",
+                "forget",
+                workspace_name,
+            ],
+        ) {
+            Ok((exit_code, output)) => (exit_code, output),
+            Err(err) => (1, err),
+        }
+    };
+
+    let (remove_exit, remove_output) =
+        if workspace_path.as_os_str().is_empty() || !workspace_path.exists() {
+            (0, String::new())
+        } else {
+            match fs::remove_dir_all(workspace_path) {
+                Ok(()) => (0, String::new()),
+                Err(err) => (1, err.to_string()),
+            }
+        };
+
+    json!({
+        "issue_id": issue_id,
+        "workspace_name": workspace_name,
+        "workspace_path": if workspace_path.as_os_str().is_empty() {
+            Value::Null
+        } else {
+            Value::String(workspace_path.to_string_lossy().into_owned())
+        },
+        "remove_lane_exit": remove_lane_exit,
+        "forget_workspace": {
+            "exit_code": forget_exit,
+            "output": if forget_output.is_empty() { Value::Null } else { Value::String(forget_output) },
+        },
+        "remove_workspace": {
+            "exit_code": remove_exit,
+            "output": if remove_output.is_empty() { Value::Null } else { Value::String(remove_output) },
+        },
+    })
+}
+
+fn tracker_issue_result_valid(result: &Value, issue_id: &str, require_closed: bool) -> bool {
+    let Some(issue) = result
+        .get("output")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+    else {
+        return false;
+    };
+
+    let status_ok = if require_closed {
+        issue.get("status").and_then(Value::as_str) == Some("closed")
+    } else {
+        true
+    };
+
+    result.get("ok").and_then(Value::as_bool) == Some(true)
+        && issue.is_object()
+        && issue.get("id").and_then(Value::as_str) == Some(issue_id)
+        && status_ok
+}
+
+fn realize_ensure_transition(
+    repo_root: &Path,
+    socket_path: &Path,
+    mut envelope: TransitionEnvelope,
+) -> Result<Value, String> {
+    let ensured = perform_ensure(repo_root, socket_path)?;
+
+    envelope.set_service(json!({
+        "socket_path": socket_path.to_string_lossy().into_owned(),
+        "record": ensured.record.clone(),
+        "leases": ensured.leases.clone(),
+        "backend": ensured.health.get("backend").cloned().unwrap_or(Value::Null),
+    }));
+    envelope.set_application(json!({
+        "kind": "tracker.ensure",
+        "mode": ensured.mode,
+        "pid": ensured.pid,
+        "health": ensured.health.clone(),
+        "service_record": ensured.record.clone(),
+    }));
+
+    let receipt = append_receipt(
+        repo_root,
+        "tracker.ensure",
+        json!({
+            "service": ensured.record.clone(),
+            "health": ensured.health.clone(),
+        }),
+    )?;
+    envelope.set_emitted_receipt(receipt);
+
+    Ok(transition_success_result(envelope, ensured.record))
+}
+
+fn realize_claim_issue_transition(
+    repo_root: &Path,
+    socket_path: &Path,
+    mut envelope: TransitionEnvelope,
+) -> Result<Value, String> {
+    let issue_id = envelope.payload_string("issue_id");
+    let claim_result = run_tracker_json_command_in_repo(
+        repo_root,
+        "tracker_issue_claim",
+        ["issue", "claim", issue_id.as_str()],
+    )?;
+    if !tracker_issue_result_valid(&claim_result, &issue_id, false) {
+        envelope.set_application(json!({ "kind": "tracker_issue_claim", "tracker": claim_result }));
+        return Ok(transition_failure_result(
+            envelope,
+            "tracker issue claim failed",
+            json!({ "tracker": claim_result }),
+        ));
+    }
+
+    let issue = claim_result
+        .get("output")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .cloned()
+        .unwrap_or(Value::Null);
+    envelope.set_issue(issue.clone());
+    envelope.set_application(json!({ "kind": "tracker_issue_claim", "tracker": claim_result }));
+
+    let board = refresh_transition_board(repo_root, socket_path)?;
+    let board_summary = board.get("summary").cloned().unwrap_or(Value::Null);
+    let receipt = append_receipt(
+        repo_root,
+        "issue.claim",
+        json!({ "issue_id": issue_id, "issue": issue, "board_summary": board_summary }),
+    )?;
+    envelope.set_emitted_receipt(receipt);
+
+    Ok(transition_success_result(
+        envelope,
+        json!({
+            "repo_root": repo_root.to_string_lossy().into_owned(),
+            "issue_id": issue_id,
+            "issue": issue,
+            "board_summary": board_summary,
+        }),
+    ))
+}
+
+fn realize_close_issue_transition(
+    repo_root: &Path,
+    socket_path: &Path,
+    mut envelope: TransitionEnvelope,
+) -> Result<Value, String> {
+    let issue_id = envelope.payload_string("issue_id");
+    let reason = envelope.payload_string("reason");
+    let close_result = run_tracker_json_command_in_repo(
+        repo_root,
+        "tracker_issue_close",
+        [
+            "issue",
+            "close",
+            issue_id.as_str(),
+            "--reason",
+            reason.as_str(),
+        ],
+    )?;
+    if !tracker_issue_result_valid(&close_result, &issue_id, true) {
+        envelope.set_application(json!({ "kind": "tracker_issue_close", "tracker": close_result }));
+        return Ok(transition_failure_result(
+            envelope,
+            "tracker issue close failed",
+            json!({ "tracker": close_result }),
+        ));
+    }
+
+    let issue = close_result
+        .get("output")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .cloned()
+        .unwrap_or(Value::Null);
+    envelope.set_issue(issue.clone());
+    envelope.set_application(json!({ "kind": "tracker_issue_close", "tracker": close_result }));
+
+    let board = refresh_transition_board(repo_root, socket_path)?;
+    let board_summary = board.get("summary").cloned().unwrap_or(Value::Null);
+    let receipt = append_receipt(
+        repo_root,
+        "issue.close",
+        json!({ "issue_id": issue_id, "reason": reason, "issue": issue, "board_summary": board_summary }),
+    )?;
+    envelope.set_emitted_receipt(receipt);
+
+    Ok(transition_success_result(
+        envelope,
+        json!({
+            "repo_root": repo_root.to_string_lossy().into_owned(),
+            "issue_id": issue_id,
+            "reason": reason,
+            "issue": issue,
+            "board_summary": board_summary,
+        }),
+    ))
+}
+
+fn realize_launch_lane_transition(
+    repo_root: &Path,
+    socket_path: &Path,
+    mut envelope: TransitionEnvelope,
+) -> Result<Value, String> {
+    let issue_id = envelope.payload_string("issue_id");
+    let base_rev = envelope.payload_string("base_rev");
+    let issue = envelope.get("issue").cloned().unwrap_or(Value::Null);
+    let issue_title = issue
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let workspace = envelope.get("workspace").cloned().unwrap_or(Value::Null);
+    let workspace_name = workspace
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let workspace_path = workspace
+        .get("path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let workspace_path_str = workspace_path.to_string_lossy().into_owned();
+    let base_commit = workspace
+        .get("base_commit")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let repo_root_str = repo_root.to_string_lossy().into_owned();
+
+    fs::create_dir_all(workspace_root_dir(repo_root))
+        .map_err(|err| format!("failed to create workspace root: {err}"))?;
+
+    let (add_exit, add_output) = run_in_repo_capture(
+        repo_root,
+        "jj",
+        [
+            "--repository",
+            repo_root_str.as_str(),
+            "workspace",
+            "add",
+            workspace_path_str.as_str(),
+            "--name",
+            workspace_name.as_str(),
+            "-r",
+            base_rev.as_str(),
+        ],
+    )?;
+    if add_exit != 0 {
+        envelope.set_application(json!({
+            "kind": "jj_workspace_add",
+            "workspace_name": workspace_name,
+            "workspace_path": workspace_path_str,
+            "base_rev": base_rev,
+            "output": add_output,
+        }));
+        return Ok(transition_failure_result(
+            envelope,
+            "jj workspace add failed",
+            json!({
+                "workspace_name": workspace_name,
+                "workspace_path": workspace_path_str,
+                "base_rev": base_rev,
+                "output": add_output,
+            }),
+        ));
+    }
+
+    if env::var("TUSKD_TEST_FAIL_PHASE").ok().as_deref() == Some("launch_lane:after_workspace_add")
+    {
+        let rollback =
+            rollback_launch_artifacts(repo_root, &issue_id, &workspace_name, &workspace_path);
+        envelope.set_application(json!({
+            "kind": "launch_lane",
+            "workspace_name": workspace_name,
+            "workspace_path": workspace_path_str,
+            "base_rev": base_rev,
+            "add_output": add_output,
+            "rollback": rollback,
+            "injected_failure_phase": "after_workspace_add",
+        }));
+        return Ok(transition_failure_result(
+            envelope,
+            "injected transition failure after workspace add",
+            json!({
+                "workspace_name": workspace_name,
+                "workspace_path": workspace_path_str,
+                "rollback": rollback,
+            }),
+        ));
+    }
+
+    let describe_message = format!("{issue_id}: wip");
+    let (describe_exit, describe_output) = run_in_repo_capture(
+        repo_root,
+        "jj",
+        [
+            "--repository",
+            workspace_path_str.as_str(),
+            "describe",
+            "-m",
+            describe_message.as_str(),
+        ],
+    )?;
+    if describe_exit != 0 {
+        let rollback =
+            rollback_launch_artifacts(repo_root, &issue_id, &workspace_name, &workspace_path);
+        envelope.set_application(json!({
+            "kind": "launch_lane",
+            "workspace_name": workspace_name,
+            "workspace_path": workspace_path_str,
+            "base_rev": base_rev,
+            "add_output": add_output,
+            "describe_output": describe_output,
+            "rollback": rollback,
+        }));
+        return Ok(transition_failure_result(
+            envelope,
+            "jj describe failed after workspace creation",
+            json!({
+                "workspace_name": workspace_name,
+                "workspace_path": workspace_path_str,
+                "output": describe_output,
+                "rollback": rollback,
+            }),
+        ));
+    }
+
+    let lane = json!({
+        "issue_id": issue_id,
+        "issue_title": issue_title,
+        "status": "launched",
+        "workspace_name": workspace_name,
+        "workspace_path": workspace_path_str,
+        "base_rev": base_rev,
+        "base_commit": base_commit,
+        "launched_at": now_iso8601(),
+    });
+    if lane_state_upsert(repo_root, lane.clone()).is_err() {
+        let rollback =
+            rollback_launch_artifacts(repo_root, &issue_id, &workspace_name, &workspace_path);
+        envelope
+            .set_application(json!({ "kind": "launch_lane", "lane": lane, "rollback": rollback }));
+        return Ok(transition_failure_result(
+            envelope,
+            "failed to persist lane state",
+            json!({ "lane": lane, "rollback": rollback }),
+        ));
+    }
+
+    let board = refresh_transition_board(repo_root, socket_path)?;
+    let board_summary = board.get("summary").cloned().unwrap_or(Value::Null);
+    let lanes = board.get("lanes").cloned().unwrap_or_else(|| json!([]));
+    let receipt = match append_receipt(
+        repo_root,
+        "lane.launch",
+        json!({
+            "issue_id": issue_id,
+            "issue_title": issue_title,
+            "workspace_name": workspace_name,
+            "workspace_path": workspace_path_str,
+            "base_rev": base_rev,
+            "base_commit": base_commit,
+            "issue": issue,
+            "board_summary": board_summary,
+        }),
+    ) {
+        Ok(receipt) => receipt,
+        Err(err) => {
+            let rollback =
+                rollback_launch_artifacts(repo_root, &issue_id, &workspace_name, &workspace_path);
+            envelope.set_application(
+                json!({ "kind": "launch_lane", "lane": lane, "rollback": rollback }),
+            );
+            return Ok(transition_failure_result(
+                envelope,
+                "failed to append lane.launch receipt",
+                json!({ "rollback": rollback, "error": err }),
+            ));
+        }
+    };
+
+    envelope.set_lane(lane.clone());
+    envelope.set_application(json!({
+        "kind": "launch_lane",
+        "workspace_name": workspace_name,
+        "workspace_path": workspace_path_str,
+        "base_rev": base_rev,
+        "base_commit": base_commit,
+        "add_output": add_output,
+        "describe_output": describe_output,
+    }));
+    envelope.set_emitted_receipt(receipt);
+
+    Ok(transition_success_result(
+        envelope,
+        json!({
+            "repo_root": repo_root.to_string_lossy().into_owned(),
+            "issue_id": issue_id,
+            "issue_title": issue_title,
+            "issue": issue,
+            "workspace_name": workspace_name,
+            "workspace_path": workspace_path_str,
+            "base_rev": base_rev,
+            "base_commit": base_commit,
+            "lanes": lanes,
+            "board_summary": board_summary,
+        }),
+    ))
+}
+
+fn set_optional_string_field(value: &mut Value, key: &str, field_value: &str) {
+    if let Some(object) = value.as_object_mut() {
+        if field_value.is_empty() {
+            object.remove(key);
+        } else {
+            object.insert(key.to_string(), Value::String(field_value.to_string()));
+        }
+    }
+}
+
+fn realize_handoff_lane_transition(
+    repo_root: &Path,
+    socket_path: &Path,
+    mut envelope: TransitionEnvelope,
+) -> Result<Value, String> {
+    let issue_id = envelope.payload_string("issue_id");
+    let note = envelope.payload_string("note");
+    let previous_lane = envelope.get("lane").cloned().unwrap_or(Value::Null);
+    let resolved_revision = envelope
+        .get("workspace")
+        .and_then(|workspace| workspace.get("revision"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let mut updated_lane = previous_lane.clone();
+    if let Some(object) = updated_lane.as_object_mut() {
+        object.insert("status".to_string(), Value::String("handoff".to_string()));
+        object.insert(
+            "handoff_revision".to_string(),
+            Value::String(resolved_revision.clone()),
+        );
+        object.insert("handed_off_at".to_string(), Value::String(now_iso8601()));
+    }
+    set_optional_string_field(&mut updated_lane, "handoff_note", &note);
+
+    if lane_state_upsert(repo_root, updated_lane.clone()).is_err() {
+        envelope.set_application(json!({ "kind": "handoff_lane", "lane": updated_lane }));
+        return Ok(transition_failure_result(
+            envelope,
+            "failed to persist handed-off lane state",
+            json!({ "lane": updated_lane }),
+        ));
+    }
+
+    let board = refresh_transition_board(repo_root, socket_path)?;
+    let board_summary = board.get("summary").cloned().unwrap_or(Value::Null);
+    let lanes = board.get("lanes").cloned().unwrap_or_else(|| json!([]));
+    let receipt = match append_receipt(
+        repo_root,
+        "lane.handoff",
+        json!({
+            "issue_id": issue_id,
+            "revision": resolved_revision,
+            "note": note,
+            "lane": updated_lane,
+            "board_summary": board_summary,
+        }),
+    ) {
+        Ok(receipt) => receipt,
+        Err(err) => {
+            let _ = restore_lane_state_snapshot(repo_root, &previous_lane);
+            envelope.set_application(
+                json!({ "kind": "handoff_lane", "lane": updated_lane, "restored_lane": previous_lane }),
+            );
+            return Ok(transition_failure_result(
+                envelope,
+                "failed to append lane.handoff receipt",
+                json!({ "restored_lane": previous_lane, "error": err }),
+            ));
+        }
+    };
+
+    envelope.set_lane(updated_lane.clone());
+    envelope.set_application(
+        json!({ "kind": "handoff_lane", "revision": resolved_revision, "note": note }),
+    );
+    envelope.set_emitted_receipt(receipt);
+
+    Ok(transition_success_result(
+        envelope,
+        json!({
+            "repo_root": repo_root.to_string_lossy().into_owned(),
+            "issue_id": issue_id,
+            "revision": resolved_revision,
+            "note": note,
+            "lane": updated_lane,
+            "lanes": lanes,
+            "board_summary": board_summary,
+        }),
+    ))
+}
+
+fn realize_finish_lane_transition(
+    repo_root: &Path,
+    socket_path: &Path,
+    mut envelope: TransitionEnvelope,
+) -> Result<Value, String> {
+    let issue_id = envelope.payload_string("issue_id");
+    let outcome = envelope.payload_string("outcome");
+    let note = envelope.payload_string("note");
+    let previous_lane = envelope.get("lane").cloned().unwrap_or(Value::Null);
+
+    let mut updated_lane = previous_lane.clone();
+    if let Some(object) = updated_lane.as_object_mut() {
+        object.insert("status".to_string(), Value::String("finished".to_string()));
+        object.insert("outcome".to_string(), Value::String(outcome.clone()));
+        object.insert("finished_at".to_string(), Value::String(now_iso8601()));
+    }
+    set_optional_string_field(&mut updated_lane, "finish_note", &note);
+
+    if lane_state_upsert(repo_root, updated_lane.clone()).is_err() {
+        envelope.set_application(json!({ "kind": "finish_lane", "lane": updated_lane }));
+        return Ok(transition_failure_result(
+            envelope,
+            "failed to persist finished lane state",
+            json!({ "lane": updated_lane }),
+        ));
+    }
+
+    let board = refresh_transition_board(repo_root, socket_path)?;
+    let board_summary = board.get("summary").cloned().unwrap_or(Value::Null);
+    let lanes = board.get("lanes").cloned().unwrap_or_else(|| json!([]));
+    let receipt = match append_receipt(
+        repo_root,
+        "lane.finish",
+        json!({
+            "issue_id": issue_id,
+            "outcome": outcome,
+            "note": note,
+            "lane": updated_lane,
+            "board_summary": board_summary,
+        }),
+    ) {
+        Ok(receipt) => receipt,
+        Err(err) => {
+            let _ = restore_lane_state_snapshot(repo_root, &previous_lane);
+            envelope.set_application(
+                json!({ "kind": "finish_lane", "lane": updated_lane, "restored_lane": previous_lane }),
+            );
+            return Ok(transition_failure_result(
+                envelope,
+                "failed to append lane.finish receipt",
+                json!({ "restored_lane": previous_lane, "error": err }),
+            ));
+        }
+    };
+
+    envelope.set_lane(updated_lane.clone());
+    envelope.set_application(json!({ "kind": "finish_lane", "outcome": outcome, "note": note }));
+    envelope.set_emitted_receipt(receipt);
+
+    Ok(transition_success_result(
+        envelope,
+        json!({
+            "repo_root": repo_root.to_string_lossy().into_owned(),
+            "issue_id": issue_id,
+            "outcome": outcome,
+            "note": note,
+            "lane": updated_lane,
+            "lanes": lanes,
+            "board_summary": board_summary,
+        }),
+    ))
+}
+
+fn realize_archive_lane_transition(
+    repo_root: &Path,
+    socket_path: &Path,
+    mut envelope: TransitionEnvelope,
+) -> Result<Value, String> {
+    let issue_id = envelope.payload_string("issue_id");
+    let note = envelope.payload_string("note");
+    let archived_lane = envelope.get("lane").cloned().unwrap_or(Value::Null);
+
+    if lane_state_remove(repo_root, &issue_id).is_err() {
+        envelope.set_application(json!({ "kind": "archive_lane", "issue_id": issue_id }));
+        return Ok(transition_failure_result(
+            envelope,
+            "failed to remove live lane state",
+            json!({ "issue_id": issue_id }),
+        ));
+    }
+
+    let board = refresh_transition_board(repo_root, socket_path)?;
+    let board_summary = board.get("summary").cloned().unwrap_or(Value::Null);
+    let lanes = board.get("lanes").cloned().unwrap_or_else(|| json!([]));
+    let receipt = match append_receipt(
+        repo_root,
+        "lane.archive",
+        json!({
+            "issue_id": issue_id,
+            "note": note,
+            "lane": archived_lane,
+            "board_summary": board_summary,
+        }),
+    ) {
+        Ok(receipt) => receipt,
+        Err(err) => {
+            let _ = restore_lane_state_snapshot(repo_root, &archived_lane);
+            envelope.set_application(
+                json!({ "kind": "archive_lane", "issue_id": issue_id, "restored_lane": archived_lane }),
+            );
+            return Ok(transition_failure_result(
+                envelope,
+                "failed to append lane.archive receipt",
+                json!({ "restored_lane": archived_lane, "error": err }),
+            ));
+        }
+    };
+
+    envelope.set_application(json!({ "kind": "archive_lane", "issue_id": issue_id, "note": note }));
+    envelope.set_emitted_receipt(receipt);
+
+    Ok(transition_success_result(
+        envelope,
+        json!({
+            "repo_root": repo_root.to_string_lossy().into_owned(),
+            "issue_id": issue_id,
+            "note": note,
+            "archived_lane": archived_lane,
+            "lanes": lanes,
+            "board_summary": board_summary,
+        }),
+    ))
+}
+
+fn realize_transition(
+    repo_root: &Path,
+    socket_path: &Path,
+    admitted: AdmittedTransition,
+) -> Result<Value, String> {
+    match admitted.kind {
+        TransitionKind::Ensure => {
+            realize_ensure_transition(repo_root, socket_path, admitted.envelope)
+        }
+        TransitionKind::ClaimIssue => {
+            realize_claim_issue_transition(repo_root, socket_path, admitted.envelope)
+        }
+        TransitionKind::CloseIssue => {
+            realize_close_issue_transition(repo_root, socket_path, admitted.envelope)
+        }
+        TransitionKind::LaunchLane => {
+            realize_launch_lane_transition(repo_root, socket_path, admitted.envelope)
+        }
+        TransitionKind::HandoffLane => {
+            realize_handoff_lane_transition(repo_root, socket_path, admitted.envelope)
+        }
+        TransitionKind::FinishLane => {
+            realize_finish_lane_transition(repo_root, socket_path, admitted.envelope)
+        }
+        TransitionKind::ArchiveLane => {
+            realize_archive_lane_transition(repo_root, socket_path, admitted.envelope)
+        }
+    }
+}
+
+fn transition_run_result(
+    repo_root: &Path,
+    socket_path: &Path,
+    kind: &str,
+    payload: &Value,
+) -> Result<Option<Value>, String> {
+    let Some(transition_kind) = TransitionKind::parse(kind) else {
+        return Ok(None);
+    };
+
+    let run_under_current_state = || -> Result<Option<Value>, String> {
+        let Some(prepared) = transition_prepare(repo_root, socket_path, kind, payload)? else {
+            return Ok(None);
+        };
+        let admitted = match prepared.admit() {
+            Ok(admitted) => admitted,
+            Err(rejected) => return Ok(Some(transition_rejected_result(rejected))),
+        };
+
+        Ok(Some(realize_transition(repo_root, socket_path, admitted)?))
+    };
+
+    if transition_kind.requires_service_lock() {
+        let _service_lock = DirLock::acquire(host_lock_dir(repo_root))?;
+        run_under_current_state()
+    } else {
+        run_under_current_state()
     }
 }
 
@@ -2343,8 +3251,18 @@ fn run_ensure(args: &[String]) -> ExitCode {
         Err(message) => return fail(&message),
     };
 
-    match ensure_projection(&parsed.repo_root, &parsed.socket_path) {
-        Ok(record) => {
+    match transition_run_result(&parsed.repo_root, &parsed.socket_path, "ensure", &json!({})) {
+        Ok(Some(result)) => {
+            if result.get("ok").and_then(Value::as_bool) != Some(true) {
+                let message = result
+                    .get("error")
+                    .and_then(|value| value.get("message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("ensure transition failed");
+                return fail(message);
+            }
+
+            let record = result.get("payload").cloned().unwrap_or(Value::Null);
             match serde_json::to_string_pretty(&record) {
                 Ok(text) => println!("{text}"),
                 Err(err) => return fail(&format!("failed to encode ensure projection: {err}")),
@@ -2361,6 +3279,7 @@ fn run_ensure(args: &[String]) -> ExitCode {
                 ExitCode::from(1)
             }
         }
+        Ok(None) => fail("ensure transition was not available"),
         Err(message) => fail(&message),
     }
 }
@@ -2781,6 +3700,12 @@ fn print_action_prepare_help() {
     );
 }
 
+fn print_action_run_help() {
+    println!(
+        "Usage:\n  tuskd-core action-run --repo PATH [--socket PATH] --kind KIND --payload JSON"
+    );
+}
+
 fn run_action_prepare(args: &[String]) -> ExitCode {
     let parsed = match parse_action_prepare_args(args) {
         Ok(parsed) => parsed,
@@ -2791,7 +3716,7 @@ fn run_action_prepare(args: &[String]) -> ExitCode {
         Err(message) => return fail(&message),
     };
 
-    match action_prepare_result(
+    match transition_prepare_result(
         &parsed.repo_root,
         &parsed.socket_path,
         &parsed.kind,
@@ -2803,6 +3728,34 @@ fn run_action_prepare(args: &[String]) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(err) => fail(&format!("failed to encode action-prepare result: {err}")),
+        },
+        Ok(None) => fail(&format!("unsupported action kind: {}", parsed.kind)),
+        Err(message) => fail(&message),
+    }
+}
+
+fn run_action_run(args: &[String]) -> ExitCode {
+    let parsed = match parse_action_prepare_args(args) {
+        Ok(parsed) => parsed,
+        Err(message) if message == "USAGE" => {
+            print_action_run_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => return fail(&message),
+    };
+
+    match transition_run_result(
+        &parsed.repo_root,
+        &parsed.socket_path,
+        &parsed.kind,
+        &parsed.payload,
+    ) {
+        Ok(Some(result)) => match serde_json::to_string(&result) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => fail(&format!("failed to encode action-run result: {err}")),
         },
         Ok(None) => fail(&format!("unsupported action kind: {}", parsed.kind)),
         Err(message) => fail(&message),
@@ -2880,7 +3833,7 @@ fn run_respond(args: &[String]) -> ExitCode {
             Err(err) => fail(&format!("failed to encode respond payload: {err}")),
         },
         Ok(None) => {
-            match action_prepare_result(&parsed.repo_root, &parsed.socket_path, kind, &payload) {
+            match transition_run_result(&parsed.repo_root, &parsed.socket_path, kind, &payload) {
                 Ok(Some(result)) => {
                     match serde_json::to_string(&action_protocol_response(request_id, kind, result))
                     {
@@ -2931,6 +3884,7 @@ fn main() -> ExitCode {
         Some("lane-state") => run_lane_state(&args[1..]),
         Some("receipt") => run_receipt(&args[1..]),
         Some("action-prepare") => run_action_prepare(&args[1..]),
+        Some("action-run") => run_action_run(&args[1..]),
         Some("query") => run_query(&args[1..]),
         Some("respond") => run_respond(&args[1..]),
         Some(command) => fail(&format!("unknown command: {command}")),

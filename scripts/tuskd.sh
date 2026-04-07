@@ -3098,35 +3098,21 @@ run_transition_action() {
   local socket_path="$2"
   local kind="$3"
   local payload_json="$4"
-  local lock_dir=""
-  local prepared_result=""
-  local carrier_json=""
 
   if ! is_action_request_kind "${kind}"; then
     jq -cn --arg kind "${kind}" '{ok:false, error:{message:"unknown transition kind", kind:$kind}}'
     return 0
   fi
 
-  ensure_state_files "${repo_root}"
-  lock_dir="$(acquire_service_lock "${repo_root}")"
-
-  if ! prepared_result="$(prepare_transition_action "${repo_root}" "${socket_path}" "${kind}" "${payload_json}")"; then
-    release_service_lock "${lock_dir}"
-    jq -cn --arg kind "${kind}" '{ok:false, error:{message:"failed to prepare transition action", kind:$kind}}'
+  if run_tuskd_core action-run \
+    --repo "${repo_root}" \
+    --socket "${socket_path}" \
+    --kind "${kind}" \
+    --payload "${payload_json}"; then
     return 0
   fi
 
-  if ! jq -e '.ok == true' >/dev/null <<<"${prepared_result}"; then
-    release_service_lock "${lock_dir}"
-    printf '%s\n' "${prepared_result}"
-    return 0
-  fi
-
-  carrier_json="$(jq -c '.delegate.carrier' <<<"${prepared_result}")"
-  prepared_result="$(realize_transition_delegate "${repo_root}" "${socket_path}" "${kind}" "${carrier_json}")"
-
-  release_service_lock "${lock_dir}"
-  printf '%s\n' "${prepared_result}"
+  jq -cn --arg kind "${kind}" '{ok:false, error:{message:"failed to run transition action", kind:$kind}}'
 }
 
 cmd_transition_action() {
@@ -3175,14 +3161,22 @@ render_transition_request_response() {
 respond_once() {
   local repo_root="$1"
   local socket_path="$2"
-  local request_line=""
-  local core_response=""
-  local lock_dir=""
+  local request_body=""
   local request_id=""
   local kind=""
-  local action_result=""
+  local payload=""
+  local core_exit=0
 
-  if ! IFS= read -r request_line; then
+  if ! request_body="$(cat)"; then
+    jq -cn \
+      --arg request_id "" \
+      --arg kind "" \
+      --arg message "failed to read request body" \
+      '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message}}'
+    return 0
+  fi
+
+  if [ -z "$(printf '%s' "${request_body}" | tr -d '[:space:]')" ]; then
     jq -cn \
       --arg request_id "" \
       --arg kind "" \
@@ -3191,7 +3185,7 @@ respond_once() {
     return 0
   fi
 
-  if ! printf '%s' "${request_line}" | jq -e . >/dev/null 2>&1; then
+  if ! printf '%s' "${request_body}" | jq -e . >/dev/null 2>&1; then
     jq -cn \
       --arg request_id "" \
       --arg kind "" \
@@ -3200,42 +3194,33 @@ respond_once() {
     return 0
   fi
 
-  if payload="$(printf '%s\n' "${request_line}" | run_tuskd_core respond --repo "${repo_root}" --socket "${socket_path}" 2>/dev/null)"; then
+  if payload="$(printf '%s' "${request_body}" | run_tuskd_core respond --repo "${repo_root}" --socket "${socket_path}" 2>/dev/null)"; then
     printf '%s\n' "${payload}"
     return 0
   fi
 
-  request_id="$(printf '%s' "${request_line}" | jq -r '.request_id // ""')"
-  kind="$(printf '%s' "${request_line}" | jq -r '.kind // ""')"
+  request_id="$(printf '%s' "${request_body}" | jq -r '.request_id // ""')"
+  kind="$(printf '%s' "${request_body}" | jq -r '.kind // ""')"
 
-  if is_action_request_kind "${kind}"; then
-    ensure_state_files "${repo_root}"
-    lock_dir="$(acquire_service_lock "${repo_root}")"
-  fi
-
-  if core_response="$(printf '%s\n' "${request_line}" | run_tuskd_core respond --repo "${repo_root}" --socket "${socket_path}" 2>/dev/null)"; then
-    if [ -n "${lock_dir}" ]; then
-      if jq -e '.delegate.kind? != null' >/dev/null <<<"${core_response}"; then
-        action_result="$(realize_transition_delegate "${repo_root}" "${socket_path}" "$(jq -r '.delegate.kind' <<<"${core_response}")" "$(jq -c '.delegate.carrier' <<<"${core_response}")")"
-        release_service_lock "${lock_dir}"
-        render_transition_request_response "${request_id}" "${kind}" "${action_result}"
-        return 0
-      fi
-      release_service_lock "${lock_dir}"
-    fi
-
-    printf '%s\n' "${core_response}"
+  payload="$(printf '%s' "${request_body}" | run_tuskd_core respond --repo "${repo_root}" --socket "${socket_path}" 2>/dev/null)"
+  core_exit=$?
+  if [ "${core_exit}" -eq 0 ]; then
+    printf '%s\n' "${payload}"
     return 0
   fi
 
-  if [ -n "${lock_dir}" ]; then
-    release_service_lock "${lock_dir}"
+  if [ "${core_exit}" -eq 64 ]; then
+    jq -cn \
+      --arg request_id "${request_id}" \
+      --arg kind "${kind}" \
+      --arg message "unknown request kind" \
+      '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message}}'
+    return 0
   fi
-
   jq -cn \
     --arg request_id "${request_id}" \
     --arg kind "${kind}" \
-    --arg message "unknown request kind" \
+    --arg message "request handling failed" \
     '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message}}'
 }
 
