@@ -152,6 +152,74 @@ impl App {
         self.overlay.as_ref()
     }
 
+    pub(crate) fn repo_name(&self) -> String {
+        self.client
+            .repo_root
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("repo")
+            .to_owned()
+    }
+
+    pub(crate) fn socket_is_live(&self) -> bool {
+        self.client.socket_path.exists()
+    }
+
+    pub(crate) fn transport_label(&self) -> &'static str {
+        if self.socket_is_live() {
+            "socket"
+        } else {
+            "fallback"
+        }
+    }
+
+    pub(crate) fn transport_detail(&self) -> String {
+        if self.socket_is_live() {
+            self.client.socket_path.display().to_string()
+        } else {
+            "tuskd respond".to_owned()
+        }
+    }
+
+    pub(crate) fn footer_actions(&self) -> &'static str {
+        if let Some(overlay) = self.overlay() {
+            return overlay.footer_hint();
+        }
+
+        match self.view {
+            ViewMode::Home => "o/t/b/e view  Tab cycle  ? help  b board  r refresh  p ping  q quit",
+            ViewMode::Board => {
+                "o/t/b/e view  Tab cycle  ? help  j/k move  c claim  l launch  f finish  r refresh  p ping  q quit"
+            }
+            _ => "o/t/b/e view  Tab cycle  ? help  r refresh  p ping  q quit",
+        }
+    }
+
+    pub(crate) fn any_panel_refreshing(&self) -> bool {
+        self.home.is_refreshing()
+            || self.tracker.is_refreshing()
+            || self.board.is_refreshing()
+            || self.receipts.is_refreshing()
+    }
+
+    pub(crate) fn current_panel_age(&self) -> Option<Duration> {
+        match self.view {
+            ViewMode::Home => self.home.age(),
+            ViewMode::Tracker => self.tracker.age(),
+            ViewMode::Board => self.board.age(),
+            ViewMode::Receipts => self.receipts.age(),
+        }
+    }
+
+    pub(crate) fn current_panel_is_refreshing(&self) -> bool {
+        match self.view {
+            ViewMode::Home => self.home.is_refreshing(),
+            ViewMode::Tracker => self.tracker.is_refreshing(),
+            ViewMode::Board => self.board.is_refreshing(),
+            ViewMode::Receipts => self.receipts.is_refreshing(),
+        }
+    }
+
     pub(crate) fn handle_key(&mut self, key: KeyEvent) {
         match self.action_for_key(key) {
             Ok(Some(action)) => self.dispatch_action(action),

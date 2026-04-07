@@ -10,7 +10,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Tabs, Wrap};
 
 use crate::app::{App, PanelState, ViewMode};
 use crate::theme::pane_block;
@@ -19,29 +19,13 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Min(8),
-            Constraint::Length(3),
+            Constraint::Length(4),
         ])
         .split(frame.area());
 
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled("tusk-ui  ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(app.client.repo_root.display().to_string()),
-        Span::raw("  "),
-        Span::styled(
-            app.client.socket_path.display().to_string(),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::raw("  "),
-        Span::styled(app.view.label(), Style::default().fg(Color::Yellow)),
-    ]))
-    .block(
-        ratatui::widgets::Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .title("Control Plane"),
-    );
-    frame.render_widget(header, vertical[0]);
+    render_header(frame, vertical[0], app);
 
     match app.view {
         ViewMode::Home => home::render_home(frame, vertical[1], app),
@@ -54,35 +38,7 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
         overlay::render_overlay(frame, vertical[1], app);
     }
 
-    let footer = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("view: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(app.view.label()),
-            Span::raw("  "),
-            Span::styled(
-                app.overlay()
-                    .map(|overlay| overlay.footer_hint())
-                    .unwrap_or_else(|| match app.view {
-                        ViewMode::Home => {
-                            "o/t/b/e view  Tab cycle  ? help  b board  r refresh  p ping  q quit"
-                        }
-                        ViewMode::Board => {
-                            "o/t/b/e view  Tab cycle  ? help  j/k move  c claim  l launch  f finish  r refresh  p ping  q quit"
-                        }
-                        _ => "o/t/b/e view  Tab cycle  ? help  r refresh  p ping  q quit",
-                    }),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
-        Line::from(app.status_line.clone()),
-    ])
-    .block(
-        ratatui::widgets::Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .title("Actions"),
-    )
-    .wrap(Wrap { trim: false });
-    frame.render_widget(footer, vertical[2]);
+    render_footer(frame, vertical[2], app);
 }
 
 pub(crate) fn panel_title<T>(
@@ -194,4 +150,134 @@ fn age_label(age: Duration) -> String {
     } else {
         format!("{}s", seconds)
     }
+}
+
+fn render_header(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default().borders(Borders::ALL).title("Control Plane");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .split(inner);
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(30), Constraint::Length(28)])
+        .split(rows[0]);
+
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled("tusk-ui", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::raw(app.repo_name()),
+        Span::raw("  "),
+        Span::styled(app.client.repo_root.display().to_string(), Style::default().fg(Color::DarkGray)),
+    ]));
+    frame.render_widget(title, top[0]);
+
+    let transport_style = if app.socket_is_live() {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+    let transport = Paragraph::new(Line::from(vec![
+        Span::styled(app.transport_label(), transport_style.add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled(app.transport_detail(), Style::default().fg(Color::DarkGray)),
+    ]))
+    .alignment(ratatui::layout::Alignment::Right);
+    frame.render_widget(transport, top[1]);
+
+    let titles = ["Home", "Tracker", "Board", "Receipts"];
+    let selected = match app.view {
+        ViewMode::Home => 0,
+        ViewMode::Tracker => 1,
+        ViewMode::Board => 2,
+        ViewMode::Receipts => 3,
+    };
+    let tabs = Tabs::new(titles)
+        .select(selected)
+        .divider(" ")
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(tabs, rows[1]);
+}
+
+fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default().borders(Borders::ALL).title("Actions");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .split(inner);
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(40), Constraint::Length(28)])
+        .split(rows[0]);
+
+    let hints = Paragraph::new(Line::from(vec![
+        Span::styled("view: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(app.view.label()),
+        Span::raw("  "),
+        Span::styled(app.footer_actions(), Style::default().fg(Color::DarkGray)),
+    ]))
+    .wrap(Wrap { trim: false });
+    frame.render_widget(hints, top[0]);
+
+    let meta = Paragraph::new(Line::from(vec![
+        Span::styled(app.view.label(), Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" "),
+        Span::styled(current_panel_label(app), Style::default().fg(Color::DarkGray)),
+        Span::raw("  "),
+        Span::styled(refresh_indicator(app), refresh_indicator_style(app)),
+    ]))
+    .alignment(ratatui::layout::Alignment::Right);
+    frame.render_widget(meta, top[1]);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(app.status_line.clone())).wrap(Wrap { trim: false }),
+        rows[1],
+    );
+}
+
+fn current_panel_label(app: &App) -> String {
+    if app.current_panel_is_refreshing() && app.current_panel_age().is_none() {
+        return "loading".to_owned();
+    }
+
+    match app.current_panel_age() {
+        Some(age) => format!("updated {}", age_label(age)),
+        None => "waiting".to_owned(),
+    }
+}
+
+fn refresh_indicator(app: &App) -> String {
+    if app.any_panel_refreshing() {
+        spinner_frame()
+    } else {
+        "idle".to_owned()
+    }
+}
+
+fn refresh_indicator_style(app: &App) -> Style {
+    if app.any_panel_refreshing() {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
+}
+
+fn spinner_frame() -> String {
+    const FRAMES: &[char] = &['-', '\\', '|', '/'];
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    FRAMES[(millis / 100 % FRAMES.len() as u128) as usize].to_string()
 }
