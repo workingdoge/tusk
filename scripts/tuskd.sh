@@ -3279,21 +3279,15 @@ respond_once() {
 cmd_ensure() {
   local repo_root="$1"
   local socket_path="$2"
-  local projection
 
-  projection="$(ensure_projection "${repo_root}" "${socket_path}")"
-  printf '%s\n' "${projection}"
-
-  if ! jq -e '.health.status == "healthy"' >/dev/null <<<"${projection}"; then
-    return 1
-  fi
+  exec_tuskd_core ensure --repo "${repo_root}" --socket "${socket_path}"
 }
 
 cmd_status() {
   local repo_root="$1"
   local socket_path="$2"
 
-  tracker_status_projection "${repo_root}" "${socket_path}"
+  exec_tuskd_core status --repo "${repo_root}" --socket "${socket_path}"
 }
 
 cmd_board_status() {
