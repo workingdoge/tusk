@@ -12,6 +12,7 @@ Usage:
   tuskd core-seam [--json]
   tuskd ensure [--repo PATH] [--socket PATH]
   tuskd status [--repo PATH] [--socket PATH]
+  tuskd operator-snapshot [--repo PATH] [--socket PATH]
   tuskd board-status [--repo PATH]
   tuskd receipts-status [--repo PATH]
   tuskd claim-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID
@@ -27,6 +28,7 @@ Commands:
   core-seam     Print the first Rust-owned backend/service seam contract.
   ensure        Ensure repo-local state exists and tracker health is recorded.
   status        Print the current tracker service projection.
+  operator-snapshot Print the compact operator-facing home projection.
   board-status  Print the current board projection.
   receipts-status Print the current receipt projection.
   claim-issue   Claim one issue through the coordinator action surface.
@@ -40,6 +42,7 @@ Commands:
 
 Protocol request kinds:
   tracker_status
+  operator_snapshot
   board_status
   receipts_status
   claim_issue
@@ -3206,6 +3209,13 @@ cmd_status() {
   exec_tuskd_core status --repo "${repo_root}" --socket "${socket_path}"
 }
 
+cmd_operator_snapshot() {
+  local repo_root="$1"
+  local socket_path="$2"
+
+  exec_tuskd_core operator-snapshot --repo "${repo_root}" --socket "${socket_path}"
+}
+
 cmd_board_status() {
   local repo_root="$1"
   local socket_path="$2"
@@ -3320,7 +3330,7 @@ cmd_query() {
   fi
 
   case "${kind}" in
-    tracker_status|board_status|receipts_status|ping)
+    tracker_status|operator_snapshot|board_status|receipts_status|ping)
       exec_tuskd_core query --repo "${repo_root}" --socket "${socket_path}" --kind "${kind}" --request-id "${request_id}" --payload "${payload_json}"
       ;;
   esac
@@ -3438,6 +3448,9 @@ case "${command}" in
     ;;
   status)
     cmd_status "${repo_root}" "${socket_path}"
+    ;;
+  operator-snapshot)
+    cmd_operator_snapshot "${repo_root}" "${socket_path}"
     ;;
   board-status)
     cmd_board_status "${repo_root}" "${socket_path}"

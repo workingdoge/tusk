@@ -1,5 +1,5 @@
 use chrono::Utc;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::env;
@@ -17,6 +17,7 @@ Usage:
   tuskd-core seam [--json]
   tuskd-core ensure --repo PATH [--socket PATH]
   tuskd-core status --repo PATH [--socket PATH]
+  tuskd-core operator-snapshot --repo PATH [--socket PATH]
   tuskd-core board-status --repo PATH
   tuskd-core receipts-status --repo PATH
   tuskd-core lane-state <upsert|remove> ...
@@ -31,6 +32,7 @@ Commands:
   seam            Print the first Rust-owned backend/service seam contract.
   ensure          Run the Rust-owned backend ensure and service publication path.
   status          Publish the current backend/service projection without repair.
+  operator-snapshot Publish the compact operator-facing home projection.
   board-status    Publish the current board projection.
   receipts-status Publish the current receipt projection.
   lane-state      Mutate repo-local lane state through Rust-owned file updates.
@@ -1102,6 +1104,379 @@ fn lane_state_projection(repo_root: &Path) -> Result<Value, String> {
     Ok(Value::Array(projected))
 }
 
+fn compact_issue_projection(issue: &Value) -> Value {
+    let mut object = Map::new();
+    for key in [
+        "id",
+        "title",
+        "status",
+        "priority",
+        "issue_type",
+        "assignee",
+        "owner",
+        "parent",
+        "created_at",
+        "updated_at",
+        "closed_at",
+    ] {
+        if let Some(value) = issue.get(key).filter(|value| !value.is_null()) {
+            object.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(object)
+}
+
+fn compact_lane_projection(lane: &Value) -> Value {
+    let mut object = Map::new();
+    for key in [
+        "issue_id",
+        "issue_title",
+        "status",
+        "observed_status",
+        "workspace_path",
+        "workspace_name",
+        "workspace_exists",
+        "base_rev",
+        "revision",
+        "outcome",
+        "note",
+        "created_at",
+        "updated_at",
+        "handoff_at",
+        "finished_at",
+    ] {
+        if let Some(value) = lane.get(key).filter(|value| !value.is_null()) {
+            object.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(object)
+}
+
+fn compact_workspace_projection(workspace: &Value) -> Value {
+    let Some(line) = workspace.as_str() else {
+        return workspace.clone();
+    };
+
+    let Some((name, rest)) = line.split_once(':') else {
+        return json!({
+            "name": line,
+            "raw": line,
+        });
+    };
+
+    let trimmed = rest.trim();
+    let mut parts = trimmed.splitn(3, ' ');
+    let change_id = parts.next().unwrap_or("");
+    let commit_id = parts.next().unwrap_or("");
+    let remainder = parts.next().unwrap_or("").trim();
+    let empty = remainder.starts_with("(empty)");
+    let description = if empty {
+        remainder.trim_start_matches("(empty)").trim()
+    } else {
+        remainder
+    };
+
+    json!({
+        "name": name.trim(),
+        "change_id": if change_id.is_empty() { Value::Null } else { Value::String(change_id.to_string()) },
+        "commit_id": if commit_id.is_empty() { Value::Null } else { Value::String(commit_id.to_string()) },
+        "empty": empty,
+        "description": if description.is_empty() { Value::Null } else { Value::String(description.to_string()) },
+        "raw": line,
+    })
+}
+
+fn compact_receipt_projection(receipt: &Value) -> Value {
+    let payload = receipt.get("payload").cloned().unwrap_or_else(|| json!({}));
+    let issue_id = payload
+        .get("issue_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .get("issue")
+                .and_then(|value| value.get("id"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            payload
+                .get("lane")
+                .and_then(|value| value.get("issue_id"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            payload
+                .get("transition")
+                .and_then(|value| value.get("issue_id"))
+                .and_then(Value::as_str)
+        });
+
+    let mut details = Map::new();
+    for (key, value) in [
+        ("revision", payload.get("revision")),
+        ("reason", payload.get("reason")),
+        ("note", payload.get("note")),
+        ("outcome", payload.get("outcome")),
+        ("mode", payload.get("mode")),
+        ("status", payload.get("status")),
+    ] {
+        if let Some(value) = value.filter(|value| !value.is_null()) {
+            details.insert(key.to_string(), value.clone());
+        }
+    }
+
+    json!({
+        "timestamp": receipt.get("timestamp").cloned().unwrap_or(Value::Null),
+        "kind": receipt.get("kind").cloned().unwrap_or(Value::Null),
+        "issue_id": issue_id,
+        "details": if details.is_empty() { Value::Null } else { Value::Object(details) },
+    })
+}
+
+fn context_root(var_names: &[&str], fallback: &Path) -> String {
+    for name in var_names {
+        if let Some(value) = env::var_os(name) {
+            let path = PathBuf::from(value);
+            if !path.as_os_str().is_empty() {
+                return path.to_string_lossy().into_owned();
+            }
+        }
+    }
+    fallback.to_string_lossy().into_owned()
+}
+
+fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<Value, String> {
+    let status = status_projection(repo_root, socket_path)?;
+    let board = board_status_projection(repo_root, socket_path)?;
+    let receipts = receipts_status_projection(repo_root)?;
+
+    let lanes = board
+        .get("lanes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let claimed_issues = board
+        .get("claimed_issues")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let ready_issues = board
+        .get("ready_issues")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let blocked_issues = board
+        .get("blocked_issues")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let deferred_issues = board
+        .get("deferred_issues")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let workspaces = board
+        .get("workspaces")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let receipt_rows = receipts
+        .get("receipts")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let stale_lanes = lanes
+        .iter()
+        .filter(|lane| lane.get("observed_status").and_then(Value::as_str) == Some("stale"))
+        .map(compact_lane_projection)
+        .collect::<Vec<_>>();
+    let active_lanes = lanes
+        .iter()
+        .filter(|lane| {
+            !matches!(
+                lane.get("observed_status").and_then(Value::as_str),
+                Some("stale") | Some("finished") | Some("archived")
+            )
+        })
+        .map(compact_lane_projection)
+        .collect::<Vec<_>>();
+    let claimed = claimed_issues
+        .iter()
+        .map(compact_issue_projection)
+        .collect::<Vec<_>>();
+    let ready = ready_issues
+        .iter()
+        .map(compact_issue_projection)
+        .collect::<Vec<_>>();
+    let blocked = blocked_issues
+        .iter()
+        .map(compact_issue_projection)
+        .collect::<Vec<_>>();
+    let deferred = deferred_issues
+        .iter()
+        .map(compact_issue_projection)
+        .collect::<Vec<_>>();
+    let workspace_rows = workspaces
+        .iter()
+        .map(compact_workspace_projection)
+        .collect::<Vec<_>>();
+    let recent_history = receipt_rows
+        .iter()
+        .rev()
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|receipt| compact_receipt_projection(&receipt))
+        .collect::<Vec<_>>();
+
+    let mut obstructions = Vec::new();
+    if status
+        .get("health")
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str)
+        != Some("healthy")
+    {
+        obstructions.push(json!({
+            "kind": "runtime_unhealthy",
+            "message": "tracker or backend health is not currently healthy",
+        }));
+    }
+    for lane in &stale_lanes {
+        obstructions.push(json!({
+            "kind": "stale_lane",
+            "issue_id": lane.get("issue_id").cloned().unwrap_or(Value::Null),
+            "workspace_path": lane.get("workspace_path").cloned().unwrap_or(Value::Null),
+            "message": "lane workspace is missing from disk",
+        }));
+    }
+
+    let mut recommended_actions = Vec::new();
+    if obstructions
+        .iter()
+        .any(|value| value.get("kind").and_then(Value::as_str) == Some("runtime_unhealthy"))
+    {
+        recommended_actions.push(json!({
+            "kind": "repair_runtime",
+            "command": "tuskd ensure",
+            "message": "repair and republish tracker/backend health",
+        }));
+    }
+    if let Some(stale) = stale_lanes.first() {
+        recommended_actions.push(json!({
+            "kind": "repair_stale_lane",
+            "issue_id": stale.get("issue_id").cloned().unwrap_or(Value::Null),
+            "message": "inspect or recreate the missing lane workspace",
+        }));
+    }
+    if let Some(issue) = claimed.first() {
+        recommended_actions.push(json!({
+            "kind": "launch_claimed_issue",
+            "issue_id": issue.get("id").cloned().unwrap_or(Value::Null),
+            "title": issue.get("title").cloned().unwrap_or(Value::Null),
+            "message": "claimed work is waiting for a lane launch",
+        }));
+    } else if let Some(issue) = ready.first() {
+        recommended_actions.push(json!({
+            "kind": "claim_ready_issue",
+            "issue_id": issue.get("id").cloned().unwrap_or(Value::Null),
+            "title": issue.get("title").cloned().unwrap_or(Value::Null),
+            "message": "ready work is available to claim",
+        }));
+    } else if let Some(issue) = blocked.first() {
+        recommended_actions.push(json!({
+            "kind": "review_blocked_issue",
+            "issue_id": issue.get("id").cloned().unwrap_or(Value::Null),
+            "title": issue.get("title").cloned().unwrap_or(Value::Null),
+            "message": "blocked work is dominating the current queue",
+        }));
+    }
+
+    Ok(json!({
+        "repo_root": repo_root.to_string_lossy().into_owned(),
+        "generated_at": now_iso8601(),
+        "now": {
+            "runtime": {
+                "health": status
+                    .get("health")
+                    .and_then(|value| value.get("status"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "mode": status
+                    .get("tuskd")
+                    .and_then(|value| value.get("mode"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "pid": status
+                    .get("tuskd")
+                    .and_then(|value| value.get("pid"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "backend": status.get("backend_runtime").cloned().unwrap_or(Value::Null),
+            },
+            "active_lanes": active_lanes,
+            "claimed_issues": claimed,
+            "stale_lanes": stale_lanes,
+            "obstructions": obstructions,
+            "counts": {
+                "active_lanes": lanes
+                    .iter()
+                    .filter(|lane| {
+                        !matches!(
+                            lane.get("observed_status").and_then(Value::as_str),
+                            Some("stale") | Some("finished") | Some("archived")
+                        )
+                    })
+                    .count(),
+                "claimed_issues": claimed_issues.len(),
+                "stale_lanes": lanes
+                    .iter()
+                    .filter(|lane| lane.get("observed_status").and_then(Value::as_str) == Some("stale"))
+                    .count(),
+                "obstructions": obstructions.len(),
+            },
+        },
+        "next": {
+            "ready_issues": ready,
+            "blocked_issues": blocked,
+            "deferred_issues": deferred,
+            "recommended_actions": recommended_actions,
+            "counts": {
+                "ready_issues": ready_issues.len(),
+                "blocked_issues": blocked_issues.len(),
+                "deferred_issues": deferred_issues.len(),
+                "recommended_actions": recommended_actions.len(),
+            },
+        },
+        "history": {
+            "recent_transitions": recent_history,
+            "counts": {
+                "recent_transitions": receipt_rows.len().min(8),
+                "available_receipts": receipt_rows.len(),
+            },
+        },
+        "context": {
+            "repo_root": repo_root.to_string_lossy().into_owned(),
+            "checkout_root": context_root(&["TUSK_CHECKOUT_ROOT", "DEVENV_ROOT"], repo_root),
+            "tracker_root": context_root(&["TUSK_TRACKER_ROOT", "BEADS_WORKSPACE_ROOT"], repo_root),
+            "protocol": status.get("protocol").cloned().unwrap_or(Value::Null),
+            "service": status.get("tuskd").cloned().unwrap_or(Value::Null),
+            "backend_endpoint": status.get("backend_endpoint").cloned().unwrap_or(Value::Null),
+            "summary": status.get("summary").cloned().unwrap_or(Value::Null),
+            "workspaces": workspace_rows,
+            "counts": {
+                "workspaces": workspaces.len(),
+            },
+        },
+        "drill_down": {
+            "tracker_status": "tracker_status",
+            "board_status": "board_status",
+            "receipts_status": "receipts_status",
+        },
+    }))
+}
+
 fn board_status_projection(repo_root: &Path, socket_path: &Path) -> Result<Value, String> {
     let status_result = run_tracker_json_command_in_repo(repo_root, "tracker_status", ["status"])?;
     let ready_result = run_tracker_json_command_in_repo(repo_root, "tracker_ready", ["ready"])?;
@@ -1243,6 +1618,7 @@ fn read_payload_for_kind(
 ) -> Result<Option<Value>, String> {
     match kind {
         "tracker_status" => Ok(Some(status_projection(repo_root, socket_path)?)),
+        "operator_snapshot" => Ok(Some(operator_snapshot_projection(repo_root, socket_path)?)),
         "board_status" => Ok(Some(board_status_projection(repo_root, socket_path)?)),
         "receipts_status" => Ok(Some(receipts_status_projection(repo_root)?)),
         "ping" => Ok(Some(ping_payload(repo_root))),
@@ -3364,6 +3740,32 @@ fn run_board_status(args: &[String]) -> ExitCode {
     }
 }
 
+fn print_operator_snapshot_help() {
+    println!("Usage:\n  tuskd-core operator-snapshot --repo PATH [--socket PATH]");
+}
+
+fn run_operator_snapshot(args: &[String]) -> ExitCode {
+    let parsed = match parse_projection_args(args, "operator-snapshot") {
+        Ok(parsed) => parsed,
+        Err(message) if message == "USAGE" => {
+            print_operator_snapshot_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => return fail(&message),
+    };
+
+    match operator_snapshot_projection(&parsed.repo_root, &parsed.socket_path) {
+        Ok(record) => match serde_json::to_string(&record) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => fail(&format!("failed to encode operator snapshot: {err}")),
+        },
+        Err(message) => fail(&message),
+    }
+}
+
 fn print_receipts_status_help() {
     println!("Usage:\n  tuskd-core receipts-status --repo PATH");
 }
@@ -3897,6 +4299,7 @@ fn main() -> ExitCode {
         },
         Some("ensure") => run_ensure(&args[1..]),
         Some("status") => run_status(&args[1..]),
+        Some("operator-snapshot") => run_operator_snapshot(&args[1..]),
         Some("board-status") => run_board_status(&args[1..]),
         Some("receipts-status") => run_receipts_status(&args[1..]),
         Some("lane-state") => run_lane_state(&args[1..]),

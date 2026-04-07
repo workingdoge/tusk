@@ -413,6 +413,8 @@ These should stay explicit for now:
    [`design/tusk-transition-carrier.md`](./tusk-transition-carrier.md); the
    governed transition kernel vocabulary now lives in
    [`design/tusk-governed-transition-kernel.md`](./tusk-governed-transition-kernel.md);
+   the operator-facing information architecture now lives in
+   [`design/tusk-operator-ux-model.md`](./tusk-operator-ux-model.md);
    the
    first Rust-owned specialization for backend ensure and service publication
    now lives in

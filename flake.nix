@@ -414,7 +414,7 @@
         strictDeps = true;
       };
       tuskUiCargoArtifacts = craneLib.buildDepsOnly tuskUiCommonArgs;
-      tuskUiPackage = craneLib.buildPackage (
+      tuskUiBinaryPackage = craneLib.buildPackage (
         tuskUiCommonArgs
         // {
           cargoArtifacts = tuskUiCargoArtifacts;
@@ -432,6 +432,14 @@
           cargoArtifacts = tuskdCoreCargoArtifacts;
         }
       );
+      tuskUiPackage = pkgs.writeShellApplication {
+        name = "tusk-ui";
+        runtimeInputs = [ tuskdPackage ];
+        text = ''
+          export TUSKD_BIN=${tuskdPackage}/bin/tuskd
+          exec ${tuskUiBinaryPackage}/bin/tusk-ui "$@"
+        '';
+      };
       codexNixCheck = pkgs.writeShellApplication {
         name = "codex-nix-check";
         runtimeInputs = [

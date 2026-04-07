@@ -2,7 +2,7 @@ use std::env;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -143,9 +143,10 @@ Keys:
   q            quit
   r            refresh all panes
   p            ping the service
-  Tab          focus next pane
-  Shift+Tab    focus previous pane
-  t / b / e    focus tracker, board, or receipts
+  Tab          focus next view
+  Shift+Tab    focus previous view
+  o / t / b / e
+               focus home, tracker, board, or receipts
   j / k        move selectable issue/lane selection in the board
   Up / Down    move selectable issue/lane selection in the board
   c            claim the selected ready issue from the board
@@ -197,6 +198,10 @@ impl ProtocolClient {
         self.query("tracker_status")
     }
 
+    fn operator_snapshot(&self) -> Result<OperatorSnapshot> {
+        self.query("operator_snapshot")
+    }
+
     fn board_status(&self) -> Result<BoardStatus> {
         self.query("board_status")
     }
@@ -238,6 +243,23 @@ impl ProtocolClient {
     where
         T: DeserializeOwned,
     {
+        let request = json!({
+            "request_id": request_id(),
+            "kind": kind,
+            "payload": payload,
+        });
+
+        match self.query_via_socket::<T>(&request) {
+            Ok(value) => Ok(value),
+            Err(error) if should_fallback_to_command(&error) => self.query_via_command(&request),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn query_via_socket<T>(&self, request: &Value) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
         let mut stream = UnixStream::connect(&self.socket_path)
             .with_context(|| format!("connect to {}", self.socket_path.display()))?;
         stream
@@ -247,11 +269,6 @@ impl ProtocolClient {
             .set_write_timeout(Some(Duration::from_secs(2)))
             .context("set write timeout")?;
 
-        let request = json!({
-            "request_id": request_id(),
-            "kind": kind,
-            "payload": payload,
-        });
         let mut body = serde_json::to_vec(&request).context("serialize request")?;
         body.push(b'\n');
         stream.write_all(&body).context("write request")?;
@@ -261,18 +278,88 @@ impl ProtocolClient {
             .read_to_string(&mut response)
             .context("read response from socket")?;
 
-        let decoded: Response<T> =
-            serde_json::from_str(&response).context("decode protocol response")?;
-        if decoded.ok {
-            decoded.payload.context("missing response payload")
-        } else {
-            let message = decoded
-                .error
-                .map(|error| error.message)
-                .unwrap_or_else(|| "unknown protocol error".to_owned());
-            Err(anyhow!("{kind} failed: {message}"))
-        }
+        decode_response::<T>(&response)
     }
+
+    fn query_via_command<T>(&self, request: &Value) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let mut child = Command::new(tuskd_bin())
+            .arg("respond")
+            .arg("--repo")
+            .arg(&self.repo_root)
+            .arg("--socket")
+            .arg(&self.socket_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("spawn tuskd respond")?;
+
+        {
+            let stdin = child
+                .stdin
+                .as_mut()
+                .context("tuskd respond missing stdin pipe")?;
+            let mut body = serde_json::to_vec(request).context("serialize command request")?;
+            body.push(b'\n');
+            stdin
+                .write_all(&body)
+                .context("write request to tuskd respond")?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .context("wait for tuskd respond output")?;
+        if !output.status.success() {
+            let stderr =
+                String::from_utf8(output.stderr).unwrap_or_else(|_| "<non-utf8 stderr>".to_owned());
+            bail!("tuskd respond failed: {}", stderr.trim());
+        }
+
+        let stdout =
+            String::from_utf8(output.stdout).context("decode tuskd respond stdout as utf-8")?;
+        decode_response::<T>(&stdout)
+    }
+}
+
+fn should_fallback_to_command(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .map(|io_error| {
+                matches!(
+                    io_error.kind(),
+                    io::ErrorKind::NotFound
+                        | io::ErrorKind::ConnectionRefused
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::BrokenPipe
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn decode_response<T>(response: &str) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let decoded: Response<T> =
+        serde_json::from_str(response).context("decode protocol response")?;
+    if decoded.ok {
+        decoded.payload.context("missing response payload")
+    } else {
+        let message = decoded
+            .error
+            .map(|error| error.message)
+            .unwrap_or_else(|| "unknown protocol error".to_owned());
+        Err(anyhow!("request failed: {message}"))
+    }
+}
+
+fn tuskd_bin() -> String {
+    env::var("TUSKD_BIN").unwrap_or_else(|_| "tuskd".to_owned())
 }
 
 fn request_id() -> String {
@@ -299,8 +386,9 @@ struct App {
     last_refresh_started: Instant,
     status_line: String,
     should_quit: bool,
-    focus: Focus,
+    view: ViewMode,
     selected_board_item_id: Option<String>,
+    home: PanelState<OperatorSnapshot>,
     tracker: PanelState<TrackerStatus>,
     board: PanelState<BoardStatus>,
     receipts: PanelState<ReceiptsStatus>,
@@ -313,10 +401,11 @@ impl App {
             refresh_interval,
             default_base_rev,
             last_refresh_started: Instant::now() - refresh_interval,
-            status_line: "press r to refresh, b to focus the board, q to quit".to_owned(),
+            status_line: "press r to refresh, o for home, b for board, q to quit".to_owned(),
             should_quit: false,
-            focus: Focus::Tracker,
+            view: ViewMode::Home,
             selected_board_item_id: None,
+            home: PanelState::default(),
             tracker: PanelState::default(),
             board: PanelState::default(),
             receipts: PanelState::default(),
@@ -334,6 +423,7 @@ impl App {
 
     fn refresh(&mut self) {
         self.last_refresh_started = Instant::now();
+        self.home = PanelState::from_result(self.client.operator_snapshot());
         self.tracker = PanelState::from_result(self.client.tracker_status());
         self.board = PanelState::from_result(self.client.board_status());
         self.receipts = PanelState::from_result(self.client.receipts_status());
@@ -483,46 +573,50 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true
             }
-            KeyCode::Char('c') if self.focus == Focus::Board => self.claim_selected_issue(),
-            KeyCode::Char('f') if self.focus == Focus::Board => self.finish_selected_lane(),
-            KeyCode::Char('l') if self.focus == Focus::Board => self.launch_selected_issue(),
+            KeyCode::Char('c') if self.view == ViewMode::Board => self.claim_selected_issue(),
+            KeyCode::Char('f') if self.view == ViewMode::Board => self.finish_selected_lane(),
+            KeyCode::Char('l') if self.view == ViewMode::Board => self.launch_selected_issue(),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('p') => self.ping(),
-            KeyCode::Char('t') => self.focus = Focus::Tracker,
-            KeyCode::Char('b') => self.focus = Focus::Board,
-            KeyCode::Char('e') => self.focus = Focus::Receipts,
-            KeyCode::Char('j') | KeyCode::Down if self.focus == Focus::Board => {
+            KeyCode::Char('o') => self.view = ViewMode::Home,
+            KeyCode::Char('t') => self.view = ViewMode::Tracker,
+            KeyCode::Char('b') => self.view = ViewMode::Board,
+            KeyCode::Char('e') => self.view = ViewMode::Receipts,
+            KeyCode::Char('j') | KeyCode::Down if self.view == ViewMode::Board => {
                 self.move_board_selection(1)
             }
-            KeyCode::Char('k') | KeyCode::Up if self.focus == Focus::Board => {
+            KeyCode::Char('k') | KeyCode::Up if self.view == ViewMode::Board => {
                 self.move_board_selection(-1)
             }
-            KeyCode::Tab => self.focus = self.focus.next(),
-            KeyCode::BackTab => self.focus = self.focus.previous(),
+            KeyCode::Tab => self.view = self.view.next(),
+            KeyCode::BackTab => self.view = self.view.previous(),
             _ => {}
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Focus {
+enum ViewMode {
+    Home,
     Tracker,
     Board,
     Receipts,
 }
 
-impl Focus {
+impl ViewMode {
     fn next(self) -> Self {
         match self {
+            Self::Home => Self::Tracker,
             Self::Tracker => Self::Board,
             Self::Board => Self::Receipts,
-            Self::Receipts => Self::Tracker,
+            Self::Receipts => Self::Home,
         }
     }
 
     fn previous(self) -> Self {
         match self {
-            Self::Tracker => Self::Receipts,
+            Self::Home => Self::Receipts,
+            Self::Tracker => Self::Home,
             Self::Board => Self::Tracker,
             Self::Receipts => Self::Board,
         }
@@ -696,6 +790,156 @@ struct PingStatus {
     timestamp: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct OperatorSnapshot {
+    generated_at: String,
+    now: OperatorNow,
+    next: OperatorNext,
+    history: OperatorHistory,
+    context: OperatorContext,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorNow {
+    runtime: OperatorRuntime,
+    #[serde(default)]
+    active_lanes: Vec<OperatorLane>,
+    #[serde(default)]
+    claimed_issues: Vec<BoardIssue>,
+    #[serde(default)]
+    stale_lanes: Vec<OperatorLane>,
+    #[serde(default)]
+    obstructions: Vec<OperatorObstruction>,
+    counts: OperatorNowCounts,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorRuntime {
+    health: Option<String>,
+    mode: Option<String>,
+    pid: Option<i64>,
+    backend: Option<OperatorBackend>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorBackend {
+    running: Option<bool>,
+    pid: Option<i64>,
+    port: Option<i64>,
+    data_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorLane {
+    issue_id: String,
+    issue_title: Option<String>,
+    status: Option<String>,
+    observed_status: Option<String>,
+    workspace_name: Option<String>,
+    workspace_exists: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorObstruction {
+    kind: String,
+    message: String,
+    issue_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorNowCounts {
+    active_lanes: u64,
+    claimed_issues: u64,
+    stale_lanes: u64,
+    obstructions: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorNext {
+    #[serde(default)]
+    ready_issues: Vec<BoardIssue>,
+    #[serde(default)]
+    blocked_issues: Vec<BoardIssue>,
+    #[serde(default)]
+    deferred_issues: Vec<BoardIssue>,
+    #[serde(default)]
+    recommended_actions: Vec<OperatorRecommendation>,
+    counts: OperatorNextCounts,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorRecommendation {
+    kind: String,
+    message: String,
+    issue_id: Option<String>,
+    title: Option<String>,
+    command: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorNextCounts {
+    ready_issues: u64,
+    blocked_issues: u64,
+    deferred_issues: u64,
+    recommended_actions: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorHistory {
+    #[serde(default)]
+    recent_transitions: Vec<OperatorReceipt>,
+    counts: OperatorHistoryCounts,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorReceipt {
+    timestamp: Option<String>,
+    kind: Option<String>,
+    issue_id: Option<String>,
+    details: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorHistoryCounts {
+    recent_transitions: u64,
+    available_receipts: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorContext {
+    repo_root: String,
+    checkout_root: String,
+    tracker_root: String,
+    protocol: TrackerProtocol,
+    service: TuskdState,
+    backend_endpoint: Option<OperatorBackendEndpoint>,
+    summary: Option<BoardSummary>,
+    #[serde(default)]
+    workspaces: Vec<WorkspaceEntry>,
+    counts: OperatorContextCounts,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorBackendEndpoint {
+    host: Option<String>,
+    port: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceEntry {
+    name: String,
+    change_id: Option<String>,
+    commit_id: Option<String>,
+    empty: bool,
+    description: Option<String>,
+    raw: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorContextCounts {
+    workspaces: u64,
+}
+
 fn render(frame: &mut Frame, app: &App) {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -706,15 +950,6 @@ fn render(frame: &mut Frame, app: &App) {
         ])
         .split(frame.area());
 
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-        ])
-        .split(vertical[1]);
-
     let header = Paragraph::new(Line::from(vec![
         Span::styled("tusk-ui  ", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(app.client.repo_root.display().to_string()),
@@ -722,6 +957,16 @@ fn render(frame: &mut Frame, app: &App) {
         Span::styled(
             app.client.socket_path.display().to_string(),
             Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            match app.view {
+                ViewMode::Home => "home",
+                ViewMode::Tracker => "tracker",
+                ViewMode::Board => "board",
+                ViewMode::Receipts => "receipts",
+            },
+            Style::default().fg(Color::Yellow),
         ),
     ]))
     .block(
@@ -731,21 +976,25 @@ fn render(frame: &mut Frame, app: &App) {
     );
     frame.render_widget(header, vertical[0]);
 
-    render_tracker(frame, panes[0], app);
-    render_board(frame, panes[1], app);
-    render_receipts(frame, panes[2], app);
+    match app.view {
+        ViewMode::Home => render_home(frame, vertical[1], app),
+        ViewMode::Tracker => render_tracker(frame, vertical[1], app),
+        ViewMode::Board => render_board(frame, vertical[1], app),
+        ViewMode::Receipts => render_receipts(frame, vertical[1], app),
+    }
 
     let footer = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled("focus: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(match app.focus {
-                Focus::Tracker => "tracker",
-                Focus::Board => "board",
-                Focus::Receipts => "receipts",
+            Span::styled("view: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(match app.view {
+                ViewMode::Home => "home",
+                ViewMode::Tracker => "tracker",
+                ViewMode::Board => "board",
+                ViewMode::Receipts => "receipts",
             }),
             Span::raw("  "),
             Span::styled(
-                "t/b/e focus  Tab cycle  j/k move  c claim  l launch  f finish  r refresh  p ping  q quit",
+                "o/t/b/e view  Tab cycle  j/k move(board)  c claim  l launch  f finish  r refresh  p ping  q quit",
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -756,8 +1005,43 @@ fn render(frame: &mut Frame, app: &App) {
     frame.render_widget(footer, vertical[2]);
 }
 
+fn render_home(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[0]);
+    let bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[1]);
+
+    match (&app.home.value, &app.home.error) {
+        (Some(home), _) => {
+            render_lines_panel(frame, top[0], "Now", home_now_lines(home));
+            render_lines_panel(frame, top[1], "Next", home_next_lines(home));
+            render_lines_panel(frame, bottom[0], "History", home_history_lines(home));
+            render_lines_panel(frame, bottom[1], "Context", home_context_lines(home));
+        }
+        (_, Some(error)) => {
+            render_lines_panel(frame, area, "Home", error_lines(error));
+        }
+        _ => {
+            render_lines_panel(
+                frame,
+                area,
+                "Home",
+                vec![Line::from("waiting for operator snapshot")],
+            );
+        }
+    }
+}
+
 fn render_tracker(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
-    let block = pane_block("Tracker Service", app.focus == Focus::Tracker);
+    let block = pane_block("Tracker Service", app.view == ViewMode::Tracker);
     let lines = match (&app.tracker.value, &app.tracker.error) {
         (Some(tracker), _) => tracker_lines(tracker),
         (_, Some(error)) => error_lines(error),
@@ -773,7 +1057,7 @@ fn render_tracker(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
 }
 
 fn render_board(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
-    let block = pane_block("Board", app.focus == Focus::Board);
+    let block = pane_block("Board", app.view == ViewMode::Board);
     let lines = match (&app.board.value, &app.board.error) {
         (Some(board), _) => board_lines(board, app.selected_board_item_id.as_deref()),
         (_, Some(error)) => error_lines(error),
@@ -789,7 +1073,7 @@ fn render_board(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
 }
 
 fn render_receipts(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
-    let block = pane_block("Receipts", app.focus == Focus::Receipts);
+    let block = pane_block("Receipts", app.view == ViewMode::Receipts);
     match (&app.receipts.value, &app.receipts.error) {
         (Some(receipts), _) => {
             let items = receipt_items(receipts);
@@ -814,6 +1098,20 @@ fn render_receipts(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     }
 }
 
+fn render_lines_panel(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    title: &'static str,
+    lines: Vec<Line<'static>>,
+) {
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(pane_block(title, false))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 fn pane_block(title: &'static str, focused: bool) -> Block<'static> {
     let style = if focused {
         Style::default()
@@ -827,6 +1125,295 @@ fn pane_block(title: &'static str, focused: bool) -> Block<'static> {
         .borders(Borders::ALL)
         .border_style(style)
         .title(title)
+}
+
+fn home_now_lines(snapshot: &OperatorSnapshot) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        kv_line("updated", snapshot.generated_at.clone()),
+        kv_line(
+            "runtime",
+            snapshot
+                .now
+                .runtime
+                .health
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned()),
+        ),
+        kv_line(
+            "mode",
+            snapshot
+                .now
+                .runtime
+                .mode
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned()),
+        ),
+        kv_line(
+            "pid",
+            snapshot
+                .now
+                .runtime
+                .pid
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_owned()),
+        ),
+        kv_line("active", snapshot.now.counts.active_lanes.to_string()),
+        kv_line("claimed", snapshot.now.counts.claimed_issues.to_string()),
+        kv_line("stale", snapshot.now.counts.stale_lanes.to_string()),
+        kv_line("obstructions", snapshot.now.counts.obstructions.to_string()),
+    ];
+
+    if let Some(backend) = &snapshot.now.runtime.backend {
+        let mut backend_parts = Vec::new();
+        if let Some(port) = backend.port {
+            backend_parts.push(format!("port {port}"));
+        }
+        if let Some(pid) = backend.pid {
+            backend_parts.push(format!("pid {pid}"));
+        }
+        if let Some(running) = backend.running {
+            backend_parts.push(if running {
+                "running".to_owned()
+            } else {
+                "stopped".to_owned()
+            });
+        }
+        if !backend_parts.is_empty() {
+            lines.push(kv_line("backend", backend_parts.join(" | ")));
+        }
+        if let Some(path) = &backend.data_dir {
+            lines.push(kv_line("data", path.clone()));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(title_line("live lanes"));
+    if snapshot.now.active_lanes.is_empty() {
+        lines.push(Line::from("none"));
+    } else {
+        for lane in snapshot.now.active_lanes.iter().take(4) {
+            lines.push(Line::from(format!(
+                "{} {}",
+                lane.issue_id,
+                lane.issue_title
+                    .clone()
+                    .unwrap_or_else(|| lane.status.clone().unwrap_or_else(|| "lane".to_owned()))
+            )));
+            let mut details = Vec::new();
+            if let Some(status) = &lane.status {
+                details.push(format!("status {status}"));
+            }
+            if let Some(observed_status) = &lane.observed_status {
+                if lane.status.as_ref() != Some(observed_status) {
+                    details.push(format!("observed {observed_status}"));
+                }
+            }
+            if let Some(workspace_name) = &lane.workspace_name {
+                details.push(format!("ws {workspace_name}"));
+            }
+            if let Some(workspace_exists) = lane.workspace_exists {
+                details.push(if workspace_exists {
+                    "workspace live".to_owned()
+                } else {
+                    "workspace missing".to_owned()
+                });
+            }
+            if !details.is_empty() {
+                lines.push(Line::from(format!("  {}", details.join(" | "))));
+            }
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(title_line("waiting claims"));
+    if snapshot.now.claimed_issues.is_empty() {
+        lines.push(Line::from("none"));
+    } else {
+        for issue in snapshot.now.claimed_issues.iter().take(4) {
+            lines.push(Line::from(format!("{} {}", issue.id, issue.title)));
+        }
+    }
+
+    if !snapshot.now.stale_lanes.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(title_line("stale lanes"));
+        for lane in snapshot.now.stale_lanes.iter().take(3) {
+            lines.push(Line::from(format!(
+                "{} {}",
+                lane.issue_id,
+                lane.issue_title
+                    .clone()
+                    .unwrap_or_else(|| "workspace missing".to_owned())
+            )));
+        }
+    }
+
+    if !snapshot.now.obstructions.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(title_line("obstructions"));
+        for obstruction in snapshot.now.obstructions.iter().take(3) {
+            let issue = obstruction
+                .issue_id
+                .as_deref()
+                .map(|value| format!("{value}: "))
+                .unwrap_or_default();
+            lines.push(Line::from(format!(
+                "{}[{}] {}",
+                issue, obstruction.kind, obstruction.message
+            )));
+        }
+    }
+
+    lines
+}
+
+fn home_next_lines(snapshot: &OperatorSnapshot) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        kv_line("ready", snapshot.next.counts.ready_issues.to_string()),
+        kv_line("blocked", snapshot.next.counts.blocked_issues.to_string()),
+        kv_line("deferred", snapshot.next.counts.deferred_issues.to_string()),
+        kv_line(
+            "suggested",
+            snapshot.next.counts.recommended_actions.to_string(),
+        ),
+    ];
+
+    lines.push(Line::from(""));
+    lines.push(title_line("recommended"));
+    if snapshot.next.recommended_actions.is_empty() {
+        lines.push(Line::from("none"));
+    } else {
+        for action in snapshot.next.recommended_actions.iter().take(4) {
+            let subject = action
+                .issue_id
+                .clone()
+                .or_else(|| action.title.clone())
+                .unwrap_or_else(|| action.kind.clone());
+            let command = action
+                .command
+                .clone()
+                .map(|value| format!(" ({value})"))
+                .unwrap_or_default();
+            lines.push(Line::from(format!(
+                "{}: {}{}",
+                subject, action.message, command
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(title_line("ready queue"));
+    if snapshot.next.ready_issues.is_empty() {
+        lines.push(Line::from("none"));
+    } else {
+        for issue in snapshot.next.ready_issues.iter().take(4) {
+            lines.push(Line::from(format!("{} {}", issue.id, issue.title)));
+        }
+    }
+
+    if !snapshot.next.blocked_issues.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(title_line("blocked"));
+        for issue in snapshot.next.blocked_issues.iter().take(3) {
+            lines.push(Line::from(format!("{} {}", issue.id, issue.title)));
+        }
+    }
+
+    if !snapshot.next.deferred_issues.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(title_line("deferred"));
+        for issue in snapshot.next.deferred_issues.iter().take(2) {
+            lines.push(Line::from(format!("{} {}", issue.id, issue.title)));
+        }
+    }
+
+    lines
+}
+
+fn home_history_lines(snapshot: &OperatorSnapshot) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        kv_line(
+            "recent",
+            snapshot.history.counts.recent_transitions.to_string(),
+        ),
+        kv_line(
+            "available",
+            snapshot.history.counts.available_receipts.to_string(),
+        ),
+        Line::from(""),
+        title_line("recent transitions"),
+    ];
+
+    if snapshot.history.recent_transitions.is_empty() {
+        lines.push(Line::from("none"));
+        return lines;
+    }
+
+    for receipt in &snapshot.history.recent_transitions {
+        lines.push(Line::from(operator_receipt_label(receipt)));
+    }
+
+    lines
+}
+
+fn home_context_lines(snapshot: &OperatorSnapshot) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        kv_line("repo", snapshot.context.repo_root.clone()),
+        kv_line("checkout", snapshot.context.checkout_root.clone()),
+        kv_line("tracker", snapshot.context.tracker_root.clone()),
+        kv_line("socket", snapshot.context.protocol.endpoint.clone()),
+        kv_line("mode", snapshot.context.service.mode.clone()),
+        kv_line("workspaces", snapshot.context.counts.workspaces.to_string()),
+    ];
+
+    if let Some(endpoint) = &snapshot.context.backend_endpoint {
+        let host = endpoint
+            .host
+            .clone()
+            .unwrap_or_else(|| "127.0.0.1".to_owned());
+        let port = endpoint
+            .port
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_owned());
+        lines.push(kv_line("backend", format!("{host}:{port}")));
+    }
+
+    if let Some(summary) = &snapshot.context.summary {
+        lines.push(Line::from(""));
+        lines.push(title_line("summary"));
+        lines.extend(summary_lines(summary));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(title_line("workspaces"));
+    if snapshot.context.workspaces.is_empty() {
+        lines.push(Line::from("none"));
+    } else {
+        for workspace in snapshot.context.workspaces.iter().take(4) {
+            let description = workspace
+                .description
+                .clone()
+                .unwrap_or_else(|| workspace.raw.clone());
+            let mut details = Vec::new();
+            if let Some(change_id) = &workspace.change_id {
+                details.push(change_id.clone());
+            }
+            if let Some(commit_id) = &workspace.commit_id {
+                details.push(commit_id.clone());
+            }
+            if workspace.empty {
+                details.push("empty".to_owned());
+            }
+            let suffix = if details.is_empty() {
+                description
+            } else {
+                format!("{} ({})", description, details.join(" | "))
+            };
+            lines.push(Line::from(format!("{} {}", workspace.name, suffix)));
+        }
+    }
+
+    lines
 }
 
 fn tracker_lines(tracker: &TrackerStatus) -> Vec<Line<'static>> {
@@ -1267,6 +1854,37 @@ fn receipt_label(receipt: &ReceiptEntry) -> String {
     format!("{timestamp} {kind}{payload_hint}")
 }
 
+fn operator_receipt_label(receipt: &OperatorReceipt) -> String {
+    let timestamp = receipt
+        .timestamp
+        .clone()
+        .unwrap_or_else(|| "unknown-time".to_owned());
+    let kind = receipt
+        .kind
+        .clone()
+        .unwrap_or_else(|| "unknown-kind".to_owned());
+    let issue = receipt
+        .issue_id
+        .clone()
+        .map(|value| format!(" {value}"))
+        .unwrap_or_default();
+    let detail = receipt
+        .details
+        .as_ref()
+        .and_then(Value::as_object)
+        .map(|object| {
+            let keys = object.keys().cloned().collect::<Vec<_>>();
+            if keys.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", keys.join(","))
+            }
+        })
+        .unwrap_or_default();
+
+    format!("{timestamp} {kind}{issue}{detail}")
+}
+
 fn kv_line(label: impl Into<String>, value: impl Into<String>) -> Line<'static> {
     Line::from(vec![
         Span::styled(
@@ -1301,6 +1919,161 @@ fn error_lines(error: &str) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_operator_snapshot() -> OperatorSnapshot {
+        OperatorSnapshot {
+            generated_at: "2026-04-07T20:00:00Z".to_owned(),
+            now: OperatorNow {
+                runtime: OperatorRuntime {
+                    health: Some("healthy".to_owned()),
+                    mode: Some("idle".to_owned()),
+                    pid: Some(42),
+                    backend: Some(OperatorBackend {
+                        running: Some(true),
+                        pid: Some(75075),
+                        port: Some(32642),
+                        data_dir: Some("/tmp/repo/.beads/dolt".to_owned()),
+                    }),
+                },
+                active_lanes: vec![OperatorLane {
+                    issue_id: "tusk-live".to_owned(),
+                    issue_title: Some("live lane".to_owned()),
+                    status: Some("handoff".to_owned()),
+                    observed_status: Some("handoff".to_owned()),
+                    workspace_name: Some("tusk-live-lane".to_owned()),
+                    workspace_exists: Some(true),
+                }],
+                claimed_issues: vec![BoardIssue {
+                    id: "tusk-claim".to_owned(),
+                    title: "claimed issue".to_owned(),
+                    status: Some("in_progress".to_owned()),
+                }],
+                stale_lanes: vec![OperatorLane {
+                    issue_id: "tusk-stale".to_owned(),
+                    issue_title: Some("stale lane".to_owned()),
+                    status: Some("handoff".to_owned()),
+                    observed_status: Some("stale".to_owned()),
+                    workspace_name: Some("tusk-stale-lane".to_owned()),
+                    workspace_exists: Some(false),
+                }],
+                obstructions: vec![OperatorObstruction {
+                    kind: "stale_lane".to_owned(),
+                    message: "lane workspace is missing from disk".to_owned(),
+                    issue_id: Some("tusk-stale".to_owned()),
+                }],
+                counts: OperatorNowCounts {
+                    active_lanes: 1,
+                    claimed_issues: 1,
+                    stale_lanes: 1,
+                    obstructions: 1,
+                },
+            },
+            next: OperatorNext {
+                ready_issues: vec![BoardIssue {
+                    id: "tusk-ready".to_owned(),
+                    title: "ready issue".to_owned(),
+                    status: Some("open".to_owned()),
+                }],
+                blocked_issues: vec![BoardIssue {
+                    id: "tusk-blocked".to_owned(),
+                    title: "blocked issue".to_owned(),
+                    status: Some("open".to_owned()),
+                }],
+                deferred_issues: vec![BoardIssue {
+                    id: "tusk-deferred".to_owned(),
+                    title: "deferred issue".to_owned(),
+                    status: Some("deferred".to_owned()),
+                }],
+                recommended_actions: vec![OperatorRecommendation {
+                    kind: "claim_ready_issue".to_owned(),
+                    message: "ready work is available to claim".to_owned(),
+                    issue_id: Some("tusk-ready".to_owned()),
+                    title: Some("ready issue".to_owned()),
+                    command: None,
+                }],
+                counts: OperatorNextCounts {
+                    ready_issues: 1,
+                    blocked_issues: 1,
+                    deferred_issues: 1,
+                    recommended_actions: 1,
+                },
+            },
+            history: OperatorHistory {
+                recent_transitions: vec![OperatorReceipt {
+                    timestamp: Some("2026-04-07T19:59:00Z".to_owned()),
+                    kind: Some("issue.claim".to_owned()),
+                    issue_id: Some("tusk-ready".to_owned()),
+                    details: Some(json!({"reason": "demo"})),
+                }],
+                counts: OperatorHistoryCounts {
+                    recent_transitions: 1,
+                    available_receipts: 3,
+                },
+            },
+            context: OperatorContext {
+                repo_root: "/tmp/repo".to_owned(),
+                checkout_root: "/tmp/repo".to_owned(),
+                tracker_root: "/tmp/repo".to_owned(),
+                protocol: TrackerProtocol {
+                    endpoint: "/tmp/repo/.beads/tuskd/tuskd.sock".to_owned(),
+                },
+                service: TuskdState {
+                    mode: "idle".to_owned(),
+                    pid: None,
+                },
+                backend_endpoint: Some(OperatorBackendEndpoint {
+                    host: Some("127.0.0.1".to_owned()),
+                    port: Some(32642),
+                }),
+                summary: Some(BoardSummary {
+                    total_issues: Some(10),
+                    open_issues: Some(3),
+                    in_progress_issues: Some(2),
+                    closed_issues: Some(5),
+                    blocked_issues: Some(1),
+                    deferred_issues: Some(1),
+                    ready_issues: Some(1),
+                }),
+                workspaces: vec![WorkspaceEntry {
+                    name: "default".to_owned(),
+                    change_id: Some("abc123".to_owned()),
+                    commit_id: Some("def456".to_owned()),
+                    empty: true,
+                    description: Some("(no description set)".to_owned()),
+                    raw: "default: abc123 def456 (empty) (no description set)".to_owned(),
+                }],
+                counts: OperatorContextCounts { workspaces: 1 },
+            },
+        }
+    }
+
+    #[test]
+    fn home_now_lines_surface_live_and_stale_state() {
+        let rendered = home_now_lines(&sample_operator_snapshot())
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("live lane"));
+        assert!(rendered.contains("claimed issue"));
+        assert!(rendered.contains("stale lanes"));
+        assert!(rendered.contains("[stale_lane]"));
+    }
+
+    #[test]
+    fn home_context_lines_surface_workspace_and_backend_context() {
+        let rendered = home_context_lines(&sample_operator_snapshot())
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("/tmp/repo/.beads/tuskd/tuskd.sock"));
+        assert!(rendered.contains("127.0.0.1:32642"));
+        assert!(rendered.contains("default"));
+        assert!(rendered.contains("abc123"));
+    }
 
     #[test]
     fn board_lines_include_ready_issue_titles() {
