@@ -1,5 +1,6 @@
 pub(crate) mod board;
 pub(crate) mod home;
+pub(crate) mod overlay;
 pub(crate) mod receipts;
 pub(crate) mod tracker;
 
@@ -33,15 +34,7 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
             Style::default().fg(Color::DarkGray),
         ),
         Span::raw("  "),
-        Span::styled(
-            match app.view {
-                ViewMode::Home => "home",
-                ViewMode::Tracker => "tracker",
-                ViewMode::Board => "board",
-                ViewMode::Receipts => "receipts",
-            },
-            Style::default().fg(Color::Yellow),
-        ),
+        Span::styled(app.view.label(), Style::default().fg(Color::Yellow)),
     ]))
     .block(
         ratatui::widgets::Block::default()
@@ -57,26 +50,27 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
         ViewMode::Receipts => receipts::render_receipts(frame, vertical[1], app),
     }
 
+    if app.overlay().is_some() {
+        overlay::render_overlay(frame, vertical[1], app);
+    }
+
     let footer = Paragraph::new(vec![
         Line::from(vec![
             Span::styled("view: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(match app.view {
-                ViewMode::Home => "home",
-                ViewMode::Tracker => "tracker",
-                ViewMode::Board => "board",
-                ViewMode::Receipts => "receipts",
-            }),
+            Span::raw(app.view.label()),
             Span::raw("  "),
             Span::styled(
-                match app.view {
-                    ViewMode::Home => {
-                        "o/t/b/e view  Tab cycle  b board  r refresh  p ping  q quit"
-                    }
-                    ViewMode::Board => {
-                        "o/t/b/e view  Tab cycle  j/k move  c claim  l launch  f finish  r refresh  p ping  q quit"
-                    }
-                    _ => "o/t/b/e view  Tab cycle  r refresh  p ping  q quit",
-                },
+                app.overlay()
+                    .map(|overlay| overlay.footer_hint())
+                    .unwrap_or_else(|| match app.view {
+                        ViewMode::Home => {
+                            "o/t/b/e view  Tab cycle  ? help  b board  r refresh  p ping  q quit"
+                        }
+                        ViewMode::Board => {
+                            "o/t/b/e view  Tab cycle  ? help  j/k move  c claim  l launch  f finish  r refresh  p ping  q quit"
+                        }
+                        _ => "o/t/b/e view  Tab cycle  ? help  r refresh  p ping  q quit",
+                    }),
                 Style::default().fg(Color::DarkGray),
             ),
         ]),

@@ -26,6 +26,7 @@ pub(crate) struct App {
     pub(crate) should_quit: bool,
     pub(crate) view: ViewMode,
     pub(crate) selected_board_item_id: Option<String>,
+    overlay: Option<OverlayState>,
     pub(crate) home: PanelState<OperatorSnapshot>,
     pub(crate) tracker: PanelState<TrackerStatus>,
     pub(crate) board: PanelState<BoardStatus>,
@@ -49,6 +50,7 @@ impl App {
             should_quit: false,
             view: ViewMode::Home,
             selected_board_item_id: None,
+            overlay: None,
             home: PanelState::default(),
             tracker: PanelState::default(),
             board: PanelState::default(),
@@ -146,6 +148,10 @@ impl App {
         self.receipts.value.as_ref().map(receipts_viewmodel)
     }
 
+    pub(crate) fn overlay(&self) -> Option<&OverlayState> {
+        self.overlay.as_ref()
+    }
+
     pub(crate) fn handle_key(&mut self, key: KeyEvent) {
         match self.action_for_key(key) {
             Ok(Some(action)) => self.dispatch_action(action),
@@ -158,6 +164,10 @@ impl App {
         &self,
         key: KeyEvent,
     ) -> std::result::Result<Option<UiAction>, String> {
+        if self.overlay.is_some() {
+            return Ok(self.overlay_action_for_key(key));
+        }
+
         let action = match key.code {
             KeyCode::Char('q') => Some(UiAction::Quit),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -168,6 +178,7 @@ impl App {
             KeyCode::Char('l') if self.view == ViewMode::Board => Some(self.launch_action()?),
             KeyCode::Char('r') => Some(UiAction::Refresh),
             KeyCode::Char('p') => Some(UiAction::Ping),
+            KeyCode::Char('?') | KeyCode::Char('h') => Some(UiAction::ShowHelp),
             KeyCode::Char('o') => Some(UiAction::SwitchView(ViewMode::Home)),
             KeyCode::Char('t') => Some(UiAction::SwitchView(ViewMode::Tracker)),
             KeyCode::Char('b') => Some(UiAction::SwitchView(ViewMode::Board)),
@@ -204,16 +215,39 @@ impl App {
                 self.request_view_refresh("view refresh");
             }
             UiAction::MoveBoardSelection(delta) => self.move_board_selection(delta),
-            UiAction::Claim(issue_id) => self.claim_issue(&issue_id),
-            UiAction::Launch(issue_id, base_rev) => self.launch_issue(&issue_id, &base_rev),
-            UiAction::Finish(issue_id) => self.finish_lane(&issue_id),
+            UiAction::Claim(issue_id) => self.open_claim_overlay(&issue_id),
+            UiAction::Launch(issue_id, base_rev) => self.open_launch_overlay(&issue_id, &base_rev),
+            UiAction::Finish(issue_id) => self.open_finish_overlay(&issue_id),
             UiAction::Inspect(issue_id) => {
                 self.status_line = format!("inspection is not available yet for {issue_id}");
             }
-            UiAction::ShowHelp => {
-                self.status_line = "help overlay is not available yet".to_owned();
+            UiAction::ShowHelp => self.show_help_overlay(),
+            UiAction::ConfirmOverlay => self.confirm_overlay(),
+            UiAction::DismissOverlay => self.dismiss_overlay(),
+        }
+    }
+
+    fn overlay_action_for_key(&self, key: KeyEvent) -> Option<UiAction> {
+        match key.code {
+            KeyCode::Char('q') => Some(UiAction::Quit),
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(UiAction::Quit)
             }
-            UiAction::DismissOverlay => {}
+            KeyCode::Esc => Some(UiAction::DismissOverlay),
+            KeyCode::Char('?') | KeyCode::Char('h')
+                if self.overlay.as_ref().is_some_and(OverlayState::is_help) =>
+            {
+                Some(UiAction::DismissOverlay)
+            }
+            KeyCode::Enter | KeyCode::Char('y')
+                if self.overlay.as_ref().is_some_and(OverlayState::is_confirm) =>
+            {
+                Some(UiAction::ConfirmOverlay)
+            }
+            KeyCode::Char('n') if self.overlay.as_ref().is_some_and(OverlayState::is_confirm) => {
+                Some(UiAction::DismissOverlay)
+            }
+            _ => None,
         }
     }
 
@@ -446,6 +480,102 @@ impl App {
             },
         }
     }
+
+    fn show_help_overlay(&mut self) {
+        self.overlay = Some(OverlayState::help(self.view));
+        self.status_line = "showing help overlay".to_owned();
+    }
+
+    fn dismiss_overlay(&mut self) {
+        if self.overlay.take().is_some() {
+            self.status_line = "dismissed overlay".to_owned();
+        }
+    }
+
+    fn confirm_overlay(&mut self) {
+        let Some(overlay) = self.overlay.take() else {
+            return;
+        };
+
+        match overlay.kind {
+            OverlayKind::Help => {
+                self.status_line = "dismissed help overlay".to_owned();
+            }
+            OverlayKind::Confirm(action) => self.execute_pending_action(action),
+        }
+    }
+
+    fn execute_pending_action(&mut self, action: PendingAction) {
+        match action {
+            PendingAction::Claim { issue_id } => self.claim_issue(&issue_id),
+            PendingAction::Launch { issue_id, base_rev } => self.launch_issue(&issue_id, &base_rev),
+            PendingAction::Finish { issue_id } => self.finish_lane(&issue_id),
+        }
+    }
+
+    fn open_claim_overlay(&mut self, issue_id: &str) {
+        self.overlay = Some(OverlayState::confirm(
+            format!("Claim {issue_id}?"),
+            vec![
+                self.issue_line(issue_id),
+                format!("launch base after claim: {}", self.default_base_rev),
+                "confirm to move this ready issue into claimed state".to_owned(),
+            ],
+            PendingAction::Claim {
+                issue_id: issue_id.to_owned(),
+            },
+        ));
+        self.status_line = format!("confirm claim for {issue_id}");
+    }
+
+    fn open_launch_overlay(&mut self, issue_id: &str, base_rev: &str) {
+        self.overlay = Some(OverlayState::confirm(
+            format!("Launch lane for {issue_id}?"),
+            vec![
+                self.issue_line(issue_id),
+                format!("base revision: {base_rev}"),
+                "confirm to create the workspace lane and move the issue into active work"
+                    .to_owned(),
+            ],
+            PendingAction::Launch {
+                issue_id: issue_id.to_owned(),
+                base_rev: base_rev.to_owned(),
+            },
+        ));
+        self.status_line = format!("confirm launch for {issue_id}");
+    }
+
+    fn open_finish_overlay(&mut self, issue_id: &str) {
+        self.overlay = Some(OverlayState::confirm(
+            format!("Finish lane for {issue_id}?"),
+            vec![
+                self.issue_line(issue_id),
+                "outcome: completed".to_owned(),
+                "confirm to finish the active lane and refresh cockpit state".to_owned(),
+            ],
+            PendingAction::Finish {
+                issue_id: issue_id.to_owned(),
+            },
+        ));
+        self.status_line = format!("confirm finish for {issue_id}");
+    }
+
+    fn issue_line(&self, issue_id: &str) -> String {
+        match self.board_item_title(issue_id) {
+            Some(title) => format!("{issue_id} — {title}"),
+            None => issue_id.to_owned(),
+        }
+    }
+
+    fn board_item_title(&self, issue_id: &str) -> Option<String> {
+        let board = self.board.value.as_ref()?;
+        selected_board_item(board, Some(issue_id)).map(|item| match item {
+            BoardItemRef::ReadyIssue(issue) | BoardItemRef::ClaimedIssue(issue) => {
+                issue.title.clone()
+            }
+            BoardItemRef::ActiveLane(lane) => lane.issue_title.clone(),
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -457,6 +587,15 @@ pub(crate) enum ViewMode {
 }
 
 impl ViewMode {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Home => "home",
+            Self::Tracker => "tracker",
+            Self::Board => "board",
+            Self::Receipts => "receipts",
+        }
+    }
+
     pub(crate) fn next(self) -> Self {
         match self {
             Self::Home => Self::Tracker,
@@ -474,6 +613,98 @@ impl ViewMode {
             Self::Receipts => Self::Board,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OverlayState {
+    pub(crate) title: String,
+    pub(crate) body: Vec<String>,
+    kind: OverlayKind,
+}
+
+impl OverlayState {
+    fn help(view: ViewMode) -> Self {
+        let mut body = vec![
+            "Global".to_owned(),
+            "  o / t / b / e  switch views".to_owned(),
+            "  Tab / Shift+Tab cycle views".to_owned(),
+            "  r              refresh the cockpit".to_owned(),
+            "  p              ping the service".to_owned(),
+            "  q              quit tusk-ui".to_owned(),
+            "  Esc            dismiss this overlay".to_owned(),
+            "".to_owned(),
+        ];
+
+        match view {
+            ViewMode::Home => {
+                body.push("Home".to_owned());
+                body.push("  Read the current briefing, next move, and recent history".to_owned());
+                body.push("  Press b to jump into the board for action".to_owned());
+            }
+            ViewMode::Tracker => {
+                body.push("Tracker".to_owned());
+                body.push("  Inspect service health, leases, and backend state".to_owned());
+            }
+            ViewMode::Board => {
+                body.push("Board".to_owned());
+                body.push("  j / k or Up / Down  move selection".to_owned());
+                body.push("  c                  confirm claim for selected ready issue".to_owned());
+                body.push(
+                    "  l                  confirm lane launch for selected claimed issue"
+                        .to_owned(),
+                );
+                body.push(
+                    "  f                  confirm finish for selected active lane".to_owned(),
+                );
+            }
+            ViewMode::Receipts => {
+                body.push("Receipts".to_owned());
+                body.push("  Review recent authoritative transitions from tuskd".to_owned());
+            }
+        }
+
+        Self {
+            title: format!("Help — {}", view.label()),
+            body,
+            kind: OverlayKind::Help,
+        }
+    }
+
+    fn confirm(title: String, body: Vec<String>, action: PendingAction) -> Self {
+        Self {
+            title,
+            body,
+            kind: OverlayKind::Confirm(action),
+        }
+    }
+
+    pub(crate) fn is_help(&self) -> bool {
+        matches!(self.kind, OverlayKind::Help)
+    }
+
+    pub(crate) fn is_confirm(&self) -> bool {
+        matches!(self.kind, OverlayKind::Confirm(_))
+    }
+
+    pub(crate) fn footer_hint(&self) -> &'static str {
+        match self.kind {
+            OverlayKind::Help => "Esc dismiss  q quit",
+            OverlayKind::Confirm(_) => "Enter/y confirm  n/Esc cancel  q quit",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum OverlayKind {
+    Help,
+    Confirm(PendingAction),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PendingAction {
+    Claim { issue_id: String },
+    Launch { issue_id: String, base_rev: String },
+    Finish { issue_id: String },
 }
 
 #[derive(Debug)]
@@ -847,5 +1078,55 @@ mod tests {
 
         app.dispatch_action(UiAction::CycleView(Direction::Forward));
         assert_eq!(app.view, ViewMode::Receipts);
+    }
+
+    #[test]
+    fn show_help_overlay_opens_and_dismisses_without_switching_views() {
+        let mut app = test_app();
+
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)),
+            Ok(Some(UiAction::ShowHelp))
+        );
+
+        app.dispatch_action(UiAction::ShowHelp);
+        assert!(app.overlay().is_some_and(|overlay| overlay.is_help()));
+        assert_eq!(app.view, ViewMode::Home);
+
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            Ok(None)
+        );
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Ok(Some(UiAction::DismissOverlay))
+        );
+
+        app.dispatch_action(UiAction::DismissOverlay);
+        assert!(app.overlay().is_none());
+    }
+
+    #[test]
+    fn board_actions_open_confirmation_overlay_before_execution() {
+        let mut app = test_app();
+        app.view = ViewMode::Board;
+        app.board.value = Some(board_fixture());
+        app.selected_board_item_id = Some("tusk-a".to_owned());
+
+        app.dispatch_action(UiAction::Claim("tusk-a".to_owned()));
+        assert!(app.overlay().is_some_and(|overlay| overlay.is_confirm()));
+        assert!(
+            app.overlay()
+                .is_some_and(|overlay| overlay.body.iter().any(|line| line.contains("tusk-a")))
+        );
+
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+            Ok(Some(UiAction::ConfirmOverlay))
+        );
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+            Ok(Some(UiAction::DismissOverlay))
+        );
     }
 }

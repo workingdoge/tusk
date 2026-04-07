@@ -21,5 +21,6 @@ pub(crate) enum UiAction {
     Finish(String),
     Inspect(String),
     ShowHelp,
+    ConfirmOverlay,
     DismissOverlay,
 }

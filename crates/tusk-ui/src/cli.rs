@@ -76,6 +76,7 @@ Keys:
   q            quit
   r            refresh all panes
   p            ping the service
+  ? / h        open help overlay
   Tab          focus next view
   Shift+Tab    focus previous view
   o / t / b / e
@@ -85,6 +86,8 @@ Keys:
   c            claim the selected ready issue from the board
   l            launch a lane for the selected claimed issue
   f            finish the selected active lane as completed
+  Enter / y    confirm an overlay action
+  n / Esc      dismiss an overlay
 "
     );
 }
