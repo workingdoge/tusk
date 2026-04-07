@@ -33,7 +33,7 @@ Commands:
   finish-lane   Record a terminal lane outcome without collapsing into issue closure.
   archive-lane  Remove one finished lane from live state once its workspace is gone.
   serve         Serve the local JSON protocol over a Unix socket.
-  query         Query one tuskd protocol request; read kinds are handled locally, actions require a live socket.
+  query         Query one tuskd protocol request; read kinds are handled locally, actions still require a live socket.
 
 Protocol request kinds:
   tracker_status
@@ -1314,6 +1314,71 @@ transition_success_result() {
     --argjson carrier "${carrier_json}" \
     --argjson payload "${payload_json}" \
     '{ok:true, carrier:$carrier, payload:$payload}'
+}
+
+is_action_request_kind() {
+  case "${1:-}" in
+    claim_issue|close_issue|launch_lane|handoff_lane|finish_lane|archive_lane)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+prepare_transition_action() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local kind="$3"
+  local payload_json="$4"
+
+  run_tuskd_core action-prepare \
+    --repo "${repo_root}" \
+    --socket "${socket_path}" \
+    --kind "${kind}" \
+    --payload "${payload_json}"
+}
+
+realize_transition_delegate() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local kind="$3"
+  local carrier_json="$4"
+  local realize_fn=""
+  local action_result=""
+
+  case "${kind}" in
+    claim_issue)
+      realize_fn=realize_claim_issue_transition
+      ;;
+    close_issue)
+      realize_fn=realize_close_issue_transition
+      ;;
+    launch_lane)
+      realize_fn=realize_launch_lane_transition
+      ;;
+    handoff_lane)
+      realize_fn=realize_handoff_lane_transition
+      ;;
+    finish_lane)
+      realize_fn=realize_finish_lane_transition
+      ;;
+    archive_lane)
+      realize_fn=realize_archive_lane_transition
+      ;;
+    *)
+      jq -cn --arg kind "${kind}" '{ok:false, error:{message:"unknown transition kind", kind:$kind}}'
+      return 0
+      ;;
+  esac
+
+  if ! action_result="$("${realize_fn}" "${repo_root}" "${socket_path}" "${carrier_json}")"; then
+    transition_failure_result "${carrier_json}" "transition realization failed"
+    return 0
+  fi
+
+  printf '%s\n' "${action_result}"
 }
 
 upsert_lane_state() {
@@ -3032,77 +3097,46 @@ run_transition_action() {
   local repo_root="$1"
   local socket_path="$2"
   local kind="$3"
-  shift 3
-  local build_fn=""
-  local realize_fn=""
+  local payload_json="$4"
   local lock_dir=""
+  local prepared_result=""
   local carrier_json=""
-  local action_result=""
 
-  case "${kind}" in
-    claim_issue)
-      build_fn=build_claim_issue_carrier
-      realize_fn=realize_claim_issue_transition
-      ;;
-    close_issue)
-      build_fn=build_close_issue_carrier
-      realize_fn=realize_close_issue_transition
-      ;;
-    launch_lane)
-      build_fn=build_launch_lane_carrier
-      realize_fn=realize_launch_lane_transition
-      ;;
-    handoff_lane)
-      build_fn=build_handoff_lane_carrier
-      realize_fn=realize_handoff_lane_transition
-      ;;
-    finish_lane)
-      build_fn=build_finish_lane_carrier
-      realize_fn=realize_finish_lane_transition
-      ;;
-    archive_lane)
-      build_fn=build_archive_lane_carrier
-      realize_fn=realize_archive_lane_transition
-      ;;
-    *)
-      jq -cn --arg kind "${kind}" '{ok:false, error:{message:"unknown transition kind", kind:$kind}}'
-      return 0
-      ;;
-  esac
+  if ! is_action_request_kind "${kind}"; then
+    jq -cn --arg kind "${kind}" '{ok:false, error:{message:"unknown transition kind", kind:$kind}}'
+    return 0
+  fi
 
   ensure_state_files "${repo_root}"
   lock_dir="$(acquire_service_lock "${repo_root}")"
 
-  if ! carrier_json="$("${build_fn}" "${repo_root}" "${socket_path}" "$@")"; then
+  if ! prepared_result="$(prepare_transition_action "${repo_root}" "${socket_path}" "${kind}" "${payload_json}")"; then
     release_service_lock "${lock_dir}"
-    jq -cn --arg kind "${kind}" '{ok:false, error:{message:"failed to build transition carrier", kind:$kind}}'
+    jq -cn --arg kind "${kind}" '{ok:false, error:{message:"failed to prepare transition action", kind:$kind}}'
     return 0
   fi
 
-  if ! jq -e '.admission.admitted == true' >/dev/null <<<"${carrier_json}"; then
+  if ! jq -e '.ok == true' >/dev/null <<<"${prepared_result}"; then
     release_service_lock "${lock_dir}"
-    transition_rejected_result "${carrier_json}"
+    printf '%s\n' "${prepared_result}"
     return 0
   fi
 
-  if ! action_result="$("${realize_fn}" "${repo_root}" "${socket_path}" "${carrier_json}")"; then
-    release_service_lock "${lock_dir}"
-    transition_failure_result "${carrier_json}" "transition realization failed"
-    return 0
-  fi
+  carrier_json="$(jq -c '.delegate.carrier' <<<"${prepared_result}")"
+  prepared_result="$(realize_transition_delegate "${repo_root}" "${socket_path}" "${kind}" "${carrier_json}")"
 
   release_service_lock "${lock_dir}"
-  printf '%s\n' "${action_result}"
+  printf '%s\n' "${prepared_result}"
 }
 
 cmd_transition_action() {
   local repo_root="$1"
   local socket_path="$2"
   local kind="$3"
-  shift 3
+  local payload_json="$4"
   local action_result
 
-  action_result="$(run_transition_action "${repo_root}" "${socket_path}" "${kind}" "$@")"
+  action_result="$(run_transition_action "${repo_root}" "${socket_path}" "${kind}" "${payload_json}")"
   if jq -e '.ok == true' >/dev/null <<<"${action_result}"; then
     jq -c '.payload' <<<"${action_result}"
     return 0
@@ -3142,16 +3176,10 @@ respond_once() {
   local repo_root="$1"
   local socket_path="$2"
   local request_line=""
+  local core_response=""
+  local lock_dir=""
   local request_id=""
   local kind=""
-  local payload="null"
-  local issue_id=""
-  local reason=""
-  local base_rev=""
-  local slug=""
-  local revision=""
-  local outcome=""
-  local note=""
   local action_result=""
 
   if ! IFS= read -r request_line; then
@@ -3180,78 +3208,35 @@ respond_once() {
   request_id="$(printf '%s' "${request_line}" | jq -r '.request_id // ""')"
   kind="$(printf '%s' "${request_line}" | jq -r '.kind // ""')"
 
-  case "${kind}" in
-    tracker_status)
-      payload="$(tracker_status_projection "${repo_root}" "${socket_path}")"
-      ;;
-    board_status)
-      payload="$(board_status_projection "${repo_root}")"
-      ;;
-    receipts_status)
-      payload="$(receipts_status_projection "${repo_root}")"
-      ;;
-    claim_issue)
-      issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
-      action_result="$(run_transition_action "${repo_root}" "${socket_path}" "${kind}" "${issue_id}")"
-      render_transition_request_response "${request_id}" "${kind}" "${action_result}"
-      return 0
-      ;;
-    close_issue)
-      issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
-      reason="$(printf '%s' "${request_line}" | jq -r '.payload.reason // ""')"
-      action_result="$(run_transition_action "${repo_root}" "${socket_path}" "${kind}" "${issue_id}" "${reason}")"
-      render_transition_request_response "${request_id}" "${kind}" "${action_result}"
-      return 0
-      ;;
-    launch_lane)
-      issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
-      base_rev="$(printf '%s' "${request_line}" | jq -r '.payload.base_rev // ""')"
-      slug="$(printf '%s' "${request_line}" | jq -r '.payload.slug // ""')"
-      action_result="$(run_transition_action "${repo_root}" "${socket_path}" "${kind}" "${issue_id}" "${base_rev}" "${slug}")"
-      render_transition_request_response "${request_id}" "${kind}" "${action_result}"
-      return 0
-      ;;
-    handoff_lane)
-      issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
-      revision="$(printf '%s' "${request_line}" | jq -r '.payload.revision // ""')"
-      note="$(printf '%s' "${request_line}" | jq -r '.payload.note // ""')"
-      action_result="$(run_transition_action "${repo_root}" "${socket_path}" "${kind}" "${issue_id}" "${revision}" "${note}")"
-      render_transition_request_response "${request_id}" "${kind}" "${action_result}"
-      return 0
-      ;;
-    finish_lane)
-      issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
-      outcome="$(printf '%s' "${request_line}" | jq -r '.payload.outcome // ""')"
-      note="$(printf '%s' "${request_line}" | jq -r '.payload.note // ""')"
-      action_result="$(run_transition_action "${repo_root}" "${socket_path}" "${kind}" "${issue_id}" "${outcome}" "${note}")"
-      render_transition_request_response "${request_id}" "${kind}" "${action_result}"
-      return 0
-      ;;
-    archive_lane)
-      issue_id="$(printf '%s' "${request_line}" | jq -r '.payload.issue_id // ""')"
-      note="$(printf '%s' "${request_line}" | jq -r '.payload.note // ""')"
-      action_result="$(run_transition_action "${repo_root}" "${socket_path}" "${kind}" "${issue_id}" "${note}")"
-      render_transition_request_response "${request_id}" "${kind}" "${action_result}"
-      return 0
-      ;;
-    ping)
-      payload="$(jq -cn --arg repo_root "${repo_root}" --arg timestamp "$(now_iso8601)" '{repo_root:$repo_root, timestamp:$timestamp, status:"ok"}')"
-      ;;
-    *)
-      jq -cn \
-        --arg request_id "${request_id}" \
-        --arg kind "${kind}" \
-        --arg message "unknown request kind" \
-        '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message}}'
-      return 0
-      ;;
-  esac
+  if is_action_request_kind "${kind}"; then
+    ensure_state_files "${repo_root}"
+    lock_dir="$(acquire_service_lock "${repo_root}")"
+  fi
+
+  if core_response="$(printf '%s\n' "${request_line}" | run_tuskd_core respond --repo "${repo_root}" --socket "${socket_path}" 2>/dev/null)"; then
+    if [ -n "${lock_dir}" ]; then
+      if jq -e '.delegate.kind? != null' >/dev/null <<<"${core_response}"; then
+        action_result="$(realize_transition_delegate "${repo_root}" "${socket_path}" "$(jq -r '.delegate.kind' <<<"${core_response}")" "$(jq -c '.delegate.carrier' <<<"${core_response}")")"
+        release_service_lock "${lock_dir}"
+        render_transition_request_response "${request_id}" "${kind}" "${action_result}"
+        return 0
+      fi
+      release_service_lock "${lock_dir}"
+    fi
+
+    printf '%s\n' "${core_response}"
+    return 0
+  fi
+
+  if [ -n "${lock_dir}" ]; then
+    release_service_lock "${lock_dir}"
+  fi
 
   jq -cn \
     --arg request_id "${request_id}" \
     --arg kind "${kind}" \
-    --argjson payload "${payload}" \
-    '{request_id:$request_id, ok:true, kind:$kind, payload:$payload}'
+    --arg message "unknown request kind" \
+    '{request_id:$request_id, ok:false, kind:$kind, error:{message:$message}}'
 }
 
 cmd_ensure() {
@@ -3286,7 +3271,7 @@ cmd_claim_issue() {
   local repo_root="$1"
   local socket_path="$2"
   local issue_id="$3"
-  cmd_transition_action "${repo_root}" "${socket_path}" "claim_issue" "${issue_id}"
+  cmd_transition_action "${repo_root}" "${socket_path}" "claim_issue" "$(jq -cn --arg issue_id "${issue_id}" '{issue_id:$issue_id}')"
 }
 
 cmd_close_issue() {
@@ -3294,7 +3279,7 @@ cmd_close_issue() {
   local socket_path="$2"
   local issue_id="$3"
   local reason="$4"
-  cmd_transition_action "${repo_root}" "${socket_path}" "close_issue" "${issue_id}" "${reason}"
+  cmd_transition_action "${repo_root}" "${socket_path}" "close_issue" "$(jq -cn --arg issue_id "${issue_id}" --arg reason "${reason}" '{issue_id:$issue_id, reason:$reason}')"
 }
 
 cmd_launch_lane() {
@@ -3303,7 +3288,7 @@ cmd_launch_lane() {
   local issue_id="$3"
   local base_rev="$4"
   local slug="${5:-}"
-  cmd_transition_action "${repo_root}" "${socket_path}" "launch_lane" "${issue_id}" "${base_rev}" "${slug}"
+  cmd_transition_action "${repo_root}" "${socket_path}" "launch_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg base_rev "${base_rev}" --arg slug "${slug}" '{issue_id:$issue_id, base_rev:$base_rev, slug:$slug}')"
 }
 
 cmd_handoff_lane() {
@@ -3312,7 +3297,7 @@ cmd_handoff_lane() {
   local issue_id="$3"
   local revision="$4"
   local note="${5:-}"
-  cmd_transition_action "${repo_root}" "${socket_path}" "handoff_lane" "${issue_id}" "${revision}" "${note}"
+  cmd_transition_action "${repo_root}" "${socket_path}" "handoff_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg revision "${revision}" --arg note "${note}" '{issue_id:$issue_id, revision:$revision, note:$note}')"
 }
 
 cmd_finish_lane() {
@@ -3321,7 +3306,7 @@ cmd_finish_lane() {
   local issue_id="$3"
   local outcome="$4"
   local note="${5:-}"
-  cmd_transition_action "${repo_root}" "${socket_path}" "finish_lane" "${issue_id}" "${outcome}" "${note}"
+  cmd_transition_action "${repo_root}" "${socket_path}" "finish_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg outcome "${outcome}" --arg note "${note}" '{issue_id:$issue_id, outcome:$outcome, note:$note}')"
 }
 
 cmd_archive_lane() {
@@ -3329,7 +3314,7 @@ cmd_archive_lane() {
   local socket_path="$2"
   local issue_id="$3"
   local note="${4:-}"
-  cmd_transition_action "${repo_root}" "${socket_path}" "archive_lane" "${issue_id}" "${note}"
+  cmd_transition_action "${repo_root}" "${socket_path}" "archive_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg note "${note}" '{issue_id:$issue_id, note:$note}')"
 }
 
 cmd_serve() {

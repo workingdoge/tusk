@@ -21,6 +21,7 @@ Usage:
   tuskd-core receipts-status --repo PATH
   tuskd-core lane-state <upsert|remove> ...
   tuskd-core receipt append ...
+  tuskd-core action-prepare --repo PATH [--socket PATH] --kind KIND --payload JSON
   tuskd-core query --repo PATH [--socket PATH] --kind KIND [--request-id ID] [--payload JSON]
   tuskd-core respond --repo PATH [--socket PATH]
   tuskd-core help
@@ -33,8 +34,9 @@ Commands:
   receipts-status Publish the current receipt projection.
   lane-state      Mutate repo-local lane state through Rust-owned file updates.
   receipt         Append one receipt through the Rust-owned audit seam.
+  action-prepare  Build one write-side carrier and admission result.
   query           Render one read-side protocol response envelope.
-  respond         Read one protocol request from stdin and answer read-side kinds.
+  respond         Read one protocol request from stdin and answer read kinds or write-side delegation.
   help            Show this help text.
 ";
 
@@ -1230,6 +1232,1067 @@ fn query_response(
     })))
 }
 
+#[derive(Clone, Copy)]
+enum ActionKind {
+    ClaimIssue,
+    CloseIssue,
+    LaunchLane,
+    HandoffLane,
+    FinishLane,
+    ArchiveLane,
+}
+
+impl ActionKind {
+    fn parse(kind: &str) -> Option<Self> {
+        match kind {
+            "claim_issue" => Some(Self::ClaimIssue),
+            "close_issue" => Some(Self::CloseIssue),
+            "launch_lane" => Some(Self::LaunchLane),
+            "handoff_lane" => Some(Self::HandoffLane),
+            "finish_lane" => Some(Self::FinishLane),
+            "archive_lane" => Some(Self::ArchiveLane),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaimIssue => "claim_issue",
+            Self::CloseIssue => "close_issue",
+            Self::LaunchLane => "launch_lane",
+            Self::HandoffLane => "handoff_lane",
+            Self::FinishLane => "finish_lane",
+            Self::ArchiveLane => "archive_lane",
+        }
+    }
+}
+
+fn current_lanes_array(repo_root: &Path) -> Vec<Value> {
+    match current_lanes(repo_root) {
+        Value::Array(items) => items,
+        _ => Vec::new(),
+    }
+}
+
+fn current_lane_for_issue(repo_root: &Path, issue_id: &str) -> Value {
+    current_lanes_array(repo_root)
+        .into_iter()
+        .find(|lane| lane.get("issue_id").and_then(Value::as_str) == Some(issue_id))
+        .unwrap_or(Value::Null)
+}
+
+fn issue_receipt_refs(repo_root: &Path, issue_id: &str) -> Value {
+    if issue_id.is_empty() {
+        return json!([]);
+    }
+
+    let path = receipts_path(repo_root);
+    let Ok(contents) = fs::read_to_string(path) else {
+        return json!([]);
+    };
+
+    let mut refs = Vec::new();
+    for line in contents.lines().filter(|line| !line.is_empty()) {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value
+            .get("payload")
+            .and_then(|payload| payload.get("issue_id"))
+            .and_then(Value::as_str)
+            == Some(issue_id)
+        {
+            refs.push(json!({
+                "timestamp": value.get("timestamp").cloned().unwrap_or(Value::Null),
+                "kind": value.get("kind").cloned().unwrap_or(Value::Null),
+            }));
+        }
+    }
+
+    Value::Array(refs)
+}
+
+fn issue_snapshot_from_result(result: &Value) -> Value {
+    if result.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Value::Null;
+    }
+
+    result
+        .get("output")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn resolve_revision_commit(repo_root: &Path, revision: &str) -> Result<Value, String> {
+    let repo_root_str = repo_root.to_string_lossy().into_owned();
+    let (exit_code, output) = run_in_repo_capture(
+        repo_root,
+        "jj",
+        [
+            "--repository",
+            repo_root_str.as_str(),
+            "log",
+            "-r",
+            revision,
+            "--no-graph",
+            "-T",
+            "commit_id ++ \"\\n\"",
+        ],
+    )?;
+
+    let commit = output
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_string())
+        .unwrap_or_default();
+
+    Ok(json!({
+        "ok": exit_code == 0 && !commit.is_empty(),
+        "revision": revision,
+        "output": if output.is_empty() { Value::Null } else { Value::String(output) },
+        "commit": if commit.is_empty() { Value::Null } else { Value::String(commit) },
+    }))
+}
+
+fn workspace_root_dir(repo_root: &Path) -> PathBuf {
+    repo_root.join(".jj-workspaces")
+}
+
+fn slugify_fragment(input: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+
+    for ch in input.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_dash = false;
+        } else if !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+
+    while out.ends_with('-') {
+        out.pop();
+    }
+
+    out
+}
+
+fn request_id_seed() -> String {
+    format!("{}-{}", current_pid(), Utc::now().timestamp())
+}
+
+fn new_transition_carrier(repo_root: &Path, kind: &str, payload: Value) -> Value {
+    json!({
+        "generated_at": now_iso8601(),
+        "repo": {
+            "root": repo_root.to_string_lossy().into_owned(),
+            "service_key": service_key(repo_root),
+            "workspace_root": workspace_root_dir(repo_root).to_string_lossy().into_owned(),
+            "request_id": request_id_seed(),
+        },
+        "tracker": Value::Null,
+        "service": Value::Null,
+        "issue": Value::Null,
+        "lane": Value::Null,
+        "workspace": Value::Null,
+        "witnesses": [],
+        "intent": {
+            "kind": kind,
+            "payload": payload,
+        },
+        "admission": Value::Null,
+        "realization": Value::Null,
+        "receipts": {
+            "prior": [],
+            "emitted": Value::Null,
+        },
+    })
+}
+
+fn carrier_set_field(carrier: &mut Value, field: &str, value: Value) {
+    if let Some(object) = carrier.as_object_mut() {
+        object.insert(field.to_string(), value);
+    }
+}
+
+fn carrier_set_receipt_refs(carrier: &mut Value, prior: Value) {
+    if let Some(receipts) = carrier.get_mut("receipts").and_then(Value::as_object_mut) {
+        receipts.insert("prior".to_string(), prior);
+    }
+}
+
+fn carrier_add_witness(carrier: &mut Value, kind: &str, ok: bool, message: &str, details: Value) {
+    if let Some(witnesses) = carrier.get_mut("witnesses").and_then(Value::as_array_mut) {
+        witnesses.push(json!({
+            "kind": kind,
+            "ok": ok,
+            "message": if message.is_empty() { Value::Null } else { Value::String(message.to_string()) },
+            "details": details,
+        }));
+    }
+}
+
+fn carrier_set_admission(
+    carrier: &mut Value,
+    admitted: bool,
+    reason: Option<&str>,
+    consulted: &[&str],
+) {
+    carrier_set_field(
+        carrier,
+        "admission",
+        json!({
+            "admitted": admitted,
+            "reason": reason.map(Value::from).unwrap_or(Value::Null),
+            "consulted": consulted,
+        }),
+    );
+}
+
+fn transition_service_snapshot(repo_root: &Path, socket_path: &Path) -> Value {
+    json!({
+        "socket_path": socket_path.to_string_lossy().into_owned(),
+        "record": read_json_file(&service_path(repo_root)),
+        "leases": current_leases(repo_root),
+        "backend": backend_runtime_snapshot(repo_root),
+    })
+}
+
+fn transition_workspace_snapshot(
+    workspace_name: &str,
+    workspace_path: &Path,
+    base_rev: Option<&str>,
+    base_commit: Option<&str>,
+    revision: Option<&str>,
+) -> Value {
+    json!({
+        "name": if workspace_name.is_empty() { Value::Null } else { Value::String(workspace_name.to_string()) },
+        "path": if workspace_path.as_os_str().is_empty() { Value::Null } else { Value::String(workspace_path.to_string_lossy().into_owned()) },
+        "exists": !workspace_path.as_os_str().is_empty() && workspace_path.exists(),
+        "base_rev": base_rev.map(Value::from).unwrap_or(Value::Null),
+        "base_commit": base_commit.map(Value::from).unwrap_or(Value::Null),
+        "revision": revision.map(Value::from).unwrap_or(Value::Null),
+    })
+}
+
+fn payload_string(payload: &Value, field: &str) -> String {
+    payload
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn build_claim_issue_carrier(
+    repo_root: &Path,
+    socket_path: &Path,
+    payload: &Value,
+) -> Result<Value, String> {
+    let issue_id = payload_string(payload, "issue_id");
+    let mut carrier =
+        new_transition_carrier(repo_root, "claim_issue", json!({ "issue_id": issue_id }));
+    carrier_set_field(
+        &mut carrier,
+        "service",
+        transition_service_snapshot(repo_root, socket_path),
+    );
+    carrier_set_receipt_refs(&mut carrier, issue_receipt_refs(repo_root, &issue_id));
+
+    let issue_show_result = if issue_id.is_empty() {
+        Value::Null
+    } else {
+        run_tracker_json_command_in_repo(
+            repo_root,
+            "tracker_issue_show",
+            ["issue", "show", issue_id.as_str()],
+        )?
+    };
+    let ready_result = if issue_id.is_empty() {
+        Value::Null
+    } else {
+        run_tracker_json_command_in_repo(repo_root, "tracker_ready", ["ready"])?
+    };
+
+    carrier_set_field(
+        &mut carrier,
+        "tracker",
+        json!({ "issue_show": issue_show_result, "ready": ready_result }),
+    );
+
+    let issue_json =
+        issue_snapshot_from_result(carrier.get("tracker").unwrap().get("issue_show").unwrap());
+    let issue_exists = !issue_json.is_null();
+    let issue_status = issue_json
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if issue_exists {
+        carrier_set_field(&mut carrier, "issue", issue_json.clone());
+    }
+
+    let ready_claimable = carrier
+        .get("tracker")
+        .and_then(|tracker| tracker.get("ready"))
+        .and_then(|ready| ready.get("ok"))
+        .and_then(Value::as_bool)
+        == Some(true)
+        && carrier
+            .get("tracker")
+            .and_then(|tracker| tracker.get("ready"))
+            .and_then(|ready| ready.get("output"))
+            .and_then(Value::as_array)
+            .map(|issues| {
+                issues
+                    .iter()
+                    .any(|issue| issue.get("id").and_then(Value::as_str) == Some(issue_id.as_str()))
+            })
+            .unwrap_or(false);
+    let ready_details = carrier
+        .get("tracker")
+        .and_then(|tracker| tracker.get("ready"))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    carrier_add_witness(
+        &mut carrier,
+        "issue_id",
+        !issue_id.is_empty(),
+        "issue_id is required",
+        json!({ "issue_id": issue_id }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "issue_exists",
+        issue_exists,
+        "issue must exist",
+        json!({ "issue": issue_json }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "issue_status_open",
+        issue_status == "open",
+        "issue must be open before claim",
+        json!({ "status": issue_status }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "issue_ready",
+        ready_claimable,
+        "issue must be ready to claim",
+        json!({ "ready": ready_details }),
+    );
+
+    let reason = if issue_id.is_empty() {
+        Some("claim_issue requires issue_id")
+    } else if !issue_exists {
+        Some("claim_issue requires an existing issue")
+    } else if issue_status != "open" {
+        Some("claim_issue requires an open issue")
+    } else if !ready_claimable {
+        Some("claim_issue requires a ready issue")
+    } else {
+        None
+    };
+
+    carrier_set_admission(
+        &mut carrier,
+        reason.is_none(),
+        reason,
+        &["structural", "runtime"],
+    );
+    Ok(carrier)
+}
+
+fn build_close_issue_carrier(
+    repo_root: &Path,
+    socket_path: &Path,
+    payload: &Value,
+) -> Result<Value, String> {
+    let issue_id = payload_string(payload, "issue_id");
+    let reason = payload_string(payload, "reason");
+    let mut carrier = new_transition_carrier(
+        repo_root,
+        "close_issue",
+        json!({ "issue_id": issue_id, "reason": reason }),
+    );
+    carrier_set_field(
+        &mut carrier,
+        "service",
+        transition_service_snapshot(repo_root, socket_path),
+    );
+    carrier_set_receipt_refs(&mut carrier, issue_receipt_refs(repo_root, &issue_id));
+
+    let issue_show_result = if issue_id.is_empty() {
+        Value::Null
+    } else {
+        run_tracker_json_command_in_repo(
+            repo_root,
+            "tracker_issue_show",
+            ["issue", "show", issue_id.as_str()],
+        )?
+    };
+    let lane_json = if issue_id.is_empty() {
+        Value::Null
+    } else {
+        current_lane_for_issue(repo_root, &issue_id)
+    };
+
+    carrier_set_field(
+        &mut carrier,
+        "tracker",
+        json!({ "issue_show": issue_show_result }),
+    );
+    let issue_json =
+        issue_snapshot_from_result(carrier.get("tracker").unwrap().get("issue_show").unwrap());
+    let issue_exists = !issue_json.is_null();
+    let issue_status = issue_json
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if issue_exists {
+        carrier_set_field(&mut carrier, "issue", issue_json.clone());
+    }
+    let no_live_lane = lane_json.is_null();
+    if !no_live_lane {
+        carrier_set_field(&mut carrier, "lane", lane_json.clone());
+    }
+
+    carrier_add_witness(
+        &mut carrier,
+        "issue_id",
+        !issue_id.is_empty(),
+        "issue_id is required",
+        json!({ "issue_id": issue_id }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "close_reason",
+        !reason.is_empty(),
+        "close reason is required",
+        json!({ "reason": reason }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "issue_exists",
+        issue_exists,
+        "issue must exist",
+        json!({ "issue": issue_json }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "issue_not_closed",
+        issue_status != "closed",
+        "issue must not already be closed",
+        json!({ "status": issue_status }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "no_live_lane",
+        no_live_lane,
+        "close_issue requires the live lane to be archived first",
+        json!({ "lane": lane_json }),
+    );
+
+    let admission_reason = if issue_id.is_empty() {
+        Some("close_issue requires issue_id")
+    } else if reason.is_empty() {
+        Some("close_issue requires reason")
+    } else if !issue_exists {
+        Some("close_issue requires an existing issue")
+    } else if issue_status == "closed" {
+        Some("close_issue requires an open or in-progress issue")
+    } else if !no_live_lane {
+        Some("close_issue requires the live lane to be archived first")
+    } else {
+        None
+    };
+
+    carrier_set_admission(
+        &mut carrier,
+        admission_reason.is_none(),
+        admission_reason,
+        &["structural", "authority"],
+    );
+    Ok(carrier)
+}
+
+fn build_launch_lane_carrier(
+    repo_root: &Path,
+    socket_path: &Path,
+    payload: &Value,
+) -> Result<Value, String> {
+    let issue_id = payload_string(payload, "issue_id");
+    let base_rev = payload_string(payload, "base_rev");
+    let slug_arg = payload_string(payload, "slug");
+    let mut carrier = new_transition_carrier(
+        repo_root,
+        "launch_lane",
+        json!({ "issue_id": issue_id, "base_rev": base_rev, "slug": slug_arg }),
+    );
+    carrier_set_field(
+        &mut carrier,
+        "service",
+        transition_service_snapshot(repo_root, socket_path),
+    );
+    carrier_set_receipt_refs(&mut carrier, issue_receipt_refs(repo_root, &issue_id));
+
+    let issue_show_result = if issue_id.is_empty() {
+        Value::Null
+    } else {
+        run_tracker_json_command_in_repo(
+            repo_root,
+            "tracker_issue_show",
+            ["issue", "show", issue_id.as_str()],
+        )?
+    };
+    let lane_json = if issue_id.is_empty() {
+        Value::Null
+    } else {
+        current_lane_for_issue(repo_root, &issue_id)
+    };
+
+    let issue_json = issue_snapshot_from_result(&issue_show_result);
+    let issue_exists = !issue_json.is_null();
+    let issue_status = issue_json
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let issue_title = issue_json
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if issue_exists {
+        carrier_set_field(&mut carrier, "issue", issue_json.clone());
+    }
+
+    let no_live_lane = lane_json.is_null();
+    if !no_live_lane {
+        carrier_set_field(&mut carrier, "lane", lane_json.clone());
+    }
+
+    let mut slug = slug_arg.clone();
+    if slug.is_empty() {
+        slug = slugify_fragment(&issue_title);
+    }
+    if slug.is_empty() {
+        slug = "lane".to_string();
+    }
+
+    let workspace_name = format!("{issue_id}-{slug}");
+    let workspace_path = workspace_root_dir(repo_root).join(&workspace_name);
+    let workspace_absent = !workspace_path.exists();
+
+    let base_lookup_json = if base_rev.is_empty() {
+        Value::Null
+    } else {
+        resolve_revision_commit(repo_root, &base_rev)?
+    };
+    let base_commit = base_lookup_json
+        .get("commit")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    carrier_set_field(
+        &mut carrier,
+        "tracker",
+        json!({ "issue_show": issue_show_result }),
+    );
+    carrier_set_field(
+        &mut carrier,
+        "workspace",
+        transition_workspace_snapshot(
+            &workspace_name,
+            &workspace_path,
+            if base_rev.is_empty() {
+                None
+            } else {
+                Some(base_rev.as_str())
+            },
+            if base_commit.is_empty() {
+                None
+            } else {
+                Some(base_commit.as_str())
+            },
+            None,
+        ),
+    );
+
+    carrier_add_witness(
+        &mut carrier,
+        "issue_id",
+        !issue_id.is_empty(),
+        "issue_id is required",
+        json!({ "issue_id": issue_id }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "base_rev",
+        !base_rev.is_empty(),
+        "base_rev is required",
+        json!({ "base_rev": base_rev }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "issue_exists",
+        issue_exists,
+        "issue must exist",
+        json!({ "issue": issue_json }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "issue_in_progress",
+        issue_status == "in_progress",
+        "launch_lane requires a claimed in_progress issue",
+        json!({ "status": issue_status }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "no_live_lane",
+        no_live_lane,
+        "launch_lane requires no existing live lane",
+        json!({ "lane": lane_json }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "base_rev_resolves",
+        base_lookup_json.get("ok").and_then(Value::as_bool) == Some(true),
+        "base_rev must resolve to a commit",
+        json!({ "base_lookup": base_lookup_json }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "workspace_absent",
+        workspace_absent,
+        "workspace path must be absent before launch",
+        json!({ "workspace_name": workspace_name, "workspace_path": workspace_path.to_string_lossy().into_owned() }),
+    );
+
+    let admission_reason = if issue_id.is_empty() {
+        Some("launch_lane requires issue_id")
+    } else if base_rev.is_empty() {
+        Some("launch_lane requires base_rev")
+    } else if !issue_exists {
+        Some("launch_lane requires an existing issue")
+    } else if issue_status != "in_progress" {
+        Some("launch_lane requires a claimed in_progress issue")
+    } else if !no_live_lane {
+        Some("launch_lane requires no existing live lane")
+    } else if base_lookup_json.get("ok").and_then(Value::as_bool) != Some(true) {
+        Some("base_rev did not resolve to a commit")
+    } else if !workspace_absent {
+        Some("workspace path already exists")
+    } else {
+        None
+    };
+
+    carrier_set_admission(
+        &mut carrier,
+        admission_reason.is_none(),
+        admission_reason,
+        &["structural", "runtime"],
+    );
+    Ok(carrier)
+}
+
+fn build_handoff_lane_carrier(
+    repo_root: &Path,
+    socket_path: &Path,
+    payload: &Value,
+) -> Result<Value, String> {
+    let issue_id = payload_string(payload, "issue_id");
+    let revision = payload_string(payload, "revision");
+    let note = payload_string(payload, "note");
+    let mut carrier = new_transition_carrier(
+        repo_root,
+        "handoff_lane",
+        json!({ "issue_id": issue_id, "revision": revision, "note": note }),
+    );
+    carrier_set_field(
+        &mut carrier,
+        "service",
+        transition_service_snapshot(repo_root, socket_path),
+    );
+    carrier_set_receipt_refs(&mut carrier, issue_receipt_refs(repo_root, &issue_id));
+
+    let lane_json = if issue_id.is_empty() {
+        Value::Null
+    } else {
+        current_lane_for_issue(repo_root, &issue_id)
+    };
+    let lane_exists = !lane_json.is_null();
+    let stored_status = lane_json
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if lane_exists {
+        carrier_set_field(&mut carrier, "lane", lane_json.clone());
+    }
+
+    let revision_lookup_json = if revision.is_empty() {
+        Value::Null
+    } else {
+        resolve_revision_commit(repo_root, &revision)?
+    };
+    let workspace_path = lane_json
+        .get("workspace_path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let revision_commit = revision_lookup_json
+        .get("commit")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    carrier_set_field(
+        &mut carrier,
+        "workspace",
+        transition_workspace_snapshot(
+            "",
+            &workspace_path,
+            None,
+            None,
+            if revision_commit.is_empty() {
+                None
+            } else {
+                Some(revision_commit)
+            },
+        ),
+    );
+
+    carrier_add_witness(
+        &mut carrier,
+        "issue_id",
+        !issue_id.is_empty(),
+        "issue_id is required",
+        json!({ "issue_id": issue_id }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "revision",
+        !revision.is_empty(),
+        "revision is required",
+        json!({ "revision": revision }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "lane_exists",
+        lane_exists,
+        "handoff_lane requires an existing lane record",
+        json!({ "lane": lane_json }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "lane_handoffable",
+        stored_status != "finished",
+        "handoff_lane requires a non-finished lane",
+        json!({ "status": stored_status }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "revision_resolves",
+        revision_lookup_json.get("ok").and_then(Value::as_bool) == Some(true),
+        "revision must resolve to a commit",
+        json!({ "revision_lookup": revision_lookup_json }),
+    );
+
+    let admission_reason = if issue_id.is_empty() {
+        Some("handoff_lane requires issue_id")
+    } else if revision.is_empty() {
+        Some("handoff_lane requires revision")
+    } else if !lane_exists {
+        Some("handoff_lane requires an existing lane record")
+    } else if stored_status == "finished" {
+        Some("handoff_lane requires a non-finished lane")
+    } else if revision_lookup_json.get("ok").and_then(Value::as_bool) != Some(true) {
+        Some("revision did not resolve to a commit")
+    } else {
+        None
+    };
+
+    carrier_set_admission(
+        &mut carrier,
+        admission_reason.is_none(),
+        admission_reason,
+        &["structural", "runtime"],
+    );
+    Ok(carrier)
+}
+
+fn build_finish_lane_carrier(
+    repo_root: &Path,
+    socket_path: &Path,
+    payload: &Value,
+) -> Result<Value, String> {
+    let issue_id = payload_string(payload, "issue_id");
+    let outcome = payload_string(payload, "outcome");
+    let note = payload_string(payload, "note");
+    let mut carrier = new_transition_carrier(
+        repo_root,
+        "finish_lane",
+        json!({ "issue_id": issue_id, "outcome": outcome, "note": note }),
+    );
+    carrier_set_field(
+        &mut carrier,
+        "service",
+        transition_service_snapshot(repo_root, socket_path),
+    );
+    carrier_set_receipt_refs(&mut carrier, issue_receipt_refs(repo_root, &issue_id));
+
+    let lane_json = if issue_id.is_empty() {
+        Value::Null
+    } else {
+        current_lane_for_issue(repo_root, &issue_id)
+    };
+    let lane_exists = !lane_json.is_null();
+    let stored_status = lane_json
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let finishable = stored_status == "launched" || stored_status == "handoff";
+    if lane_exists {
+        carrier_set_field(&mut carrier, "lane", lane_json.clone());
+    }
+
+    carrier_add_witness(
+        &mut carrier,
+        "issue_id",
+        !issue_id.is_empty(),
+        "issue_id is required",
+        json!({ "issue_id": issue_id }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "outcome",
+        !outcome.is_empty(),
+        "outcome is required",
+        json!({ "outcome": outcome }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "lane_exists",
+        lane_exists,
+        "finish_lane requires an existing lane record",
+        json!({ "lane": lane_json }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "lane_finishable",
+        finishable,
+        "finish_lane requires a launched or handed-off lane",
+        json!({ "status": stored_status }),
+    );
+
+    let admission_reason = if issue_id.is_empty() {
+        Some("finish_lane requires issue_id")
+    } else if outcome.is_empty() {
+        Some("finish_lane requires outcome")
+    } else if !lane_exists {
+        Some("finish_lane requires an existing lane record")
+    } else if !finishable {
+        Some("finish_lane requires a launched or handed-off lane")
+    } else {
+        None
+    };
+
+    carrier_set_admission(
+        &mut carrier,
+        admission_reason.is_none(),
+        admission_reason,
+        &["structural", "runtime"],
+    );
+    Ok(carrier)
+}
+
+fn build_archive_lane_carrier(
+    repo_root: &Path,
+    socket_path: &Path,
+    payload: &Value,
+) -> Result<Value, String> {
+    let issue_id = payload_string(payload, "issue_id");
+    let note = payload_string(payload, "note");
+    let mut carrier = new_transition_carrier(
+        repo_root,
+        "archive_lane",
+        json!({ "issue_id": issue_id, "note": note }),
+    );
+    carrier_set_field(
+        &mut carrier,
+        "service",
+        transition_service_snapshot(repo_root, socket_path),
+    );
+    carrier_set_receipt_refs(&mut carrier, issue_receipt_refs(repo_root, &issue_id));
+
+    let lane_json = if issue_id.is_empty() {
+        Value::Null
+    } else {
+        current_lane_for_issue(repo_root, &issue_id)
+    };
+    let lane_exists = !lane_json.is_null();
+    let stored_status = lane_json
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let workspace_path = lane_json
+        .get("workspace_path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let workspace_removed = workspace_path.as_os_str().is_empty() || !workspace_path.is_dir();
+    if lane_exists {
+        carrier_set_field(&mut carrier, "lane", lane_json.clone());
+    }
+
+    carrier_set_field(
+        &mut carrier,
+        "workspace",
+        transition_workspace_snapshot("", &workspace_path, None, None, None),
+    );
+
+    carrier_add_witness(
+        &mut carrier,
+        "issue_id",
+        !issue_id.is_empty(),
+        "issue_id is required",
+        json!({ "issue_id": issue_id }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "lane_exists",
+        lane_exists,
+        "archive_lane requires an existing lane record",
+        json!({ "lane": lane_json }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "lane_finished",
+        stored_status == "finished",
+        "archive_lane requires a finished lane",
+        json!({ "status": stored_status }),
+    );
+    carrier_add_witness(
+        &mut carrier,
+        "workspace_removed",
+        workspace_removed,
+        "archive_lane requires the lane workspace to be removed first",
+        json!({ "workspace_path": workspace_path.to_string_lossy().into_owned() }),
+    );
+
+    let admission_reason = if issue_id.is_empty() {
+        Some("archive_lane requires issue_id")
+    } else if !lane_exists {
+        Some("archive_lane requires an existing lane record")
+    } else if stored_status != "finished" {
+        Some("archive_lane requires a finished lane")
+    } else if !workspace_removed {
+        Some("archive_lane requires the lane workspace to be removed first")
+    } else {
+        None
+    };
+
+    carrier_set_admission(
+        &mut carrier,
+        admission_reason.is_none(),
+        admission_reason,
+        &["structural", "runtime", "replay"],
+    );
+    Ok(carrier)
+}
+
+fn build_action_carrier(
+    repo_root: &Path,
+    socket_path: &Path,
+    action_kind: ActionKind,
+    payload: &Value,
+) -> Result<Value, String> {
+    match action_kind {
+        ActionKind::ClaimIssue => build_claim_issue_carrier(repo_root, socket_path, payload),
+        ActionKind::CloseIssue => build_close_issue_carrier(repo_root, socket_path, payload),
+        ActionKind::LaunchLane => build_launch_lane_carrier(repo_root, socket_path, payload),
+        ActionKind::HandoffLane => build_handoff_lane_carrier(repo_root, socket_path, payload),
+        ActionKind::FinishLane => build_finish_lane_carrier(repo_root, socket_path, payload),
+        ActionKind::ArchiveLane => build_archive_lane_carrier(repo_root, socket_path, payload),
+    }
+}
+
+fn action_prepare_result(
+    repo_root: &Path,
+    socket_path: &Path,
+    kind: &str,
+    payload: &Value,
+) -> Result<Option<Value>, String> {
+    let Some(action_kind) = ActionKind::parse(kind) else {
+        return Ok(None);
+    };
+
+    let carrier = build_action_carrier(repo_root, socket_path, action_kind, payload)?;
+    let admitted = carrier
+        .get("admission")
+        .and_then(|admission| admission.get("admitted"))
+        .and_then(Value::as_bool)
+        == Some(true);
+
+    if admitted {
+        Ok(Some(json!({
+            "ok": true,
+            "delegate": {
+                "kind": action_kind.as_str(),
+                "carrier": carrier,
+            },
+        })))
+    } else {
+        let message = carrier
+            .get("admission")
+            .and_then(|admission| admission.get("reason"))
+            .and_then(Value::as_str)
+            .unwrap_or("transition rejected");
+        Ok(Some(json!({
+            "ok": false,
+            "error": {
+                "message": message,
+                "carrier": carrier,
+            },
+        })))
+    }
+}
+
+fn action_protocol_response(request_id: &str, kind: &str, prepared: Value) -> Value {
+    if prepared.get("ok").and_then(Value::as_bool) == Some(true) {
+        json!({
+            "request_id": request_id,
+            "ok": true,
+            "kind": kind,
+            "delegate": prepared.get("delegate").cloned().unwrap_or(Value::Null),
+        })
+    } else {
+        let message = prepared
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("request failed");
+        json!({
+            "request_id": request_id,
+            "ok": false,
+            "kind": kind,
+            "error": {
+                "message": message,
+                "details": prepared,
+            },
+        })
+    }
+}
+
 struct ProjectionArgs {
     repo_root: PathBuf,
     socket_path: PathBuf,
@@ -1653,6 +2716,99 @@ fn print_query_help() {
     );
 }
 
+struct ActionPrepareArgs {
+    repo_root: PathBuf,
+    socket_path: PathBuf,
+    kind: String,
+    payload: Value,
+}
+
+fn parse_action_prepare_args(args: &[String]) -> Result<ActionPrepareArgs, String> {
+    let mut repo_root: Option<PathBuf> = None;
+    let mut socket_path: Option<PathBuf> = None;
+    let mut kind: Option<String> = None;
+    let mut payload: Option<Value> = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--repo" => {
+                let value = args.get(index + 1).ok_or("--repo requires a path")?;
+                repo_root = Some(repo_root_arg(value)?);
+                index += 2;
+            }
+            "--socket" => {
+                let value = args.get(index + 1).ok_or("--socket requires a path")?;
+                socket_path = Some(PathBuf::from(value));
+                index += 2;
+            }
+            "--kind" => {
+                let value = args.get(index + 1).ok_or("--kind requires a value")?;
+                kind = Some(value.clone());
+                index += 2;
+            }
+            "--payload" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or("--payload requires a JSON value")?;
+                payload = Some(
+                    serde_json::from_str::<Value>(value)
+                        .map_err(|err| format!("invalid --payload: {err}"))?,
+                );
+                index += 2;
+            }
+            "--help" | "-h" => return Err("USAGE".to_string()),
+            flag => return Err(format!("unknown action-prepare argument: {flag}")),
+        }
+    }
+
+    let repo_root = repo_root.ok_or("action-prepare requires --repo")?;
+    let socket_path = socket_path.unwrap_or_else(|| default_socket_path(&repo_root));
+    let kind = kind.ok_or("action-prepare requires --kind")?;
+    let payload = payload.unwrap_or_else(|| json!({}));
+
+    Ok(ActionPrepareArgs {
+        repo_root,
+        socket_path,
+        kind,
+        payload,
+    })
+}
+
+fn print_action_prepare_help() {
+    println!(
+        "Usage:\n  tuskd-core action-prepare --repo PATH [--socket PATH] --kind KIND --payload JSON"
+    );
+}
+
+fn run_action_prepare(args: &[String]) -> ExitCode {
+    let parsed = match parse_action_prepare_args(args) {
+        Ok(parsed) => parsed,
+        Err(message) if message == "USAGE" => {
+            print_action_prepare_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => return fail(&message),
+    };
+
+    match action_prepare_result(
+        &parsed.repo_root,
+        &parsed.socket_path,
+        &parsed.kind,
+        &parsed.payload,
+    ) {
+        Ok(Some(result)) => match serde_json::to_string(&result) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => fail(&format!("failed to encode action-prepare result: {err}")),
+        },
+        Ok(None) => fail(&format!("unsupported action kind: {}", parsed.kind)),
+        Err(message) => fail(&message),
+    }
+}
+
 fn run_query(args: &[String]) -> ExitCode {
     let parsed = match parse_query_args(args) {
         Ok(parsed) => parsed,
@@ -1713,6 +2869,7 @@ fn run_respond(args: &[String]) -> ExitCode {
         .and_then(Value::as_str)
         .unwrap_or("");
     let kind = request.get("kind").and_then(Value::as_str).unwrap_or("");
+    let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
 
     match query_response(&parsed.repo_root, &parsed.socket_path, request_id, kind) {
         Ok(Some(response)) => match serde_json::to_string(&response) {
@@ -1722,7 +2879,24 @@ fn run_respond(args: &[String]) -> ExitCode {
             }
             Err(err) => fail(&format!("failed to encode respond payload: {err}")),
         },
-        Ok(None) => ExitCode::from(64),
+        Ok(None) => {
+            match action_prepare_result(&parsed.repo_root, &parsed.socket_path, kind, &payload) {
+                Ok(Some(result)) => {
+                    match serde_json::to_string(&action_protocol_response(request_id, kind, result))
+                    {
+                        Ok(text) => {
+                            println!("{text}");
+                            ExitCode::SUCCESS
+                        }
+                        Err(err) => {
+                            fail(&format!("failed to encode action respond payload: {err}"))
+                        }
+                    }
+                }
+                Ok(None) => ExitCode::from(64),
+                Err(message) => fail(&message),
+            }
+        }
         Err(message) => fail(&message),
     }
 }
@@ -1756,6 +2930,7 @@ fn main() -> ExitCode {
         Some("receipts-status") => run_receipts_status(&args[1..]),
         Some("lane-state") => run_lane_state(&args[1..]),
         Some("receipt") => run_receipt(&args[1..]),
+        Some("action-prepare") => run_action_prepare(&args[1..]),
         Some("query") => run_query(&args[1..]),
         Some("respond") => run_respond(&args[1..]),
         Some(command) => fail(&format!("unknown command: {command}")),
