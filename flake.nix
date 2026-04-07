@@ -284,14 +284,8 @@
                   exit 0
                 fi
 
-                bd dolt start >/dev/null
-                echo "beads-dolt: dolt server started"
-
-                cleanup() {
-                  bd dolt stop >/dev/null 2>&1 || true
-                }
-
-                trap cleanup EXIT INT TERM
+                tuskd ensure --repo "$DEVENV_ROOT" >/dev/null
+                echo "beads-dolt: repo-scoped tracker backend ensured"
 
                 while true; do
                   sleep 86400
