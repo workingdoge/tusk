@@ -5,17 +5,18 @@ description: Claim and execute `bd` issues in dedicated `jj` workspaces or issue
 
 # Tusk
 
-Use this skill to turn one tracked issue into one isolated execution lane. When multiple lanes are active, treat the outer Codex as the coordinator, keep the tracker in the canonical repo root, keep one claimed issue per active workspace, and treat each `codex exec` run as a bounded worker.
+Use this skill to turn one tracked issue into one isolated execution lane. When multiple lanes are active, treat the outer Codex as the coordinator, keep the tracker in the canonical tracker root, keep one claimed issue per active workspace, and treat each `codex exec` run as a bounded worker.
 
 ## Workflow
 
-1. Resolve the canonical repo root.
-   - Prefer `git rev-parse --show-toplevel`.
-   - Run `bd` from the repo root even when code work happens elsewhere.
-   - Use `jj --repository "$repo_root" ...` for repo-global workspace commands.
+1. Resolve both the active checkout root and the canonical tracker root.
+   - Prefer explicit env when the repo exports it: `TUSK_CHECKOUT_ROOT` or `DEVENV_ROOT` for the active checkout, `TUSK_TRACKER_ROOT` or `BEADS_WORKSPACE_ROOT` for the canonical tracker root.
+   - Fall back to `git rev-parse --show-toplevel` only for the canonical tracker root when no explicit env is available.
+   - Run `bd` from the tracker root even when code work happens elsewhere.
+   - Use `jj --repository "$tracker_root" ...` for repo-global workspace commands.
    - Check the repo instructions for workflow wrappers before assembling raw `bd` and `jj` commands. If the repo ships helpers such as `bd-lane`, `bd-new-issue`, or similar wrappers, prefer those first.
 2. Preflight the tracker before relying on `bd` mutations.
-   - Run one read command such as `bd ready --json` or `bd show <id> --json` from the repo root.
+   - Run one read command such as `bd ready --json` or `bd show <id> --json` from the tracker root.
    - Check `bd dolt status` when the tracker uses Dolt server mode.
    - If the repo uses `tuskd`, treat server-mode Dolt as part of the contract. Fresh trackers should be initialized with `bd init --server`; embedded mode is a migration or unblocker task, not normal lane work.
    - If the repo documents a wrapper, dev shell, or service supervisor, use that before ad hoc recovery. Some repos require entering a managed shell and keeping a long-lived service session alive before `bd` is healthy.
@@ -45,7 +46,7 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
    - Use the worker brief contract in `references/coordinator-mode.md` when the user wants strict coordination or parallel lanes.
    - Keep the brief tied to the issue id so a later handoff can reuse it.
 6. Launch `codex exec` in the workspace.
-   - Always make the repo root writable too if tracker or shared files live outside the workspace. Use `--add-dir "$repo_root"`.
+   - Always make the tracker root writable too if tracker or shared files live outside the workspace. Use `--add-dir "$tracker_root"`.
    - Prefer `--full-auto` for the standard autonomous run.
    - If a terminal wrapper needs it, allocate a PTY.
    - Keep shared tracker or service supervisors in the coordinator shell when the repo treats them as singleton infrastructure. The worker should consume a healthy environment, not become responsible for the shared backend lifecycle.
@@ -79,7 +80,7 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
 
 ## Tracker Contract
 
-- Keep the tracker rooted at the canonical repo root. Workers may edit code in a workspace, but `bd` remains a repo-root concern.
+- Keep the tracker rooted at the canonical tracker root. Workers may edit code in a workspace, but `bd` remains a tracker-root concern.
 - Default readiness contract: probe with `bd ready --json`, check `bd dolt status` when Dolt server mode exists, and confirm the issue can be read before asking a worker to mutate tracker state.
 - Make shared backend ownership explicit. Default owner: the coordinator shell, especially when `devenv up` or another singleton supervisor keeps Dolt alive.
 - Default tracker scope inside `tusk`: claim, read, update, and close existing issues only when the backend is healthy.
@@ -126,12 +127,13 @@ Use coordinator mode whenever more than one lane is active or the user expects h
 ## Core Commands
 
 ```bash
-repo_root=$(git rev-parse --show-toplevel)
+checkout_root="${TUSK_CHECKOUT_ROOT:-${DEVENV_ROOT:-$PWD}}"
+tracker_root="${TUSK_TRACKER_ROOT:-${BEADS_WORKSPACE_ROOT:-$(git -C "$checkout_root" rev-parse --show-toplevel)}}"
 issue_id=config-kwj
 slug=scaffold
 base_rev=main
 
-cd "$repo_root"
+cd "$tracker_root"
 bd ready --json >/dev/null
 bd dolt status || true
 bd show "$issue_id"
@@ -140,15 +142,15 @@ if command -v bd-lane >/dev/null 2>&1; then
   bd-lane "$issue_id" --slug "$slug" --base "$base_rev" --no-exec
 else
   workspace_name="${issue_id}-${slug}"
-  workspace_dir="$repo_root/.jj-workspaces/$workspace_name"
+  workspace_dir="$tracker_root/.jj-workspaces/$workspace_name"
   bd update "$issue_id" --claim --json
-  jj --repository "$repo_root" workspace add "$workspace_dir" --name "$workspace_name" -r "$base_rev" -m "$issue_id: wip"
+  jj --repository "$tracker_root" workspace add "$workspace_dir" --name "$workspace_name" -r "$base_rev" -m "$issue_id: wip"
 fi
 ```
 
 ## Guardrails
 
-- Keep `bd` scoped to the canonical repo root, even when the active shell is inside a workspace.
+- Keep `bd` scoped to the canonical tracker root, even when the active shell is inside a workspace.
 - Preflight `bd` before asking `codex exec` to depend on tracker writes, and preflight again before final close/update steps.
 - If the repo requires `devenv up` or another long-lived supervisor, start it once in the coordinator shell and keep it outside worker ownership.
 - Treat tracker ownership as explicit shared infrastructure. Do not surprise workers with first-time `bd` or Dolt setup.
@@ -168,7 +170,7 @@ fi
 - Treat worker prompts as contracts. Include scope, non-goals, verification, stop conditions, and output expectations every time.
 - Do not run `bd init` or create `.beads/` inside `.jj-workspaces/` or sibling workspaces.
 - Do not run `jj git init --colocate` unless the user explicitly asked to adopt `jj` in a git-only repo.
-- If the workspace path sits outside the repo root, treat `--add-dir "$repo_root"` as mandatory for tracker writes.
+- If the workspace path sits outside the tracker root, treat `--add-dir "$tracker_root"` as mandatory for tracker writes.
 - If `bd` is unhealthy, do not hide that behind repeated retries. Either repair the tracker first or keep issue mutation outside the worker run.
 - Do not stream raw `codex exec` logs to the user by default. Translate them into lane status, blockers, and next actions.
 - Use the repo's normal landing or export flow before forgetting a workspace.

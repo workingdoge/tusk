@@ -53,14 +53,14 @@ Use this structure for any non-trivial `codex exec` worker.
 Complete issue <issue-id> in this workspace.
 
 Identity
-- Canonical repo root: <absolute path>
+- Active checkout root: <absolute path>
 - Workspace path: <absolute path>
 - Workspace name: <name>
 - Only active issue for this lane: <issue-id>
 - Base revision: <revset used to create the workspace>
 
 Tracker
-- Canonical tracker root: <absolute path, usually repo root>
+- Canonical tracker root: <absolute path, usually the canonical repo root>
 - Tracker preflight: <ready | degraded | unavailable>
 - Shared backend owner: <coordinator | worker>
 - Tracker mutations in scope: <yes | no>
@@ -84,7 +84,7 @@ Objective
 - Primary files or areas: <paths>
 
 Operational rules
-- Run bd only from the canonical repo root.
+- Run bd only from the canonical tracker root.
 - Do not initialize another tracker in the workspace.
 - Do not widen scope; file discovered work separately.
 - If the issue is under-shaped, stop and propose a better split or follow-up instead of improvising scope.

@@ -7,7 +7,8 @@ Before assembling raw `bd` and `jj` commands, look for repo-local workflow wrapp
 Example coordinator setup when the repo ships `bd-lane`:
 
 ```bash
-repo_root=$(git rev-parse --show-toplevel)
+checkout_root="${TUSK_CHECKOUT_ROOT:-${DEVENV_ROOT:-$PWD}}"
+repo_root="${TUSK_TRACKER_ROOT:-${BEADS_WORKSPACE_ROOT:-$(git -C "$checkout_root" rev-parse --show-toplevel)}}"
 issue_id=config-kwj
 slug=scaffold
 base_rev=main
@@ -42,7 +43,8 @@ bd-new-issue \
 When no wrapper exists, or when you need to bypass the wrapper deliberately, prefer a repo-local workspace path when the repo already uses `jj` workspaces:
 
 ```bash
-repo_root=$(git rev-parse --show-toplevel)
+checkout_root="${TUSK_CHECKOUT_ROOT:-${DEVENV_ROOT:-$PWD}}"
+repo_root="${TUSK_TRACKER_ROOT:-${BEADS_WORKSPACE_ROOT:-$(git -C "$checkout_root" rev-parse --show-toplevel)}}"
 issue_id=config-kwj
 slug=scaffold
 base_rev=main
@@ -70,7 +72,7 @@ If you rename the current workspace later, remember that `jj workspace rename` u
 
 ## Tracker Preflight
 
-Before the worker depends on `bd`, confirm that the shared tracker is healthy from the canonical repo root.
+Before the worker depends on `bd`, confirm that the shared tracker is healthy from the canonical tracker root.
 
 ```bash
 cd "$repo_root"
@@ -84,7 +86,7 @@ If the repo documents a managed shell or service supervisor, honor that before r
 # Keep this alive in a separate PTY-backed coordinator session.
 nix develop --no-pure-eval path:. -c devenv up
 
-# Then run tracker preflight from the canonical repo root.
+# Then run tracker preflight from the canonical tracker root.
 cd "$repo_root"
 nix develop --no-pure-eval path:. -c bd ready --json >/dev/null
 nix develop --no-pure-eval path:. -c bd dolt status || true
@@ -104,7 +106,8 @@ Load `tracker-contract.md` when tracker ownership, degraded mode, or first-time 
 Use a sibling checkout only when the repo already uses that pattern or the user asked for it:
 
 ```bash
-repo_root=$(git rev-parse --show-toplevel)
+checkout_root="${TUSK_CHECKOUT_ROOT:-${DEVENV_ROOT:-$PWD}}"
+repo_root="${TUSK_TRACKER_ROOT:-${BEADS_WORKSPACE_ROOT:-$(git -C "$checkout_root" rev-parse --show-toplevel)}}"
 repo_name=$(basename "$repo_root")
 issue_id=config-kwj
 slug=sections
@@ -118,7 +121,7 @@ bd update "$issue_id" --claim --json
 jj --repository "$repo_root" workspace add "$workspace_dir" --name "$workspace_name" -r "$base_rev" -m "$issue_id: wip"
 ```
 
-When the workspace lives outside the repo root, `codex exec` should still receive `--add-dir "$repo_root"` so it can update the root tracker and shared files.
+When the workspace lives outside the tracker root, `codex exec` should still receive `--add-dir "$repo_root"` so it can update the shared tracker and other repo-level files.
 
 ## Codex Exec Template
 
@@ -140,7 +143,7 @@ codex exec \
   --add-dir "$repo_root" \
   --full-auto \
   --output-last-message "$workspace_dir/.codex-last.txt" \
-  "Complete $issue_id in this workspace. Canonical repo root: $repo_root. Run bd only from $repo_root. Keep changes scoped to $issue_id. Run the required verification commands before finishing. If bd is unhealthy, report the exact failure instead of retrying tracker mutations repeatedly. Update or close $issue_id only if bd is working."
+  "Complete $issue_id in this workspace. Canonical tracker root: $repo_root. Run bd only from $repo_root. Keep changes scoped to $issue_id. Run the required verification commands before finishing. If bd is unhealthy, report the exact failure instead of retrying tracker mutations repeatedly. Update or close $issue_id only if bd is working."
 ```
 
 When the repo needs a coordinator-owned service session such as `devenv up`, start that outside the worker first. The worker prompt should assume the tracker is already up, and report preflight failure instead of trying to own the shared service lifecycle.
@@ -249,13 +252,13 @@ Use this prompt structure:
 Complete issue <issue-id> in this workspace.
 
 Context
-- Canonical repo root: <absolute path>
+- Active checkout root: <absolute path>
 - Workspace path: <absolute path>
 - Only active issue for this lane: <issue-id>
 - Base revision: <revset used to create the workspace>
 
 Tracker
-- Canonical tracker root: <absolute path, usually repo root>
+- Canonical tracker root: <absolute path, usually the canonical repo root>
 - Tracker preflight: <ready | degraded | unavailable>
 - Shared backend owner: <coordinator | worker>
 - Tracker mutations in scope: <yes | no>
@@ -279,7 +282,7 @@ Scope
 - If the issue is not ready, stop and propose a tighter split or follow-up instead of widening the lane.
 
 Operational rules
-- Run bd only from the canonical repo root.
+- Run bd only from the canonical tracker root.
 - Do not initialize another tracker in the workspace.
 - Prefer repo-local workflow wrappers when they exist; fall back to raw `bd` and `jj` commands only when needed.
 - File discovered work as linked follow-ups instead of widening scope.

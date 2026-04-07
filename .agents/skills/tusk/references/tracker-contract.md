@@ -4,7 +4,7 @@ Use this reference when a lane depends on `bd` and Dolt being healthy, when shar
 
 ## Default Tracker Boundary
 
-- Run `bd` from the canonical repo root.
+- Run `bd` from the canonical tracker root.
 - Treat the tracker as shared infrastructure, not as a per-workspace concern.
 - For repos that use `tuskd`, server-mode Dolt is part of the runtime contract. Fresh tracker bootstrap should use `bd init --server`; embedded mode requires explicit migration work.
 - The normal `tusk` tracker scope is:
