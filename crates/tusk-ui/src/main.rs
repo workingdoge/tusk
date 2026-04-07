@@ -793,12 +793,33 @@ struct PingStatus {
 #[derive(Debug, Deserialize)]
 struct OperatorSnapshot {
     generated_at: String,
+    briefing: OperatorBriefing,
     now: OperatorNow,
     next: OperatorNext,
     history: OperatorHistory,
     context: OperatorContext,
 }
 
+#[derive(Debug, Deserialize)]
+struct OperatorBriefing {
+    headline: String,
+    summary: String,
+    focus_issue: Option<OperatorFocusIssue>,
+    #[serde(default)]
+    narrative: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorFocusIssue {
+    id: String,
+    title: String,
+    status: Option<String>,
+    parent: Option<String>,
+    dependency_count: Option<u64>,
+    dependent_count: Option<u64>,
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct OperatorNow {
     runtime: OperatorRuntime,
@@ -813,6 +834,7 @@ struct OperatorNow {
     counts: OperatorNowCounts,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct OperatorRuntime {
     health: Option<String>,
@@ -821,6 +843,7 @@ struct OperatorRuntime {
     backend: Option<OperatorBackend>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct OperatorBackend {
     running: Option<bool>,
@@ -846,6 +869,7 @@ struct OperatorObstruction {
     issue_id: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct OperatorNowCounts {
     active_lanes: u64,
@@ -854,8 +878,10 @@ struct OperatorNowCounts {
     obstructions: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct OperatorNext {
+    primary_action: Option<OperatorRecommendation>,
     #[serde(default)]
     ready_issues: Vec<BoardIssue>,
     #[serde(default)]
@@ -867,15 +893,32 @@ struct OperatorNext {
     counts: OperatorNextCounts,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct OperatorRecommendation {
     kind: String,
     message: String,
     issue_id: Option<String>,
     title: Option<String>,
+    status: Option<String>,
     command: Option<String>,
+    #[serde(default)]
+    rationale: Vec<String>,
+    #[serde(default)]
+    dependencies: Vec<OperatorIssueRef>,
+    #[serde(default)]
+    dependents: Vec<OperatorIssueRef>,
 }
 
+#[derive(Debug, Deserialize)]
+struct OperatorIssueRef {
+    id: String,
+    title: Option<String>,
+    status: Option<String>,
+    dependency_type: Option<String>,
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct OperatorNextCounts {
     ready_issues: u64,
@@ -888,6 +931,8 @@ struct OperatorNextCounts {
 struct OperatorHistory {
     #[serde(default)]
     recent_transitions: Vec<OperatorReceipt>,
+    #[serde(default)]
+    narrative: Vec<String>,
     counts: OperatorHistoryCounts,
 }
 
@@ -905,6 +950,7 @@ struct OperatorHistoryCounts {
     available_receipts: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct OperatorContext {
     repo_root: String,
@@ -994,7 +1040,15 @@ fn render(frame: &mut Frame, app: &App) {
             }),
             Span::raw("  "),
             Span::styled(
-                "o/t/b/e view  Tab cycle  j/k move(board)  c claim  l launch  f finish  r refresh  p ping  q quit",
+                match app.view {
+                    ViewMode::Home => {
+                        "o/t/b/e view  Tab cycle  b board  r refresh  p ping  q quit"
+                    }
+                    ViewMode::Board => {
+                        "o/t/b/e view  Tab cycle  j/k move  c claim  l launch  f finish  r refresh  p ping  q quit"
+                    }
+                    _ => "o/t/b/e view  Tab cycle  r refresh  p ping  q quit",
+                },
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -1129,68 +1183,44 @@ fn pane_block(title: &'static str, focused: bool) -> Block<'static> {
 
 fn home_now_lines(snapshot: &OperatorSnapshot) -> Vec<Line<'static>> {
     let mut lines = vec![
+        title_line(snapshot.briefing.headline.clone()),
+        Line::from(snapshot.briefing.summary.clone()),
         kv_line("updated", snapshot.generated_at.clone()),
-        kv_line(
-            "runtime",
-            snapshot
-                .now
-                .runtime
-                .health
-                .clone()
-                .unwrap_or_else(|| "unknown".to_owned()),
-        ),
-        kv_line(
-            "mode",
-            snapshot
-                .now
-                .runtime
-                .mode
-                .clone()
-                .unwrap_or_else(|| "unknown".to_owned()),
-        ),
-        kv_line(
-            "pid",
-            snapshot
-                .now
-                .runtime
-                .pid
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "none".to_owned()),
-        ),
-        kv_line("active", snapshot.now.counts.active_lanes.to_string()),
-        kv_line("claimed", snapshot.now.counts.claimed_issues.to_string()),
-        kv_line("stale", snapshot.now.counts.stale_lanes.to_string()),
-        kv_line("obstructions", snapshot.now.counts.obstructions.to_string()),
     ];
 
-    if let Some(backend) = &snapshot.now.runtime.backend {
-        let mut backend_parts = Vec::new();
-        if let Some(port) = backend.port {
-            backend_parts.push(format!("port {port}"));
+    if let Some(focus) = &snapshot.briefing.focus_issue {
+        lines.push(Line::from(""));
+        lines.push(title_line("focus"));
+        lines.push(Line::from(format!("{} {}", focus.id, focus.title)));
+        let mut meta = Vec::new();
+        if let Some(status) = &focus.status {
+            meta.push(format!("status {status}"));
         }
-        if let Some(pid) = backend.pid {
-            backend_parts.push(format!("pid {pid}"));
+        if let Some(parent) = &focus.parent {
+            meta.push(format!("parent {parent}"));
         }
-        if let Some(running) = backend.running {
-            backend_parts.push(if running {
-                "running".to_owned()
-            } else {
-                "stopped".to_owned()
-            });
+        if let Some(dependent_count) = focus.dependent_count {
+            meta.push(format!("unlocks {dependent_count}"));
         }
-        if !backend_parts.is_empty() {
-            lines.push(kv_line("backend", backend_parts.join(" | ")));
+        if let Some(dependency_count) = focus.dependency_count {
+            meta.push(format!("upstream {dependency_count}"));
         }
-        if let Some(path) = &backend.data_dir {
-            lines.push(kv_line("data", path.clone()));
+        if !meta.is_empty() {
+            lines.push(Line::from(format!("  {}", meta.join(" | "))));
         }
     }
 
-    lines.push(Line::from(""));
-    lines.push(title_line("live lanes"));
-    if snapshot.now.active_lanes.is_empty() {
-        lines.push(Line::from("none"));
-    } else {
+    if !snapshot.briefing.narrative.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(title_line("why now"));
+        for line in snapshot.briefing.narrative.iter().take(4) {
+            lines.push(Line::from(line.clone()));
+        }
+    }
+
+    if !snapshot.now.active_lanes.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(title_line("live lanes"));
         for lane in snapshot.now.active_lanes.iter().take(4) {
             lines.push(Line::from(format!(
                 "{} {}",
@@ -1224,11 +1254,9 @@ fn home_now_lines(snapshot: &OperatorSnapshot) -> Vec<Line<'static>> {
         }
     }
 
-    lines.push(Line::from(""));
-    lines.push(title_line("waiting claims"));
-    if snapshot.now.claimed_issues.is_empty() {
-        lines.push(Line::from("none"));
-    } else {
+    if !snapshot.now.claimed_issues.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(title_line("waiting claims"));
         for issue in snapshot.now.claimed_issues.iter().take(4) {
             lines.push(Line::from(format!("{} {}", issue.id, issue.title)));
         }
@@ -1268,38 +1296,50 @@ fn home_now_lines(snapshot: &OperatorSnapshot) -> Vec<Line<'static>> {
 }
 
 fn home_next_lines(snapshot: &OperatorSnapshot) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        kv_line("ready", snapshot.next.counts.ready_issues.to_string()),
-        kv_line("blocked", snapshot.next.counts.blocked_issues.to_string()),
-        kv_line("deferred", snapshot.next.counts.deferred_issues.to_string()),
-        kv_line(
-            "suggested",
-            snapshot.next.counts.recommended_actions.to_string(),
-        ),
-    ];
+    let mut lines = Vec::new();
 
-    lines.push(Line::from(""));
-    lines.push(title_line("recommended"));
-    if snapshot.next.recommended_actions.is_empty() {
-        lines.push(Line::from("none"));
-    } else {
-        for action in snapshot.next.recommended_actions.iter().take(4) {
+    lines.push(title_line("primary move"));
+    if let Some(action) = &snapshot.next.primary_action {
+        lines.push(Line::from(action.message.clone()));
+        if let Some(title) = &action.title {
             let subject = action
                 .issue_id
                 .clone()
-                .or_else(|| action.title.clone())
                 .unwrap_or_else(|| action.kind.clone());
-            let command = action
-                .command
-                .clone()
-                .map(|value| format!(" ({value})"))
-                .unwrap_or_default();
-            lines.push(Line::from(format!(
-                "{}: {}{}",
-                subject, action.message, command
-            )));
+            lines.push(Line::from(format!("{subject} — {title}")));
         }
+        if let Some(command) = &action.command {
+            lines.push(kv_line("command", command.clone()));
+        }
+        if !action.rationale.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(title_line("rationale"));
+            for line in action.rationale.iter().take(4) {
+                lines.push(Line::from(line.clone()));
+            }
+        }
+        if !action.dependents.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(title_line("unlocks"));
+            for issue in action.dependents.iter().take(4) {
+                lines.push(Line::from(operator_issue_ref_label(issue)));
+            }
+        }
+        if !action.dependencies.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(title_line("upstream"));
+            for issue in action.dependencies.iter().take(3) {
+                lines.push(Line::from(operator_issue_ref_label(issue)));
+            }
+        }
+    } else {
+        lines.push(Line::from("No primary move is selected right now."));
     }
+
+    lines.push(Line::from(""));
+    lines.push(kv_line("ready", snapshot.next.counts.ready_issues.to_string()));
+    lines.push(kv_line("blocked", snapshot.next.counts.blocked_issues.to_string()));
+    lines.push(kv_line("deferred", snapshot.next.counts.deferred_issues.to_string()));
 
     lines.push(Line::from(""));
     lines.push(title_line("ready queue"));
@@ -1344,6 +1384,13 @@ fn home_history_lines(snapshot: &OperatorSnapshot) -> Vec<Line<'static>> {
         title_line("recent transitions"),
     ];
 
+    if !snapshot.history.narrative.is_empty() {
+        for item in snapshot.history.narrative.iter().take(8) {
+            lines.push(Line::from(item.clone()));
+        }
+        return lines;
+    }
+
     if snapshot.history.recent_transitions.is_empty() {
         lines.push(Line::from("none"));
         return lines;
@@ -1357,11 +1404,13 @@ fn home_history_lines(snapshot: &OperatorSnapshot) -> Vec<Line<'static>> {
 }
 
 fn home_context_lines(snapshot: &OperatorSnapshot) -> Vec<Line<'static>> {
+    let repo_name = Path::new(&snapshot.context.repo_root)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&snapshot.context.repo_root)
+        .to_owned();
     let mut lines = vec![
-        kv_line("repo", snapshot.context.repo_root.clone()),
-        kv_line("checkout", snapshot.context.checkout_root.clone()),
-        kv_line("tracker", snapshot.context.tracker_root.clone()),
-        kv_line("socket", snapshot.context.protocol.endpoint.clone()),
+        kv_line("repo", repo_name),
         kv_line("mode", snapshot.context.service.mode.clone()),
         kv_line("workspaces", snapshot.context.counts.workspaces.to_string()),
     ];
@@ -1377,6 +1426,16 @@ fn home_context_lines(snapshot: &OperatorSnapshot) -> Vec<Line<'static>> {
             .unwrap_or_else(|| "unknown".to_owned());
         lines.push(kv_line("backend", format!("{host}:{port}")));
     }
+
+    let root_alignment = if snapshot.context.checkout_root == snapshot.context.tracker_root {
+        "checkout and tracker roots are aligned".to_owned()
+    } else {
+        format!(
+            "checkout {} | tracker {}",
+            snapshot.context.checkout_root, snapshot.context.tracker_root
+        )
+    };
+    lines.push(Line::from(root_alignment));
 
     if let Some(summary) = &snapshot.context.summary {
         lines.push(Line::from(""));
@@ -1885,6 +1944,22 @@ fn operator_receipt_label(receipt: &OperatorReceipt) -> String {
     format!("{timestamp} {kind}{issue}{detail}")
 }
 
+fn operator_issue_ref_label(issue: &OperatorIssueRef) -> String {
+    let title = issue.title.clone().unwrap_or_else(|| issue.id.clone());
+    let mut suffix = Vec::new();
+    if let Some(status) = &issue.status {
+        suffix.push(status.clone());
+    }
+    if let Some(dependency_type) = &issue.dependency_type {
+        suffix.push(dependency_type.clone());
+    }
+    if suffix.is_empty() {
+        title
+    } else {
+        format!("{title} ({})", suffix.join(" | "))
+    }
+}
+
 fn kv_line(label: impl Into<String>, value: impl Into<String>) -> Line<'static> {
     Line::from(vec![
         Span::styled(
@@ -1923,6 +1998,23 @@ mod tests {
     fn sample_operator_snapshot() -> OperatorSnapshot {
         OperatorSnapshot {
             generated_at: "2026-04-07T20:00:00Z".to_owned(),
+            briefing: OperatorBriefing {
+                headline: "Launch tusk-ready next.".to_owned(),
+                summary: "Runtime is healthy. 1 active lane, 1 claimed issue, and 1 ready issue."
+                    .to_owned(),
+                focus_issue: Some(OperatorFocusIssue {
+                    id: "tusk-ready".to_owned(),
+                    title: "ready issue".to_owned(),
+                    status: Some("in_progress".to_owned()),
+                    parent: Some("tusk-ux".to_owned()),
+                    dependency_count: Some(1),
+                    dependent_count: Some(2),
+                }),
+                narrative: vec![
+                    "No active lanes are currently moving claimed work.".to_owned(),
+                    "It unlocks 2 downstream items.".to_owned(),
+                ],
+            },
             now: OperatorNow {
                 runtime: OperatorRuntime {
                     health: Some("healthy".to_owned()),
@@ -1969,6 +2061,30 @@ mod tests {
                 },
             },
             next: OperatorNext {
+                primary_action: Some(OperatorRecommendation {
+                    kind: "claim_ready_issue".to_owned(),
+                    message: "Claim tusk-ready next.".to_owned(),
+                    issue_id: Some("tusk-ready".to_owned()),
+                    title: Some("ready issue".to_owned()),
+                    status: Some("open".to_owned()),
+                    command: Some("tuskd claim-issue --repo /tmp/repo --issue-id tusk-ready".to_owned()),
+                    rationale: vec![
+                        "Claiming it unlocks 2 downstream items.".to_owned(),
+                        "No claimed issue is currently waiting for launch.".to_owned(),
+                    ],
+                    dependencies: vec![OperatorIssueRef {
+                        id: "tusk-parent".to_owned(),
+                        title: Some("parent issue".to_owned()),
+                        status: Some("open".to_owned()),
+                        dependency_type: Some("blocks".to_owned()),
+                    }],
+                    dependents: vec![OperatorIssueRef {
+                        id: "tusk-child".to_owned(),
+                        title: Some("child issue".to_owned()),
+                        status: Some("open".to_owned()),
+                        dependency_type: Some("blocks".to_owned()),
+                    }],
+                }),
                 ready_issues: vec![BoardIssue {
                     id: "tusk-ready".to_owned(),
                     title: "ready issue".to_owned(),
@@ -1989,7 +2105,11 @@ mod tests {
                     message: "ready work is available to claim".to_owned(),
                     issue_id: Some("tusk-ready".to_owned()),
                     title: Some("ready issue".to_owned()),
+                    status: Some("open".to_owned()),
                     command: None,
+                    rationale: vec![],
+                    dependencies: vec![],
+                    dependents: vec![],
                 }],
                 counts: OperatorNextCounts {
                     ready_issues: 1,
@@ -2005,6 +2125,7 @@ mod tests {
                     issue_id: Some("tusk-ready".to_owned()),
                     details: Some(json!({"reason": "demo"})),
                 }],
+                narrative: vec!["1m ago: claimed tusk-ready".to_owned()],
                 counts: OperatorHistoryCounts {
                     recent_transitions: 1,
                     available_receipts: 3,
@@ -2055,10 +2176,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("live lane"));
-        assert!(rendered.contains("claimed issue"));
-        assert!(rendered.contains("stale lanes"));
-        assert!(rendered.contains("[stale_lane]"));
+        assert!(rendered.contains("Launch tusk-ready next."));
+        assert!(rendered.contains("focus"));
+        assert!(rendered.contains("ready issue"));
+        assert!(rendered.contains("why now"));
     }
 
     #[test]
@@ -2069,10 +2190,35 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("/tmp/repo/.beads/tuskd/tuskd.sock"));
+        assert!(rendered.contains("repo"));
         assert!(rendered.contains("127.0.0.1:32642"));
         assert!(rendered.contains("default"));
         assert!(rendered.contains("abc123"));
+    }
+
+    #[test]
+    fn home_next_lines_surface_primary_action_and_dependency_context() {
+        let rendered = home_next_lines(&sample_operator_snapshot())
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("primary move"));
+        assert!(rendered.contains("Claim tusk-ready next."));
+        assert!(rendered.contains("child issue"));
+        assert!(rendered.contains("parent issue"));
+    }
+
+    #[test]
+    fn home_history_lines_prefer_humanized_narrative() {
+        let rendered = home_history_lines(&sample_operator_snapshot())
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("1m ago: claimed tusk-ready"));
     }
 
     #[test]

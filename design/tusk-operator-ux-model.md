@@ -71,6 +71,27 @@ The primary operator surface should answer four questions in order:
 These are the top-level information buckets.
 Raw protocol partitions are drill-down surfaces, not the home screen.
 
+## Human Briefing Layer
+
+The home surface should read like a briefing, not a schema dump.
+
+That means:
+
+- one clear headline about what matters now
+- one primary recommendation about what to do next
+- a short rationale that explains *why this issue* matters now
+- dependency-aware context that explains what the recommendation unlocks or is
+  waiting on
+
+The dependency graph is therefore part of the narrative substrate, not only a
+separate visualization feature.
+
+The operator should be able to answer:
+
+- what should I do now?
+- why this issue instead of another one?
+- what work does it unblock or depend on?
+
 ## The Four Views
 
 ### 1. Now

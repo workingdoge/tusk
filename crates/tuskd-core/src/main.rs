@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -1232,6 +1232,253 @@ fn compact_receipt_projection(receipt: &Value) -> Value {
     })
 }
 
+fn compact_issue_relation_projection(issue: &Value) -> Value {
+    let mut object = Map::new();
+    for key in [
+        "id",
+        "title",
+        "status",
+        "priority",
+        "issue_type",
+        "parent",
+        "dependency_type",
+    ] {
+        if let Some(value) = issue.get(key).filter(|value| !value.is_null()) {
+            object.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(object)
+}
+
+fn compact_focus_issue_projection(issue: &Value) -> Value {
+    let mut object = Map::new();
+    for key in [
+        "id",
+        "title",
+        "status",
+        "priority",
+        "issue_type",
+        "parent",
+        "dependency_count",
+        "dependent_count",
+    ] {
+        if let Some(value) = issue.get(key).filter(|value| !value.is_null()) {
+            object.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(object)
+}
+
+fn issue_output_from_result(result: &Value) -> Option<Value> {
+    match result.get("output") {
+        Some(Value::Array(items)) => items.first().cloned(),
+        Some(Value::Object(_)) => result.get("output").cloned(),
+        _ => None,
+    }
+}
+
+fn issue_id(issue: &Value) -> Option<&str> {
+    issue.get("id").and_then(Value::as_str)
+}
+
+fn issue_title(issue: &Value) -> String {
+    issue.get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| issue_id(issue).unwrap_or("unknown issue"))
+        .to_owned()
+}
+
+fn issue_status(issue: &Value) -> Option<&str> {
+    issue.get("status").and_then(Value::as_str)
+}
+
+fn is_open_status(status: &str) -> bool {
+    !matches!(status, "closed" | "deferred" | "archived")
+}
+
+fn issue_priority_value(issue: &Value) -> i64 {
+    match issue.get("priority") {
+        Some(Value::Number(number)) => number.as_i64().unwrap_or(9),
+        Some(Value::String(text)) => text
+            .trim_start_matches('P')
+            .parse::<i64>()
+            .unwrap_or(9),
+        _ => 9,
+    }
+}
+
+fn issue_relation_entries(issue: &Value, key: &str) -> Vec<Value> {
+    issue.get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect()
+}
+
+fn open_issue_relation_entries(issue: &Value, key: &str) -> Vec<Value> {
+    issue_relation_entries(issue, key)
+        .into_iter()
+        .filter(|entry| issue_status(entry).map(is_open_status).unwrap_or(true))
+        .collect()
+}
+
+fn relation_titles(entries: &[Value], limit: usize) -> String {
+    let mut titles = entries
+        .iter()
+        .filter_map(|entry| {
+            entry.get("title")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .or_else(|| issue_id(entry).map(ToOwned::to_owned))
+        })
+        .take(limit)
+        .collect::<Vec<_>>();
+
+    let remaining = entries.len().saturating_sub(titles.len());
+    if remaining > 0 {
+        titles.push(format!("+{remaining} more"));
+    }
+
+    titles.join(", ")
+}
+
+fn choose_focus_issue(issues: &[Value]) -> Option<Value> {
+    issues.iter().cloned().max_by(|left, right| {
+        let left_open_dependents = open_issue_relation_entries(left, "dependents").len();
+        let right_open_dependents = open_issue_relation_entries(right, "dependents").len();
+        left_open_dependents
+            .cmp(&right_open_dependents)
+            .then_with(|| {
+                left.get("dependent_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    .cmp(
+                        &right
+                            .get("dependent_count")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                    )
+            })
+            .then_with(|| issue_priority_value(right).cmp(&issue_priority_value(left)))
+            .then_with(|| issue_title(left).cmp(&issue_title(right)))
+    })
+}
+
+fn load_issue_details(repo_root: &Path, issue_ids: &[String]) -> Vec<Value> {
+    let mut details = Vec::new();
+    let mut seen = HashSet::new();
+
+    for issue_id in issue_ids {
+        if !seen.insert(issue_id.clone()) {
+            continue;
+        }
+
+        let result = match run_tracker_json_command_in_repo(
+            repo_root,
+            "tracker_issue_show",
+            ["issue", "show", issue_id.as_str()],
+        ) {
+            Ok(result) => result,
+            Err(_) => continue,
+        };
+
+        if let Some(issue) = issue_output_from_result(&result) {
+            details.push(issue);
+        }
+    }
+
+    details
+}
+
+fn humanize_kind(kind: &str) -> String {
+    match kind {
+        "issue.claim" => "claimed".to_owned(),
+        "issue.close" => "closed".to_owned(),
+        "tracker.ensure" => "refreshed runtime".to_owned(),
+        "lane.launch" => "launched lane".to_owned(),
+        "lane.handoff" => "handed off lane".to_owned(),
+        "lane.finish" => "finished lane".to_owned(),
+        "lane.archive" => "archived lane".to_owned(),
+        other => format!("recorded {other}"),
+    }
+}
+
+fn humanize_age(timestamp: &str) -> Option<String> {
+    let parsed = DateTime::parse_from_rfc3339(timestamp).ok()?;
+    let delta = Utc::now().signed_duration_since(parsed.with_timezone(&Utc));
+    if delta.num_seconds() < 60 {
+        Some("just now".to_owned())
+    } else if delta.num_minutes() < 60 {
+        Some(format!("{}m ago", delta.num_minutes()))
+    } else if delta.num_hours() < 24 {
+        Some(format!("{}h ago", delta.num_hours()))
+    } else {
+        Some(format!("{}d ago", delta.num_days()))
+    }
+}
+
+fn humanize_receipt(receipt: &Value) -> String {
+    let timestamp = receipt
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(humanize_age)
+        .unwrap_or_else(|| "recently".to_owned());
+    let kind = receipt
+        .get("kind")
+        .and_then(Value::as_str)
+        .map(humanize_kind)
+        .unwrap_or_else(|| "recorded an event".to_owned());
+    let issue = receipt
+        .get("issue_id")
+        .and_then(Value::as_str)
+        .map(|value| format!(" {value}"))
+        .unwrap_or_default();
+    let detail = receipt
+        .get("details")
+        .and_then(Value::as_object)
+        .and_then(|details| {
+            details
+                .get("reason")
+                .and_then(Value::as_str)
+                .or_else(|| details.get("note").and_then(Value::as_str))
+                .or_else(|| details.get("outcome").and_then(Value::as_str))
+        })
+        .map(|value| format!(" ({value})"))
+        .unwrap_or_default();
+
+    format!("{timestamp}: {kind}{issue}{detail}")
+}
+
+fn build_issue_recommendation(
+    issue: &Value,
+    kind: &str,
+    message: String,
+    command: Option<String>,
+    rationale: Vec<String>,
+) -> Value {
+    let dependencies = open_issue_relation_entries(issue, "dependencies")
+        .into_iter()
+        .map(|entry| compact_issue_relation_projection(&entry))
+        .collect::<Vec<_>>();
+    let dependents = open_issue_relation_entries(issue, "dependents")
+        .into_iter()
+        .map(|entry| compact_issue_relation_projection(&entry))
+        .collect::<Vec<_>>();
+
+    json!({
+        "kind": kind,
+        "issue_id": issue_id(issue),
+        "title": issue.get("title").cloned().unwrap_or(Value::Null),
+        "status": issue.get("status").cloned().unwrap_or(Value::Null),
+        "message": message,
+        "command": command,
+        "rationale": rationale,
+        "dependencies": dependencies,
+        "dependents": dependents,
+    })
+}
+
 fn context_root(var_names: &[&str], fallback: &Path) -> String {
     for name in var_names {
         if let Some(value) = env::var_os(name) {
@@ -1285,6 +1532,40 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
         .cloned()
         .unwrap_or_default();
 
+    let claimed_issue_ids = claimed_issues
+        .iter()
+        .filter_map(issue_id)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let ready_issue_ids = ready_issues
+        .iter()
+        .filter_map(issue_id)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let blocked_issue_ids = blocked_issues
+        .iter()
+        .take(6)
+        .filter_map(issue_id)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let stale_lane_issue_ids = lanes
+        .iter()
+        .filter(|lane| lane.get("observed_status").and_then(Value::as_str) == Some("stale"))
+        .filter_map(|lane| lane.get("issue_id").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    let mut detail_issue_ids = Vec::new();
+    detail_issue_ids.extend(claimed_issue_ids.iter().cloned());
+    detail_issue_ids.extend(ready_issue_ids.iter().cloned());
+    detail_issue_ids.extend(blocked_issue_ids.iter().cloned());
+    detail_issue_ids.extend(stale_lane_issue_ids.iter().cloned());
+
+    let issue_details = load_issue_details(repo_root, &detail_issue_ids);
+    let claimed_set = claimed_issue_ids.iter().cloned().collect::<HashSet<_>>();
+    let ready_set = ready_issue_ids.iter().cloned().collect::<HashSet<_>>();
+    let blocked_set = blocked_issue_ids.iter().cloned().collect::<HashSet<_>>();
+
     let stale_lanes = lanes
         .iter()
         .filter(|lane| lane.get("observed_status").and_then(Value::as_str) == Some("stale"))
@@ -1330,6 +1611,26 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
         .rev()
         .map(|receipt| compact_receipt_projection(&receipt))
         .collect::<Vec<_>>();
+    let recent_narrative = recent_history
+        .iter()
+        .map(humanize_receipt)
+        .collect::<Vec<_>>();
+
+    let claimed_details = issue_details
+        .iter()
+        .filter(|issue| issue_id(issue).map(|value| claimed_set.contains(value)).unwrap_or(false))
+        .cloned()
+        .collect::<Vec<_>>();
+    let ready_details = issue_details
+        .iter()
+        .filter(|issue| issue_id(issue).map(|value| ready_set.contains(value)).unwrap_or(false))
+        .cloned()
+        .collect::<Vec<_>>();
+    let blocked_details = issue_details
+        .iter()
+        .filter(|issue| issue_id(issue).map(|value| blocked_set.contains(value)).unwrap_or(false))
+        .cloned()
+        .collect::<Vec<_>>();
 
     let mut obstructions = Vec::new();
     if status
@@ -1352,50 +1653,197 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
         }));
     }
 
-    let mut recommended_actions = Vec::new();
-    if obstructions
+    let runtime_unhealthy = obstructions
         .iter()
-        .any(|value| value.get("kind").and_then(Value::as_str) == Some("runtime_unhealthy"))
-    {
-        recommended_actions.push(json!({
+        .any(|value| value.get("kind").and_then(Value::as_str) == Some("runtime_unhealthy"));
+
+    let primary_action = if runtime_unhealthy {
+        Some(json!({
             "kind": "repair_runtime",
-            "command": "tuskd ensure",
-            "message": "repair and republish tracker/backend health",
-        }));
-    }
-    if let Some(stale) = stale_lanes.first() {
-        recommended_actions.push(json!({
+            "message": "Repair the tracker runtime before moving the queue.",
+            "command": format!("tuskd ensure --repo {}", repo_root.to_string_lossy()),
+            "rationale": [
+                "Tracker or backend health is not currently healthy.",
+                "Repairing runtime health restores accurate board and lane state."
+            ],
+            "dependencies": [],
+            "dependents": [],
+        }))
+    } else if let Some(stale) = stale_lanes.first() {
+        Some(json!({
             "kind": "repair_stale_lane",
             "issue_id": stale.get("issue_id").cloned().unwrap_or(Value::Null),
-            "message": "inspect or recreate the missing lane workspace",
-        }));
+            "title": stale.get("issue_title").cloned().unwrap_or(Value::Null),
+            "message": "Repair the missing lane workspace before moving other work.",
+            "command": Value::Null,
+            "rationale": [
+                "A lane is recorded in state, but its workspace is missing from disk.",
+                "Cleaning up or recreating the workspace keeps receipts and lane state coherent."
+            ],
+            "dependencies": [],
+            "dependents": [],
+        }))
+    } else if let Some(issue) = choose_focus_issue(&claimed_details) {
+        let dependents = open_issue_relation_entries(&issue, "dependents");
+        let dependencies = open_issue_relation_entries(&issue, "dependencies");
+        let mut rationale = Vec::new();
+        if active_lanes.is_empty() {
+            rationale.push(format!(
+                "{} claimed issue(s) are waiting and no lanes are active.",
+                claimed_issues.len()
+            ));
+        } else {
+            rationale.push(format!(
+                "{} claimed issue(s) are waiting behind {} active lane(s).",
+                claimed_issues.len(),
+                active_lanes.len()
+            ));
+        }
+        if !dependents.is_empty() {
+            rationale.push(format!(
+                "It unlocks {} downstream item(s): {}.",
+                dependents.len(),
+                relation_titles(&dependents, 3)
+            ));
+        }
+        if !dependencies.is_empty() {
+            rationale.push(format!(
+                "Its upstream context is {}.",
+                relation_titles(&dependencies, 3)
+            ));
+        }
+        Some(build_issue_recommendation(
+            &issue,
+            "launch_claimed_issue",
+            format!("Launch {} next.", issue_id(&issue).unwrap_or("the claimed issue")),
+            Some(format!(
+                "tuskd launch-lane --repo {} --issue-id {} --base-rev main",
+                repo_root.to_string_lossy(),
+                issue_id(&issue).unwrap_or("unknown")
+            )),
+            rationale,
+        ))
+    } else if let Some(issue) = choose_focus_issue(&ready_details) {
+        let dependents = open_issue_relation_entries(&issue, "dependents");
+        let dependencies = open_issue_relation_entries(&issue, "dependencies");
+        let mut rationale = Vec::new();
+        if !dependents.is_empty() {
+            rationale.push(format!(
+                "Claiming it unlocks {} downstream item(s): {}.",
+                dependents.len(),
+                relation_titles(&dependents, 3)
+            ));
+        }
+        if !dependencies.is_empty() {
+            rationale.push(format!(
+                "Its upstream context is {}.",
+                relation_titles(&dependencies, 3)
+            ));
+        }
+        if claimed_issues.is_empty() {
+            rationale.push("No claimed issue is currently waiting for launch.".to_owned());
+        }
+        Some(build_issue_recommendation(
+            &issue,
+            "claim_ready_issue",
+            format!("Claim {} next.", issue_id(&issue).unwrap_or("the ready issue")),
+            Some(format!(
+                "tuskd claim-issue --repo {} --issue-id {}",
+                repo_root.to_string_lossy(),
+                issue_id(&issue).unwrap_or("unknown")
+            )),
+            rationale,
+        ))
+    } else if let Some(issue) = choose_focus_issue(&blocked_details) {
+        let dependencies = open_issue_relation_entries(&issue, "dependencies");
+        let mut rationale = Vec::new();
+        if !dependencies.is_empty() {
+            rationale.push(format!(
+                "It is currently waiting on {}.",
+                relation_titles(&dependencies, 3)
+            ));
+        }
+        rationale.push("Inspecting the blockage is the fastest way to move the queue.".to_owned());
+        Some(build_issue_recommendation(
+            &issue,
+            "review_blocked_issue",
+            format!("Inspect {} blockage.", issue_id(&issue).unwrap_or("the blocked issue")),
+            None,
+            rationale,
+        ))
+    } else {
+        None
+    };
+
+    let mut recommended_actions = Vec::new();
+    if let Some(action) = primary_action.clone() {
+        recommended_actions.push(action);
     }
-    if let Some(issue) = claimed.first() {
-        recommended_actions.push(json!({
-            "kind": "launch_claimed_issue",
-            "issue_id": issue.get("id").cloned().unwrap_or(Value::Null),
-            "title": issue.get("title").cloned().unwrap_or(Value::Null),
-            "message": "claimed work is waiting for a lane launch",
-        }));
-    } else if let Some(issue) = ready.first() {
-        recommended_actions.push(json!({
-            "kind": "claim_ready_issue",
-            "issue_id": issue.get("id").cloned().unwrap_or(Value::Null),
-            "title": issue.get("title").cloned().unwrap_or(Value::Null),
-            "message": "ready work is available to claim",
-        }));
-    } else if let Some(issue) = blocked.first() {
-        recommended_actions.push(json!({
-            "kind": "review_blocked_issue",
-            "issue_id": issue.get("id").cloned().unwrap_or(Value::Null),
-            "title": issue.get("title").cloned().unwrap_or(Value::Null),
-            "message": "blocked work is dominating the current queue",
-        }));
+
+    let headline = primary_action
+        .as_ref()
+        .and_then(|action| action.get("message").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "The queue is steady; inspect the board for detail.".to_owned());
+
+    let summary = if runtime_unhealthy {
+        "Runtime is unhealthy. Repair the service before trusting queue state.".to_owned()
+    } else {
+        format!(
+            "Runtime is {}. {} active lane(s), {} claimed issue(s), {} ready issue(s), {} blocked issue(s).",
+            status
+                .get("health")
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            active_lanes.len(),
+            claimed_issues.len(),
+            ready_issues.len(),
+            blocked_issues.len()
+        )
+    };
+
+    let briefing_focus = primary_action
+        .as_ref()
+        .and_then(|action| action.get("issue_id").and_then(Value::as_str))
+        .and_then(|focus_id| {
+            issue_details
+                .iter()
+                .find(|issue| issue_id(issue) == Some(focus_id))
+                .map(compact_focus_issue_projection)
+        })
+        .unwrap_or(Value::Null);
+
+    let mut briefing_narrative = primary_action
+        .as_ref()
+        .and_then(|action| action.get("rationale"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items.iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if runtime_unhealthy {
+        briefing_narrative.insert(
+            0,
+            "The runtime must be healthy before the operator view can be trusted.".to_owned(),
+        );
+    } else if active_lanes.is_empty() && !claimed_issues.is_empty() {
+        briefing_narrative
+            .insert(0, "No active lanes are currently moving claimed work.".to_owned());
     }
 
     Ok(json!({
         "repo_root": repo_root.to_string_lossy().into_owned(),
         "generated_at": now_iso8601(),
+        "briefing": {
+            "headline": headline,
+            "summary": summary,
+            "focus_issue": briefing_focus,
+            "narrative": briefing_narrative,
+        },
         "now": {
             "runtime": {
                 "health": status
@@ -1438,6 +1886,7 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
             },
         },
         "next": {
+            "primary_action": primary_action,
             "ready_issues": ready,
             "blocked_issues": blocked,
             "deferred_issues": deferred,
@@ -1451,6 +1900,7 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
         },
         "history": {
             "recent_transitions": recent_history,
+            "narrative": recent_narrative,
             "counts": {
                 "recent_transitions": receipt_rows.len().min(8),
                 "available_receipts": receipt_rows.len(),
