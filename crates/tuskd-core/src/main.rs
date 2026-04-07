@@ -19,6 +19,8 @@ Usage:
   tuskd-core status --repo PATH [--socket PATH]
   tuskd-core board-status --repo PATH
   tuskd-core receipts-status --repo PATH
+  tuskd-core lane-state <upsert|remove> ...
+  tuskd-core receipt append ...
   tuskd-core query --repo PATH [--socket PATH] --kind KIND [--request-id ID] [--payload JSON]
   tuskd-core respond --repo PATH [--socket PATH]
   tuskd-core help
@@ -29,6 +31,8 @@ Commands:
   status          Publish the current backend/service projection without repair.
   board-status    Publish the current board projection.
   receipts-status Publish the current receipt projection.
+  lane-state      Mutate repo-local lane state through Rust-owned file updates.
+  receipt         Append one receipt through the Rust-owned audit seam.
   query           Render one read-side protocol response envelope.
   respond         Read one protocol request from stdin and answer read-side kinds.
   help            Show this help text.
@@ -710,7 +714,7 @@ fn receipt_record_json(repo_root: &Path, kind: &str, payload: Value) -> Value {
     })
 }
 
-fn append_receipt(repo_root: &Path, kind: &str, payload: Value) -> Result<(), String> {
+fn append_receipt(repo_root: &Path, kind: &str, payload: Value) -> Result<Value, String> {
     ensure_parent_dir(&receipts_path(repo_root))?;
     let receipt = receipt_record_json(repo_root, kind, payload);
     let mut file = OpenOptions::new()
@@ -725,7 +729,7 @@ fn append_receipt(repo_root: &Path, kind: &str, payload: Value) -> Result<(), St
             .map_err(|err| format!("failed to encode receipt: {err}"))?
     )
     .map_err(|err| format!("failed to append receipt: {err}"))?;
-    Ok(())
+    Ok(receipt)
 }
 
 fn write_service_record(
@@ -896,7 +900,11 @@ fn ensure_projection(repo_root: &Path, socket_path: &Path) -> Result<Value, Stri
     };
 
     let record = write_service_record(repo_root, socket_path, mode, pid, &health, &leases)?;
-    append_receipt(repo_root, "tracker.ensure", json!({ "service": record }))?;
+    let _ = append_receipt(
+        repo_root,
+        "tracker.ensure",
+        json!({ "service": record.clone() }),
+    )?;
     Ok(record)
 }
 
@@ -949,6 +957,73 @@ fn current_lanes(repo_root: &Path) -> Value {
         Value::Array(items) => Value::Array(items),
         _ => json!([]),
     }
+}
+
+fn write_json_value(path: &Path, value: &Value) -> Result<(), String> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|err| format!("failed to encode {}: {err}", path.display()))?;
+    atomic_write(path, &bytes)
+}
+
+fn lane_state_upsert(repo_root: &Path, lane: Value) -> Result<Value, String> {
+    ensure_state_files(repo_root)?;
+
+    let issue_id = lane
+        .get("issue_id")
+        .and_then(Value::as_str)
+        .ok_or("lane-state upsert requires lane_json.issue_id")?
+        .to_string();
+
+    let mut lanes = match current_lanes(repo_root) {
+        Value::Array(items) => items,
+        _ => Vec::new(),
+    };
+    lanes.retain(|existing| {
+        existing.get("issue_id").and_then(Value::as_str) != Some(issue_id.as_str())
+    });
+    lanes.push(lane.clone());
+    lanes.sort_by(|left, right| {
+        let left_id = left.get("issue_id").and_then(Value::as_str).unwrap_or("");
+        let right_id = right.get("issue_id").and_then(Value::as_str).unwrap_or("");
+        left_id.cmp(right_id)
+    });
+
+    write_json_value(&lanes_path(repo_root), &Value::Array(lanes))?;
+    Ok(json!({
+        "repo_root": repo_root.to_string_lossy().into_owned(),
+        "issue_id": issue_id,
+        "lane": lane,
+    }))
+}
+
+fn lane_state_remove(repo_root: &Path, issue_id: &str) -> Result<Value, String> {
+    ensure_state_files(repo_root)?;
+    if issue_id.is_empty() {
+        return Err("lane-state remove requires --issue-id".to_string());
+    }
+
+    let mut removed_lane = Value::Null;
+    let lanes = match current_lanes(repo_root) {
+        Value::Array(items) => items,
+        _ => Vec::new(),
+    };
+    let retained = lanes
+        .into_iter()
+        .filter(|existing| {
+            let matches = existing.get("issue_id").and_then(Value::as_str) == Some(issue_id);
+            if matches {
+                removed_lane = existing.clone();
+            }
+            !matches
+        })
+        .collect::<Vec<_>>();
+
+    write_json_value(&lanes_path(repo_root), &Value::Array(retained))?;
+    Ok(json!({
+        "repo_root": repo_root.to_string_lossy().into_owned(),
+        "issue_id": issue_id,
+        "removed_lane": removed_lane,
+    }))
 }
 
 fn lane_state_projection(repo_root: &Path) -> Result<Value, String> {
@@ -1315,6 +1390,203 @@ fn run_receipts_status(args: &[String]) -> ExitCode {
     }
 }
 
+enum LaneStateArgs {
+    Upsert {
+        repo_root: PathBuf,
+        lane: Value,
+    },
+    Remove {
+        repo_root: PathBuf,
+        issue_id: String,
+    },
+}
+
+fn parse_lane_state_args(args: &[String]) -> Result<LaneStateArgs, String> {
+    let subcommand = args.first().ok_or("USAGE".to_string())?;
+
+    match subcommand.as_str() {
+        "upsert" => {
+            let mut repo_root: Option<PathBuf> = None;
+            let mut lane_json: Option<Value> = None;
+            let mut index = 1;
+
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--repo" => {
+                        let value = args.get(index + 1).ok_or("--repo requires a path")?;
+                        repo_root = Some(repo_root_arg(value)?);
+                        index += 2;
+                    }
+                    "--lane-json" => {
+                        let value = args.get(index + 1).ok_or("--lane-json requires JSON")?;
+                        let parsed = serde_json::from_str::<Value>(value)
+                            .map_err(|err| format!("invalid --lane-json: {err}"))?;
+                        lane_json = Some(parsed);
+                        index += 2;
+                    }
+                    "--help" | "-h" => return Err("USAGE".to_string()),
+                    flag => return Err(format!("unknown lane-state upsert argument: {flag}")),
+                }
+            }
+
+            Ok(LaneStateArgs::Upsert {
+                repo_root: repo_root.ok_or("lane-state upsert requires --repo")?,
+                lane: lane_json.ok_or("lane-state upsert requires --lane-json")?,
+            })
+        }
+        "remove" => {
+            let mut repo_root: Option<PathBuf> = None;
+            let mut issue_id: Option<String> = None;
+            let mut index = 1;
+
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--repo" => {
+                        let value = args.get(index + 1).ok_or("--repo requires a path")?;
+                        repo_root = Some(repo_root_arg(value)?);
+                        index += 2;
+                    }
+                    "--issue-id" => {
+                        let value = args.get(index + 1).ok_or("--issue-id requires a value")?;
+                        issue_id = Some(value.clone());
+                        index += 2;
+                    }
+                    "--help" | "-h" => return Err("USAGE".to_string()),
+                    flag => return Err(format!("unknown lane-state remove argument: {flag}")),
+                }
+            }
+
+            Ok(LaneStateArgs::Remove {
+                repo_root: repo_root.ok_or("lane-state remove requires --repo")?,
+                issue_id: issue_id.ok_or("lane-state remove requires --issue-id")?,
+            })
+        }
+        _ => Err("USAGE".to_string()),
+    }
+}
+
+fn print_lane_state_help() {
+    println!(
+        "Usage:\n  tuskd-core lane-state upsert --repo PATH --lane-json JSON\n  tuskd-core lane-state remove --repo PATH --issue-id ISSUE_ID"
+    );
+}
+
+fn run_lane_state(args: &[String]) -> ExitCode {
+    let parsed = match parse_lane_state_args(args) {
+        Ok(parsed) => parsed,
+        Err(message) if message == "USAGE" => {
+            print_lane_state_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => return fail(&message),
+    };
+
+    let result = match parsed {
+        LaneStateArgs::Upsert { repo_root, lane } => lane_state_upsert(&repo_root, lane),
+        LaneStateArgs::Remove {
+            repo_root,
+            issue_id,
+        } => lane_state_remove(&repo_root, &issue_id),
+    };
+
+    match result {
+        Ok(payload) => match serde_json::to_string(&payload) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => fail(&format!("failed to encode lane-state result: {err}")),
+        },
+        Err(message) => fail(&message),
+    }
+}
+
+enum ReceiptArgs {
+    Append {
+        repo_root: PathBuf,
+        kind: String,
+        payload: Value,
+    },
+}
+
+fn parse_receipt_args(args: &[String]) -> Result<ReceiptArgs, String> {
+    let subcommand = args.first().ok_or("USAGE".to_string())?;
+
+    match subcommand.as_str() {
+        "append" => {
+            let mut repo_root: Option<PathBuf> = None;
+            let mut kind: Option<String> = None;
+            let mut payload: Option<Value> = None;
+            let mut index = 1;
+
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--repo" => {
+                        let value = args.get(index + 1).ok_or("--repo requires a path")?;
+                        repo_root = Some(repo_root_arg(value)?);
+                        index += 2;
+                    }
+                    "--kind" => {
+                        let value = args.get(index + 1).ok_or("--kind requires a value")?;
+                        kind = Some(value.clone());
+                        index += 2;
+                    }
+                    "--payload" => {
+                        let value = args.get(index + 1).ok_or("--payload requires JSON")?;
+                        let parsed = serde_json::from_str::<Value>(value)
+                            .map_err(|err| format!("invalid --payload: {err}"))?;
+                        payload = Some(parsed);
+                        index += 2;
+                    }
+                    "--help" | "-h" => return Err("USAGE".to_string()),
+                    flag => return Err(format!("unknown receipt append argument: {flag}")),
+                }
+            }
+
+            Ok(ReceiptArgs::Append {
+                repo_root: repo_root.ok_or("receipt append requires --repo")?,
+                kind: kind.ok_or("receipt append requires --kind")?,
+                payload: payload.ok_or("receipt append requires --payload")?,
+            })
+        }
+        _ => Err("USAGE".to_string()),
+    }
+}
+
+fn print_receipt_help() {
+    println!("Usage:\n  tuskd-core receipt append --repo PATH --kind KIND --payload JSON");
+}
+
+fn run_receipt(args: &[String]) -> ExitCode {
+    let parsed = match parse_receipt_args(args) {
+        Ok(parsed) => parsed,
+        Err(message) if message == "USAGE" => {
+            print_receipt_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => return fail(&message),
+    };
+
+    let result = match parsed {
+        ReceiptArgs::Append {
+            repo_root,
+            kind,
+            payload,
+        } => append_receipt(&repo_root, &kind, payload),
+    };
+
+    match result {
+        Ok(receipt) => match serde_json::to_string(&receipt) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => fail(&format!("failed to encode receipt result: {err}")),
+        },
+        Err(message) => fail(&message),
+    }
+}
+
 struct QueryArgs {
     repo_root: PathBuf,
     socket_path: PathBuf,
@@ -1482,6 +1754,8 @@ fn main() -> ExitCode {
         Some("status") => run_status(&args[1..]),
         Some("board-status") => run_board_status(&args[1..]),
         Some("receipts-status") => run_receipts_status(&args[1..]),
+        Some("lane-state") => run_lane_state(&args[1..]),
+        Some("receipt") => run_receipt(&args[1..]),
         Some("query") => run_query(&args[1..]),
         Some("respond") => run_respond(&args[1..]),
         Some(command) => fail(&format!("unknown command: {command}")),

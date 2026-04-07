@@ -986,38 +986,20 @@ current_service_record() {
   cat "${path}"
 }
 
-receipt_record_json() {
-  local repo_root="$1"
-  local kind="$2"
-  local payload_json="$3"
-
-  jq -cn \
-    --arg timestamp "$(now_iso8601)" \
-    --arg kind "${kind}" \
-    --arg repo_root "${repo_root}" \
-    --argjson payload "${payload_json}" \
-    '{timestamp:$timestamp, kind:$kind, repo_root:$repo_root, payload:$payload}'
-}
-
 append_receipt() {
   local repo_root="$1"
   local kind="$2"
   local payload_json="$3"
-  local receipt_json
 
-  receipt_json="$(receipt_record_json "${repo_root}" "${kind}" "${payload_json}")"
-  printf '%s\n' "${receipt_json}" >>"$(receipts_path "${repo_root}")"
+  run_tuskd_core receipt append --repo "${repo_root}" --kind "${kind}" --payload "${payload_json}" >/dev/null
 }
 
 append_receipt_capture() {
   local repo_root="$1"
   local kind="$2"
   local payload_json="$3"
-  local receipt_json
 
-  receipt_json="$(receipt_record_json "${repo_root}" "${kind}" "${payload_json}")"
-  printf '%s\n' "${receipt_json}" >>"$(receipts_path "${repo_root}")"
-  printf '%s\n' "${receipt_json}"
+  run_tuskd_core receipt append --repo "${repo_root}" --kind "${kind}" --payload "${payload_json}"
 }
 
 current_lanes() {
@@ -1337,31 +1319,15 @@ transition_success_result() {
 upsert_lane_state() {
   local repo_root="$1"
   local lane_json="$2"
-  local path
-  local tmp
 
-  ensure_state_files "${repo_root}"
-  path="$(lanes_path "${repo_root}")"
-  tmp="$(mktemp "${path}.XXXXXX")"
-  jq --argjson lane "${lane_json}" '
-    (map(select(.issue_id != $lane.issue_id)) + [$lane]) | sort_by(.issue_id)
-  ' "${path}" >"${tmp}"
-  mv "${tmp}" "${path}"
+  run_tuskd_core lane-state upsert --repo "${repo_root}" --lane-json "${lane_json}" >/dev/null
 }
 
 remove_lane_state() {
   local repo_root="$1"
   local issue_id="$2"
-  local path
-  local tmp
 
-  ensure_state_files "${repo_root}"
-  path="$(lanes_path "${repo_root}")"
-  tmp="$(mktemp "${path}.XXXXXX")"
-  jq --arg issue_id "${issue_id}" '
-    map(select(.issue_id != $issue_id))
-  ' "${path}" >"${tmp}"
-  mv "${tmp}" "${path}"
+  run_tuskd_core lane-state remove --repo "${repo_root}" --issue-id "${issue_id}" >/dev/null
 }
 
 ensure_projection() {
