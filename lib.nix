@@ -2,7 +2,6 @@
 let
   inherit (builtins)
     pathExists
-    readDir
     removeAttrs
     ;
   inherit (lib)
@@ -61,27 +60,7 @@ let
       chmod -R u+w "$out"
     '';
 
-  listRelativeFiles =
-    src:
-    let
-      go =
-        prefix: path:
-        let
-          entries = readDir path;
-        in
-        flatten (
-          mapAttrsToList (
-            name: kind:
-            let
-              relativePath = if prefix == "" then name else "${prefix}/${name}";
-            in
-            if kind == "directory" then go relativePath (path + "/${name}") else [ relativePath ]
-          ) entries
-        );
-    in
-    go "" src;
-
-  mkDevenvCodexSkillFiles =
+  mkDevenvCodexSkillEntries =
     {
       pkgs,
       name,
@@ -95,14 +74,11 @@ let
         src = checkedSource;
       };
     in
-    listToAttrs (
-      map (
-        relativePath:
-        nameValuePair "${root}/${name}/${relativePath}" {
-          source = package + "/${relativePath}";
-        }
-      ) (listRelativeFiles checkedSource)
-    );
+    {
+      "${root}/${name}" = {
+        source = package;
+      };
+    };
 
   resolveId = value: fallback: if value != null then value else fallback;
 
@@ -410,7 +386,7 @@ in
 {
   inherit
     mkCodexSkillPackage
-    mkDevenvCodexSkillFiles
+    mkDevenvCodexSkillEntries
     mkBase
     mkDriver
     mkEffect

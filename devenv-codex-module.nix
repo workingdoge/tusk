@@ -7,6 +7,7 @@
 }:
 let
   inherit (lib)
+    concatStringsSep
     foldl'
     mapAttrsToList
     mkBefore
@@ -18,6 +19,28 @@ let
 
   cfg = config.codex;
   hasSkills = cfg.skills != { };
+  skillEntries = foldl' (acc: attrs: acc // attrs) { } (
+    mapAttrsToList (
+      name: skill:
+      tuskLib.mkDevenvCodexSkillEntries {
+        inherit pkgs name;
+        src = skill.source;
+        root = cfg.installRoot;
+      }
+    ) cfg.skills
+  );
+  migrateLegacySkillProjection = concatStringsSep "\n\n" (
+    mapAttrsToList (
+      name: _:
+      ''
+        target="${config.devenv.root}/${cfg.installRoot}/${name}"
+        if [ -e "$target" ] && [ ! -L "$target" ]; then
+          echo "Replacing legacy Codex skill projection at ${cfg.installRoot}/${name}"
+          rm -rf -- "$target"
+        fi
+      ''
+    ) cfg.skills
+  );
 in
 {
   options.codex = {
@@ -58,16 +81,16 @@ in
       '';
     }
     (mkIf hasSkills {
-      files = foldl' (acc: attrs: acc // attrs) { } (
-        mapAttrsToList (
-          name: skill:
-          tuskLib.mkDevenvCodexSkillFiles {
-            inherit pkgs name;
-            src = skill.source;
-            root = cfg.installRoot;
-          }
-        ) cfg.skills
-      );
+      tasks."devenv:codex-skills:migrate" = {
+        description = "Migrate legacy per-file Codex skill projections";
+        exec = migrateLegacySkillProjection;
+        before = [
+          "devenv:files"
+          "devenv:enterShell"
+        ];
+      };
+
+      files = skillEntries;
     })
   ];
 }

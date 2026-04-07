@@ -61,6 +61,7 @@ nix run .#tusk-ui -- --help
 - `flake.nix` also exports a flake-owned `bd`/`beads` wrapper app so raw-shell `nix run` calls reuse repo-scoped tracker state instead of ambient host Beads configuration.
 - `flake.nix` also exports `tusk-flake-ref`, which prints the canonical `path:`, `git+file:`, and remote `git+...?...ref=` forms for this repo and reports when no publish remote is configured.
 - `devenv-codex-module.nix` owns the shared `codex.skills` option declaration, repo-local `CODEX_HOME` bootstrap, and `.codex/skills` projection logic for `devenv` consumers.
+- Repo-local skill projection under `.codex/skills/` is one managed symlink per skill root; the runtime should not materialize fragile per-file link trees there.
 - `devenv-scratch-module.nix` owns the shared per-repo scratch relocation policy for common build tools in consumer shells.
 - `devenvModules.consumer` is the reusable downstream shell surface: repo-local `CODEX_HOME`, explicit skill opt-in, scratch relocation, and the conservative `tusk-clean` helper.
 - `devenvModules.dogfood` is the repo's own downstream composition of `codex` plus explicit `tusk`/`ops`/`nix` skill packs.

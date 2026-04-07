@@ -482,16 +482,17 @@
           rustfmt --version >/dev/null
           rust-analyzer --version >/dev/null
           test "$CODEX_HOME" = "$DEVENV_ROOT/.codex"
-          test -L .codex/skills/tusk/SKILL.md
-          test -L .codex/skills/ops/SKILL.md
-          test -L .codex/skills/ops/references/TOOLING.md
-          test -L .codex/skills/nix/SKILL.md
-          test -L .codex/skills/nix/scripts/detect-shape.py
+          test -L .codex/skills/tusk
+          test -L .codex/skills/ops
+          test -L .codex/skills/nix
+          test -f .codex/skills/tusk/SKILL.md
+          test -f .codex/skills/ops/references/TOOLING.md
+          test -f .codex/skills/nix/scripts/detect-shape.py
           EOF
           )"
           nix develop --no-pure-eval "path:$checkout_root" \
             -c sh -lc "export TUSK_CHECKOUT_ROOT=\"$TUSK_CHECKOUT_ROOT\"; export TUSK_TRACKER_ROOT=\"$TUSK_TRACKER_ROOT\"; export DEVENV_ROOT=\"$TUSK_CHECKOUT_ROOT\"; export BEADS_WORKSPACE_ROOT=\"$TUSK_TRACKER_ROOT\"; $check_cmd"
-          nix eval --raw --expr '
+          nix eval --impure --raw --expr '
             let
               flake = builtins.getFlake "path:'"$checkout_root"'";
               pkgs = flake.inputs.nixpkgs.legacyPackages.${system};
@@ -515,12 +516,12 @@
               dogfoodFiles = dogfood.config.files or { };
             in
             if
-              (! builtins.hasAttr ".codex/skills/tusk/SKILL.md" consumerFiles)
-              && (! builtins.hasAttr ".codex/skills/ops/SKILL.md" consumerFiles)
-              && (! builtins.hasAttr ".codex/skills/nix/SKILL.md" consumerFiles)
-              && builtins.hasAttr ".codex/skills/tusk/SKILL.md" dogfoodFiles
-              && builtins.hasAttr ".codex/skills/ops/SKILL.md" dogfoodFiles
-              && builtins.hasAttr ".codex/skills/nix/SKILL.md" dogfoodFiles
+              (! builtins.hasAttr ".codex/skills/tusk" consumerFiles)
+              && (! builtins.hasAttr ".codex/skills/ops" consumerFiles)
+              && (! builtins.hasAttr ".codex/skills/nix" consumerFiles)
+              && builtins.hasAttr ".codex/skills/tusk" dogfoodFiles
+              && builtins.hasAttr ".codex/skills/ops" dogfoodFiles
+              && builtins.hasAttr ".codex/skills/nix" dogfoodFiles
             then
               "ok"
             else
