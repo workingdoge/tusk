@@ -1,15 +1,16 @@
 use ratatui::text::Line;
 use ratatui::widgets::{List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, layout::Rect};
+
 use crate::app::{App, ViewMode};
 use crate::theme::{error_lines, pane_block};
-use crate::types::{ReceiptEntry, ReceiptsStatus};
+use crate::viewmodel::ReceiptsViewModel;
 
 pub(crate) fn render_receipts(frame: &mut Frame, area: Rect, app: &App) {
     let block = pane_block("Receipts", app.view == ViewMode::Receipts);
-    match (&app.receipts.value, &app.receipts.error) {
+    match (app.receipts_viewmodel(), &app.receipts.error) {
         (Some(receipts), _) => {
-            let items = receipt_items(receipts);
+            let items = receipt_items(&receipts);
             frame.render_widget(List::new(items).block(block), area);
         }
         (_, Some(error)) => {
@@ -31,7 +32,7 @@ pub(crate) fn render_receipts(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn receipt_items(receipts: &ReceiptsStatus) -> Vec<ListItem<'static>> {
+fn receipt_items(receipts: &ReceiptsViewModel) -> Vec<ListItem<'static>> {
     let mut items = vec![
         ListItem::new(Line::from(vec![
             ratatui::text::Span::styled(
@@ -47,7 +48,7 @@ fn receipt_items(receipts: &ReceiptsStatus) -> Vec<ListItem<'static>> {
                 ratatui::style::Style::default()
                     .add_modifier(ratatui::style::Modifier::BOLD),
             ),
-            ratatui::text::Span::raw(receipts.generated_at.clone()),
+            ratatui::text::Span::raw(receipts.updated_at.clone()),
         ])),
         ListItem::new(Line::from(vec![
             ratatui::text::Span::styled(
@@ -68,45 +69,14 @@ fn receipt_items(receipts: &ReceiptsStatus) -> Vec<ListItem<'static>> {
         receipts
             .receipts
             .iter()
-            .rev()
-            .take(10)
-            .map(|receipt| ListItem::new(Line::from(receipt_label(receipt)))),
+            .map(|receipt| ListItem::new(Line::from(receipt.label.clone()))),
     );
 
     items
 }
 
-fn receipt_label(receipt: &ReceiptEntry) -> String {
-    if let Some(invalid) = &receipt.invalid_line {
-        return format!("invalid {invalid}");
-    }
-
-    let timestamp = receipt
-        .timestamp
-        .clone()
-        .unwrap_or_else(|| "unknown-time".to_owned());
-    let kind = receipt
-        .kind
-        .clone()
-        .unwrap_or_else(|| "unknown-kind".to_owned());
-    let payload_hint = receipt
-        .payload
-        .as_ref()
-        .and_then(|payload| payload.as_object())
-        .map(|object| {
-            format!(
-                " ({})",
-                object.keys().cloned().collect::<Vec<_>>().join(",")
-            )
-        })
-        .unwrap_or_default();
-
-    format!("{timestamp} {kind}{payload_hint}")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::receipt_label;
     use crate::types::{ReceiptEntry, ReceiptsStatus};
 
     #[test]
@@ -123,10 +93,10 @@ mod tests {
             }],
         };
 
-        let rendered = receipts
+        let rendered = crate::viewmodel::receipts_viewmodel(&receipts)
             .receipts
-            .iter()
-            .map(receipt_label)
+            .into_iter()
+            .map(|item| item.label)
             .collect::<Vec<_>>()
             .join("\n");
 

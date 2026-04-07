@@ -1,8 +1,11 @@
 mod app;
 mod cli;
+#[cfg(test)]
+mod fixtures;
 mod protocol;
 mod theme;
 mod types;
+mod viewmodel;
 mod views;
 
 use std::io;

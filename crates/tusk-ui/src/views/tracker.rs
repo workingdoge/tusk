@@ -3,14 +3,14 @@ use ratatui::{Frame, layout::Rect};
 
 use crate::app::{App, ViewMode};
 use crate::theme::{error_lines, kv_line, pane_block, title_line};
-use crate::types::TrackerStatus;
+use crate::viewmodel::TrackerViewModel;
 
 use super::board::summary_lines;
 
 pub(crate) fn render_tracker(frame: &mut Frame, area: Rect, app: &App) {
     let block = pane_block("Tracker Service", app.view == ViewMode::Tracker);
-    let lines = match (&app.tracker.value, &app.tracker.error) {
-        (Some(tracker), _) => tracker_lines(tracker),
+    let lines = match (app.tracker_viewmodel(), &app.tracker.error) {
+        (Some(tracker), _) => tracker_lines(&tracker),
         (_, Some(error)) => error_lines(error),
         _ => vec![ratatui::text::Line::from("waiting for tracker data")],
     };
@@ -23,31 +23,24 @@ pub(crate) fn render_tracker(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-pub(crate) fn tracker_lines(tracker: &TrackerStatus) -> Vec<ratatui::text::Line<'static>> {
+pub(crate) fn tracker_lines(tracker: &TrackerViewModel) -> Vec<ratatui::text::Line<'static>> {
     let mut lines = vec![
         kv_line("repo", tracker.repo_root.clone()),
-        kv_line("socket", tracker.protocol.endpoint.clone()),
-        kv_line("mode", tracker.tuskd.mode.clone()),
-        kv_line(
-            "pid",
-            tracker
-                .tuskd
-                .pid
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "none".to_owned()),
-        ),
-        kv_line("health", tracker.health.status.clone()),
-        kv_line("checked", tracker.health.checked_at.clone()),
-        kv_line("leases", tracker.active_leases.len().to_string()),
+        kv_line("socket", tracker.socket_path.clone()),
+        kv_line("mode", tracker.mode.clone()),
+        kv_line("pid", tracker.pid.clone()),
+        kv_line("health", tracker.health.clone()),
+        kv_line("checked", tracker.checked_at.clone()),
+        kv_line("leases", tracker.lease_count.to_string()),
     ];
 
-    if let Some(summary) = &tracker.health.summary {
+    if let Some(summary) = &tracker.summary {
         lines.push(ratatui::text::Line::from(""));
         lines.push(title_line("issue summary"));
         lines.extend(summary_lines(summary));
     }
 
-    if let Some(backend) = &tracker.health.backend {
+    if let Some(backend) = &tracker.backend {
         lines.push(ratatui::text::Line::from(""));
         lines.push(title_line("backend"));
         if let Some(running) = backend.running {

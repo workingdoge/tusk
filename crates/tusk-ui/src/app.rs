@@ -9,6 +9,10 @@ use crate::types::{
     BoardIssue, BoardStatus, ClaimIssuePayload, FinishLanePayload, LaneEntry, LaunchLanePayload,
     OperatorSnapshot, PingStatus, ReceiptsStatus, TrackerStatus,
 };
+use crate::viewmodel::{
+    BoardViewModel, HomeViewModel, ReceiptsViewModel, TrackerViewModel, board_viewmodel,
+    home_viewmodel, receipts_viewmodel, tracker_viewmodel,
+};
 
 #[derive(Debug)]
 pub(crate) struct App {
@@ -81,6 +85,25 @@ impl App {
                 self.status_line = format!("ping failed: {error:#}");
             }
         }
+    }
+
+    pub(crate) fn home_viewmodel(&self) -> Option<HomeViewModel> {
+        self.home.value.as_ref().map(home_viewmodel)
+    }
+
+    pub(crate) fn tracker_viewmodel(&self) -> Option<TrackerViewModel> {
+        self.tracker.value.as_ref().map(tracker_viewmodel)
+    }
+
+    pub(crate) fn board_viewmodel(&self) -> Option<BoardViewModel> {
+        self.board
+            .value
+            .as_ref()
+            .map(|board| board_viewmodel(board, self.selected_board_item_id.as_deref()))
+    }
+
+    pub(crate) fn receipts_viewmodel(&self) -> Option<ReceiptsViewModel> {
+        self.receipts.value.as_ref().map(receipts_viewmodel)
     }
 
     fn sync_board_selection(&mut self) {

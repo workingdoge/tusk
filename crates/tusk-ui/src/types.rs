@@ -157,6 +157,7 @@ pub(crate) struct OperatorBriefing {
     pub(crate) narrative: Vec<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct OperatorFocusIssue {
     pub(crate) id: String,
@@ -284,6 +285,7 @@ pub(crate) struct OperatorHistory {
     pub(crate) counts: OperatorHistoryCounts,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct OperatorReceipt {
     pub(crate) timestamp: Option<String>,
@@ -335,389 +337,29 @@ pub(crate) struct OperatorContextCounts {
 }
 
 #[cfg(test)]
-pub(crate) fn sample_operator_snapshot() -> OperatorSnapshot {
-    use serde_json::json;
+pub(crate) const GOLDEN_OPERATOR_SNAPSHOT_FIXTURE_JSON: &str =
+    crate::fixtures::GOLDEN_OPERATOR_SNAPSHOT_FIXTURE_JSON;
 
-    OperatorSnapshot {
-        generated_at: "2026-04-07T20:00:00Z".to_owned(),
-        briefing: OperatorBriefing {
-            headline: "Launch tusk-ready next.".to_owned(),
-            summary: "Runtime is healthy. 1 active lane, 1 claimed issue, and 1 ready issue."
-                .to_owned(),
-            focus_issue: Some(OperatorFocusIssue {
-                id: "tusk-ready".to_owned(),
-                title: "ready issue".to_owned(),
-                status: Some("in_progress".to_owned()),
-                parent: Some("tusk-ux".to_owned()),
-                dependency_count: Some(1),
-                dependent_count: Some(2),
-            }),
-            narrative: vec![
-                "No active lanes are currently moving claimed work.".to_owned(),
-                "It unlocks 2 downstream items.".to_owned(),
-            ],
-        },
-        now: OperatorNow {
-            runtime: OperatorRuntime {
-                health: Some("healthy".to_owned()),
-                mode: Some("idle".to_owned()),
-                pid: Some(42),
-                backend: Some(OperatorBackend {
-                    running: Some(true),
-                    pid: Some(75075),
-                    port: Some(32642),
-                    data_dir: Some("/tmp/repo/.beads/dolt".to_owned()),
-                }),
-            },
-            active_lanes: vec![OperatorLane {
-                issue_id: "tusk-live".to_owned(),
-                issue_title: Some("live lane".to_owned()),
-                status: Some("handoff".to_owned()),
-                observed_status: Some("handoff".to_owned()),
-                workspace_name: Some("tusk-live-lane".to_owned()),
-                workspace_exists: Some(true),
-            }],
-            claimed_issues: vec![BoardIssue {
-                id: "tusk-claim".to_owned(),
-                title: "claimed issue".to_owned(),
-                status: Some("in_progress".to_owned()),
-            }],
-            stale_lanes: vec![OperatorLane {
-                issue_id: "tusk-stale".to_owned(),
-                issue_title: Some("stale lane".to_owned()),
-                status: Some("handoff".to_owned()),
-                observed_status: Some("stale".to_owned()),
-                workspace_name: Some("tusk-stale-lane".to_owned()),
-                workspace_exists: Some(false),
-            }],
-            obstructions: vec![OperatorObstruction {
-                kind: "stale_lane".to_owned(),
-                message: "lane workspace is missing from disk".to_owned(),
-                issue_id: Some("tusk-stale".to_owned()),
-            }],
-            counts: OperatorNowCounts {
-                active_lanes: 1,
-                claimed_issues: 1,
-                stale_lanes: 1,
-                obstructions: 1,
-            },
-        },
-        next: OperatorNext {
-            primary_action: Some(OperatorRecommendation {
-                kind: "claim_ready_issue".to_owned(),
-                message: "Claim tusk-ready next.".to_owned(),
-                issue_id: Some("tusk-ready".to_owned()),
-                title: Some("ready issue".to_owned()),
-                status: Some("open".to_owned()),
-                command: Some("tuskd claim-issue --repo /tmp/repo --issue-id tusk-ready".to_owned()),
-                rationale: vec![
-                    "Claiming it unlocks 2 downstream items.".to_owned(),
-                    "No claimed issue is currently waiting for launch.".to_owned(),
-                ],
-                dependencies: vec![OperatorIssueRef {
-                    id: "tusk-parent".to_owned(),
-                    title: Some("parent issue".to_owned()),
-                    status: Some("open".to_owned()),
-                    dependency_type: Some("blocks".to_owned()),
-                }],
-                dependents: vec![OperatorIssueRef {
-                    id: "tusk-child".to_owned(),
-                    title: Some("child issue".to_owned()),
-                    status: Some("open".to_owned()),
-                    dependency_type: Some("blocks".to_owned()),
-                }],
-            }),
-            ready_issues: vec![BoardIssue {
-                id: "tusk-ready".to_owned(),
-                title: "ready issue".to_owned(),
-                status: Some("open".to_owned()),
-            }],
-            blocked_issues: vec![BoardIssue {
-                id: "tusk-blocked".to_owned(),
-                title: "blocked issue".to_owned(),
-                status: Some("open".to_owned()),
-            }],
-            deferred_issues: vec![BoardIssue {
-                id: "tusk-deferred".to_owned(),
-                title: "deferred issue".to_owned(),
-                status: Some("deferred".to_owned()),
-            }],
-            recommended_actions: vec![OperatorRecommendation {
-                kind: "claim_ready_issue".to_owned(),
-                message: "ready work is available to claim".to_owned(),
-                issue_id: Some("tusk-ready".to_owned()),
-                title: Some("ready issue".to_owned()),
-                status: Some("open".to_owned()),
-                command: None,
-                rationale: vec![],
-                dependencies: vec![],
-                dependents: vec![],
-            }],
-            counts: OperatorNextCounts {
-                ready_issues: 1,
-                blocked_issues: 1,
-                deferred_issues: 1,
-                recommended_actions: 1,
-            },
-        },
-        history: OperatorHistory {
-            recent_transitions: vec![OperatorReceipt {
-                timestamp: Some("2026-04-07T19:59:00Z".to_owned()),
-                kind: Some("issue.claim".to_owned()),
-                issue_id: Some("tusk-ready".to_owned()),
-                details: Some(json!({"reason": "demo"})),
-            }],
-            narrative: vec!["1m ago: claimed tusk-ready".to_owned()],
-            counts: OperatorHistoryCounts {
-                recent_transitions: 1,
-                available_receipts: 3,
-            },
-        },
-        context: OperatorContext {
-            repo_root: "/tmp/repo".to_owned(),
-            checkout_root: "/tmp/repo".to_owned(),
-            tracker_root: "/tmp/repo".to_owned(),
-            protocol: TrackerProtocol {
-                endpoint: "/tmp/repo/.beads/tuskd/tuskd.sock".to_owned(),
-            },
-            service: TuskdState {
-                mode: "idle".to_owned(),
-                pid: None,
-            },
-            backend_endpoint: Some(OperatorBackendEndpoint {
-                host: Some("127.0.0.1".to_owned()),
-                port: Some(32642),
-            }),
-            summary: Some(BoardSummary {
-                total_issues: Some(10),
-                open_issues: Some(3),
-                in_progress_issues: Some(2),
-                closed_issues: Some(5),
-                blocked_issues: Some(1),
-                deferred_issues: Some(1),
-                ready_issues: Some(1),
-            }),
-            workspaces: vec![WorkspaceEntry {
-                name: "default".to_owned(),
-                change_id: Some("abc123".to_owned()),
-                commit_id: Some("def456".to_owned()),
-                empty: true,
-                description: Some("(no description set)".to_owned()),
-                raw: "default: abc123 def456 (empty) (no description set)".to_owned(),
-            }],
-            counts: OperatorContextCounts { workspaces: 1 },
-        },
-    }
+#[cfg(test)]
+pub(crate) fn golden_operator_snapshot() -> OperatorSnapshot {
+    serde_json::from_str(GOLDEN_OPERATOR_SNAPSHOT_FIXTURE_JSON)
+        .expect("golden operator snapshot fixture should deserialize")
+}
+
+#[cfg(test)]
+pub(crate) fn sample_operator_snapshot() -> OperatorSnapshot {
+    golden_operator_snapshot()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::OperatorSnapshot;
-
-    const OPERATOR_SNAPSHOT_FIXTURE_JSON: &str = r#"{
-  "generated_at": "2026-04-07T20:00:00Z",
-  "briefing": {
-    "headline": "Launch tusk-ready next.",
-    "summary": "Runtime is healthy. 1 active lane, 1 claimed issue, and 1 ready issue.",
-    "focus_issue": {
-      "id": "tusk-ready",
-      "title": "ready issue",
-      "status": "in_progress",
-      "parent": "tusk-ux",
-      "dependency_count": 1,
-      "dependent_count": 2
-    },
-    "narrative": [
-      "No active lanes are currently moving claimed work.",
-      "It unlocks 2 downstream items."
-    ]
-  },
-  "now": {
-    "runtime": {
-      "health": "healthy",
-      "mode": "idle",
-      "pid": 42,
-      "backend": {
-        "running": true,
-        "pid": 75075,
-        "port": 32642,
-        "data_dir": "/tmp/repo/.beads/dolt"
-      }
-    },
-    "active_lanes": [
-      {
-        "issue_id": "tusk-live",
-        "issue_title": "live lane",
-        "status": "handoff",
-        "observed_status": "handoff",
-        "workspace_name": "tusk-live-lane",
-        "workspace_exists": true
-      }
-    ],
-    "claimed_issues": [
-      {
-        "id": "tusk-claim",
-        "title": "claimed issue",
-        "status": "in_progress"
-      }
-    ],
-    "stale_lanes": [
-      {
-        "issue_id": "tusk-stale",
-        "issue_title": "stale lane",
-        "status": "handoff",
-        "observed_status": "stale",
-        "workspace_name": "tusk-stale-lane",
-        "workspace_exists": false
-      }
-    ],
-    "obstructions": [
-      {
-        "kind": "stale_lane",
-        "message": "lane workspace is missing from disk",
-        "issue_id": "tusk-stale"
-      }
-    ],
-    "counts": {
-      "active_lanes": 1,
-      "claimed_issues": 1,
-      "stale_lanes": 1,
-      "obstructions": 1
-    }
-  },
-  "next": {
-    "primary_action": {
-      "kind": "claim_ready_issue",
-      "message": "Claim tusk-ready next.",
-      "issue_id": "tusk-ready",
-      "title": "ready issue",
-      "status": "open",
-      "command": "tuskd claim-issue --repo /tmp/repo --issue-id tusk-ready",
-      "rationale": [
-        "Claiming it unlocks 2 downstream items.",
-        "No claimed issue is currently waiting for launch."
-      ],
-      "dependencies": [
-        {
-          "id": "tusk-parent",
-          "title": "parent issue",
-          "status": "open",
-          "dependency_type": "blocks"
-        }
-      ],
-      "dependents": [
-        {
-          "id": "tusk-child",
-          "title": "child issue",
-          "status": "open",
-          "dependency_type": "blocks"
-        }
-      ]
-    },
-    "ready_issues": [
-      {
-        "id": "tusk-ready",
-        "title": "ready issue",
-        "status": "open"
-      }
-    ],
-    "blocked_issues": [
-      {
-        "id": "tusk-blocked",
-        "title": "blocked issue",
-        "status": "open"
-      }
-    ],
-    "deferred_issues": [
-      {
-        "id": "tusk-deferred",
-        "title": "deferred issue",
-        "status": "deferred"
-      }
-    ],
-    "recommended_actions": [
-      {
-        "kind": "claim_ready_issue",
-        "message": "ready work is available to claim",
-        "issue_id": "tusk-ready",
-        "title": "ready issue",
-        "status": "open",
-        "command": null,
-        "rationale": [],
-        "dependencies": [],
-        "dependents": []
-      }
-    ],
-    "counts": {
-      "ready_issues": 1,
-      "blocked_issues": 1,
-      "deferred_issues": 1,
-      "recommended_actions": 1
-    }
-  },
-  "history": {
-    "recent_transitions": [
-      {
-        "timestamp": "2026-04-07T19:59:00Z",
-        "kind": "issue.claim",
-        "issue_id": "tusk-ready",
-        "details": {
-          "reason": "demo"
-        }
-      }
-    ],
-    "narrative": [
-      "1m ago: claimed tusk-ready"
-    ],
-    "counts": {
-      "recent_transitions": 1,
-      "available_receipts": 3
-    }
-  },
-  "context": {
-    "repo_root": "/tmp/repo",
-    "checkout_root": "/tmp/repo",
-    "tracker_root": "/tmp/repo",
-    "protocol": {
-      "endpoint": "/tmp/repo/.beads/tuskd/tuskd.sock"
-    },
-    "service": {
-      "mode": "idle",
-      "pid": null
-    },
-    "backend_endpoint": {
-      "host": "127.0.0.1",
-      "port": 32642
-    },
-    "summary": {
-      "total_issues": 10,
-      "open_issues": 3,
-      "in_progress_issues": 2,
-      "closed_issues": 5,
-      "blocked_issues": 1,
-      "deferred_issues": 1,
-      "ready_issues": 1
-    },
-    "workspaces": [
-      {
-        "name": "default",
-        "change_id": "abc123",
-        "commit_id": "def456",
-        "empty": true,
-        "description": "(no description set)",
-        "raw": "default: abc123 def456 (empty) (no description set)"
-      }
-    ],
-    "counts": {
-      "workspaces": 1
-    }
-  }
-}"#;
+    use super::{GOLDEN_OPERATOR_SNAPSHOT_FIXTURE_JSON, OperatorSnapshot};
 
     #[test]
     fn operator_snapshot_fixture_deserializes() {
         let snapshot: OperatorSnapshot =
-            serde_json::from_str(OPERATOR_SNAPSHOT_FIXTURE_JSON).expect("fixture should deserialize");
+            serde_json::from_str(GOLDEN_OPERATOR_SNAPSHOT_FIXTURE_JSON)
+                .expect("fixture should deserialize");
 
         assert_eq!(snapshot.briefing.headline, "Launch tusk-ready next.");
         assert_eq!(
