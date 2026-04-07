@@ -549,9 +549,13 @@ run_outer_harness() {
     note "source diff from ${source_base_rev} is empty; testing base clone"
   fi
 
-  if ! TUSKD_TRANSITION_TESTS_BASE_REV="${temp_base_rev}" \
-      nix develop --no-pure-eval "path:${temp_repo}" \
-        -c bash "$0" --inner-repo "${temp_repo}" --host-state-root "${host_state_root}"; then
+  if ! (
+      unset TUSK_CHECKOUT_ROOT TUSK_TRACKER_ROOT DEVENV_ROOT BEADS_WORKSPACE_ROOT CODEX_HOME
+      cd "${temp_repo}"
+      TUSKD_TRANSITION_TESTS_BASE_REV="${temp_base_rev}" \
+        nix develop --no-pure-eval "path:${temp_repo}" \
+          -c bash "$0" --inner-repo "${temp_repo}" --host-state-root "${host_state_root}"
+    ); then
     cleanup_preserve_temp=true
     fail "transition tests failed"
   fi

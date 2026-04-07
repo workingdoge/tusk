@@ -3,31 +3,9 @@ set -euo pipefail
 
 real_bd="${TUSK_REAL_BD:?TUSK_REAL_BD is required}"
 real_tuskd="${TUSK_REAL_TUSKD:?TUSK_REAL_TUSKD is required}"
+paths_sh="${TUSK_PATHS_SH:?TUSK_PATHS_SH is required}"
 
-default_repo_root() {
-  if git rev-parse --show-toplevel >/dev/null 2>&1; then
-    git rev-parse --show-toplevel
-    return
-  fi
-
-  if [ -n "${BEADS_WORKSPACE_ROOT:-}" ]; then
-    (
-      cd "${BEADS_WORKSPACE_ROOT}"
-      git rev-parse --show-toplevel 2>/dev/null || pwd
-    )
-    return
-  fi
-
-  if [ -n "${DEVENV_ROOT:-}" ]; then
-    (
-      cd "${DEVENV_ROOT}"
-      git rev-parse --show-toplevel 2>/dev/null || pwd
-    )
-    return
-  fi
-
-  pwd
-}
+source "${paths_sh}"
 
 state_root() {
   local repo_root="$1"
@@ -119,11 +97,11 @@ ensure_service_record() {
 }
 
 export_service_env() {
-  local repo_root="$1"
-  local record_json="$2"
+  local checkout_root="$1"
+  local repo_root="$2"
+  local record_json="$3"
 
-  export BEADS_WORKSPACE_ROOT="${repo_root}"
-  export DEVENV_ROOT="${repo_root}"
+  tusk_export_runtime_roots "${checkout_root}" "${repo_root}"
   export BEADS_DOLT_SERVER_MODE="server"
   export BEADS_DOLT_SERVER_HOST
   export BEADS_DOLT_SERVER_PORT
@@ -139,16 +117,19 @@ export_service_env() {
 }
 
 main() {
+  local checkout_root
   local repo_root
   local record_json
 
-  repo_root="$(default_repo_root)"
+  checkout_root="$(tusk_resolve_checkout_root)"
+  repo_root="$(tusk_resolve_tracker_root)"
   if [ ! -d "${repo_root}/.beads" ]; then
+    tusk_export_runtime_roots "${checkout_root}" "${repo_root}"
     exec "${real_bd}" "$@"
   fi
 
   record_json="$(ensure_service_record "${repo_root}")"
-  export_service_env "${repo_root}" "${record_json}"
+  export_service_env "${checkout_root}" "${repo_root}" "${record_json}"
   exec "${real_bd}" "$@"
 }
 

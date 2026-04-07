@@ -2,6 +2,9 @@
 set -euo pipefail
 
 program_name="${0##*/}"
+paths_sh="${TUSK_PATHS_SH:?TUSK_PATHS_SH is required}"
+
+source "${paths_sh}"
 
 usage() {
   cat <<'EOF'
@@ -80,43 +83,9 @@ now_iso8601() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
-default_repo_root() {
-  if git rev-parse --show-toplevel >/dev/null 2>&1; then
-    git rev-parse --show-toplevel
-    return
-  fi
-
-  if [ -n "${BEADS_WORKSPACE_ROOT:-}" ]; then
-    (
-      cd "${BEADS_WORKSPACE_ROOT}"
-      git rev-parse --show-toplevel 2>/dev/null || pwd
-    )
-    return
-  fi
-
-  if [ -n "${DEVENV_ROOT:-}" ]; then
-    (
-      cd "${DEVENV_ROOT}"
-      git rev-parse --show-toplevel 2>/dev/null || pwd
-    )
-    return
-  fi
-
-  pwd
-}
-
 resolve_repo_root() {
   local repo_arg="${1:-}"
-
-  if [ -n "${repo_arg}" ]; then
-    (
-      cd "${repo_arg}"
-      git rev-parse --show-toplevel 2>/dev/null || pwd
-    )
-    return
-  fi
-
-  default_repo_root
+  tusk_resolve_tracker_root "${repo_arg}"
 }
 
 state_root() {
@@ -758,8 +727,7 @@ run_in_repo_capture() {
 
   (
     cd "${repo_root}"
-    export BEADS_WORKSPACE_ROOT="${repo_root}"
-    export DEVENV_ROOT="${repo_root}"
+    tusk_export_runtime_roots "${repo_root}" "${repo_root}"
     "$@" 2>&1
   )
 }

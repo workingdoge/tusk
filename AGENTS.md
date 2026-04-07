@@ -13,6 +13,7 @@ These instructions apply to the canonical `tusk` repo checkout.
 - Use `glistix` for Nix-target Gleam work; the shell also keeps upstream `gleam` available for generic tooling and language-server compatibility checks.
 - Use `lib.crane` from the flake for Rust package definitions so Rust builds share the same pinned `rust-overlay` toolchain as the shell, and run packaged Rust apps via `nix build` / `nix run` instead of mutating manifests ad hoc from outside Nix.
 - `tuskd` writes repo-local service state under `.beads/tuskd/` and a host-local registry under `$TUSK_HOST_STATE_ROOT`, `$XDG_STATE_HOME/tusk`, or `~/Library/Caches/tusk` on macOS.
+- Runtime wrappers distinguish the active checkout root (`TUSK_CHECKOUT_ROOT` / `DEVENV_ROOT`) from the canonical tracker root (`TUSK_TRACKER_ROOT` / `BEADS_WORKSPACE_ROOT`); workspace-local `CODEX_HOME` follows the checkout, while tracker state stays in the canonical repo.
 - `tuskd` is the coordinator action and receipt surface; `tusk-tracker` is the internal tracker adapter seam behind it.
 - `.beads/tuskd/lanes.json` is the first-class lane state record; receipts remain the audit log of lane transitions.
 - Outside the dev shell, use `nix run .#bd -- ...` instead of an ambient host `bd`; the wrapper reads the `tuskd` service record and exports the repo-scoped Dolt endpoint before execing Beads.
@@ -65,6 +66,7 @@ nix run .#tusk-ui -- --help
 - `devenvModules.dogfood` is the repo's own downstream composition of `codex` plus explicit `tusk`/`ops`/`nix` skill packs.
 - `scripts/codex-home-bootstrap.sh` copies auth/config/rules from `~/.codex` only as a first-use migration into the repo-local `.codex` home.
 - `scripts/tusk-clean.sh` contains the conservative cleanup/quarantine script for rebuildable repo-local artifacts.
+- `scripts/tusk-paths.sh` centralizes checkout-root vs tracker-root resolution for flake-owned wrappers and local control-plane scripts.
 - `lib.nix` contains the generic `tusk` normalization and validation logic.
 - `flake-module.nix` contains the reusable Nix module surface for `tusk`.
 - `design/` contains architecture and workflow notes that belong to `tusk` itself.

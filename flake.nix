@@ -112,13 +112,15 @@
             text = ''
               set -eu
 
-              tracker_root="''${BEADS_WORKSPACE_ROOT:-''${DEVENV_ROOT:-}}"
-              if [ -z "$tracker_root" ]; then
-                tracker_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-              fi
-              export BEADS_WORKSPACE_ROOT="$tracker_root"
-              export CODEX_HOME="$tracker_root/.codex"
-              sh ${./scripts/codex-home-bootstrap.sh} "$tracker_root" ".codex"
+              export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+              # shellcheck disable=SC1090
+              source "$TUSK_PATHS_SH"
+
+              checkout_root="$(tusk_resolve_checkout_root)"
+              tracker_root="$(tusk_resolve_tracker_root)"
+              tusk_export_runtime_roots "$checkout_root" "$tracker_root"
+              export CODEX_HOME="$checkout_root/.codex"
+              sh ${./scripts/codex-home-bootstrap.sh} "$checkout_root" ".codex"
 
               if [ -d "$tracker_root/.beads" ]; then
                 (
@@ -140,11 +142,14 @@
             text = ''
               set -euo pipefail
 
-              repo_root="''${BEADS_WORKSPACE_ROOT:-''${DEVENV_ROOT:-}}"
-              if [ -z "$repo_root" ]; then
-                repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-              fi
-              cd "$repo_root"
+              export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+              # shellcheck disable=SC1090
+              source "$TUSK_PATHS_SH"
+
+              checkout_root="$(tusk_resolve_checkout_root)"
+              tracker_root="$(tusk_resolve_tracker_root)"
+              tusk_export_runtime_roots "$checkout_root" "$tracker_root"
+              cd "$checkout_root"
 
               ${optionalString (cfg.smokeCheck.deadnixTargets != [ ]) ''
                 deadnix --fail ${nixpkgs.lib.escapeShellArgs cfg.smokeCheck.deadnixTargets}
@@ -172,7 +177,7 @@
               EOF
               )"
 
-              nix develop --no-pure-eval "path:$repo_root" -c sh -lc "$check_cmd"
+              nix develop --no-pure-eval "path:$checkout_root" -c sh -lc "export TUSK_CHECKOUT_ROOT=\"$TUSK_CHECKOUT_ROOT\"; export TUSK_TRACKER_ROOT=\"$TUSK_TRACKER_ROOT\"; export DEVENV_ROOT=\"$TUSK_CHECKOUT_ROOT\"; export BEADS_WORKSPACE_ROOT=\"$TUSK_TRACKER_ROOT\"; $check_cmd"
             '';
           };
         in
@@ -257,8 +262,12 @@
                 ++ cfg.extraPackages;
 
               enterShell = ''
+                source ${./scripts/tusk-paths.sh}
+                export TUSK_CHECKOUT_ROOT="$(tusk_resolve_checkout_root "$PWD")"
+                export DEVENV_ROOT="$TUSK_CHECKOUT_ROOT"
+                export BEADS_WORKSPACE_ROOT="$(tusk_resolve_tracker_root)"
+                export TUSK_TRACKER_ROOT="$BEADS_WORKSPACE_ROOT"
                 export PATH="${repoCodex}/bin:$PATH"
-                export BEADS_WORKSPACE_ROOT="$DEVENV_ROOT"
                 echo "tusk consumer shell"
                 echo "  CODEX_HOME=$CODEX_HOME"
                 echo "  codex"
@@ -277,14 +286,19 @@
             (mkIf cfg.beadsDolt.enable {
               processes.beads-dolt.exec = ''
                 set -euo pipefail
-                cd "$DEVENV_ROOT"
+
+                tracker_root="$(git -C "$DEVENV_ROOT" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$DEVENV_ROOT")"
+                export TUSK_CHECKOUT_ROOT="$DEVENV_ROOT"
+                export BEADS_WORKSPACE_ROOT="$tracker_root"
+                export TUSK_TRACKER_ROOT="$tracker_root"
+                cd "$tracker_root"
 
                 if [ ! -d .beads ]; then
                   echo "beads-dolt: skipping, .beads/ is missing"
                   exit 0
                 fi
 
-                tuskd ensure --repo "$DEVENV_ROOT" >/dev/null
+                tuskd ensure --repo "$tracker_root" >/dev/null
                 echo "beads-dolt: repo-scoped tracker backend ensured"
 
                 while true; do
@@ -302,6 +316,7 @@
         ];
         text = ''
           export TUSK_TRACKER_REAL_BD=${beads}/bin/bd
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
           exec bash ${./scripts/tusk-tracker.sh} "$@"
         '';
       };
@@ -319,6 +334,7 @@
         ];
         text = ''
           export TUSKD_CORE_BIN=${tuskdCorePackage}/bin/tuskd-core
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
           exec bash ${./scripts/tuskd.sh} "$@"
         '';
       };
@@ -346,6 +362,7 @@
         text = ''
           export TUSK_REAL_BD=${beads}/bin/bd
           export TUSK_REAL_TUSKD=${tuskdPackage}/bin/tuskd
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
           exec bash ${./scripts/bd.sh} "$@"
         '';
       };
@@ -359,13 +376,15 @@
         text = ''
           set -eu
 
-          tracker_root="''${BEADS_WORKSPACE_ROOT:-''${DEVENV_ROOT:-}}"
-          if [ -z "$tracker_root" ]; then
-            tracker_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-          fi
-          export BEADS_WORKSPACE_ROOT="$tracker_root"
-          export CODEX_HOME="$tracker_root/.codex"
-          sh ${./scripts/codex-home-bootstrap.sh} "$tracker_root" ".codex"
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+          # shellcheck disable=SC1090
+          source "$TUSK_PATHS_SH"
+
+          checkout_root="$(tusk_resolve_checkout_root)"
+          tracker_root="$(tusk_resolve_tracker_root)"
+          tusk_export_runtime_roots "$checkout_root" "$tracker_root"
+          export CODEX_HOME="$checkout_root/.codex"
+          sh ${./scripts/codex-home-bootstrap.sh} "$checkout_root" ".codex"
 
           if [ -d "$tracker_root/.beads" ]; then
             (
@@ -385,6 +404,7 @@
           pkgs.jujutsu
         ];
         text = ''
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
           exec bash ${./scripts/tusk-flake-ref.sh} "$@"
         '';
       };
@@ -431,23 +451,50 @@
         text = ''
           set -euo pipefail
 
-          repo_root="''${BEADS_WORKSPACE_ROOT:-''${DEVENV_ROOT:-}}"
-          if [ -z "$repo_root" ]; then
-            repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-          fi
-          cd "$repo_root"
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+          # shellcheck disable=SC1090
+          source "$TUSK_PATHS_SH"
+
+          checkout_root="$(tusk_resolve_checkout_root)"
+          tracker_root="$(tusk_resolve_tracker_root)"
+          tusk_export_runtime_roots "$checkout_root" "$tracker_root"
+          cd "$checkout_root"
 
           deadnix --fail flake.nix devenv-codex-module.nix devenv-scratch-module.nix flake-module.nix lib.nix
-          nix eval --raw "path:$repo_root#packages.${system}.rust-toolchain.name" >/dev/null
-          nix eval --raw "path:$repo_root#packages.${system}.tusk-ui.name" >/dev/null
-          nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "lib.crane.buildDepsOnly is not callable"' "path:$repo_root#lib.crane.buildDepsOnly" >/dev/null
-          tusk-flake-ref --repo "$repo_root" --json >/dev/null
-          nix develop --no-pure-eval "path:$repo_root" \
-            -c sh -lc "export DEVENV_ROOT=\"$repo_root\"; export BEADS_WORKSPACE_ROOT=\"$repo_root\"; cd \"$repo_root\" && bd version >/dev/null && jj --version >/dev/null && dolt version >/dev/null && codex --help >/dev/null && tusk-clean --help >/dev/null && tusk-tracker --help >/dev/null && tuskd-transition-tests --help >/dev/null && glistix --help >/dev/null && erl -eval \"erlang:halt().\" -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null && test \"$CODEX_HOME\" = \"$repo_root/.codex\" && test -L .codex/skills/tusk/SKILL.md && test -L .codex/skills/ops/SKILL.md && test -L .codex/skills/ops/references/TOOLING.md && test -L .codex/skills/nix/SKILL.md && test -L .codex/skills/nix/scripts/detect-shape.py"
+          nix eval --raw "path:$checkout_root#packages.${system}.rust-toolchain.name" >/dev/null
+          nix eval --raw "path:$checkout_root#packages.${system}.tusk-ui.name" >/dev/null
+          nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "lib.crane.buildDepsOnly is not callable"' "path:$checkout_root#lib.crane.buildDepsOnly" >/dev/null
+          tusk-flake-ref --repo "$checkout_root" --json >/dev/null
+          check_cmd="$(cat <<'EOF'
+          cd "$DEVENV_ROOT"
+          bd version >/dev/null
+          jj --version >/dev/null
+          dolt version >/dev/null
+          codex --help >/dev/null
+          tusk-clean --help >/dev/null
+          tusk-tracker --help >/dev/null
+          tuskd-transition-tests --help >/dev/null
+          glistix --help >/dev/null
+          erl -eval "erlang:halt()." -noshell >/dev/null
+          rebar3 version >/dev/null
+          cargo --version >/dev/null
+          rustc --version >/dev/null
+          rustfmt --version >/dev/null
+          rust-analyzer --version >/dev/null
+          test "$CODEX_HOME" = "$DEVENV_ROOT/.codex"
+          test -L .codex/skills/tusk/SKILL.md
+          test -L .codex/skills/ops/SKILL.md
+          test -L .codex/skills/ops/references/TOOLING.md
+          test -L .codex/skills/nix/SKILL.md
+          test -L .codex/skills/nix/scripts/detect-shape.py
+          EOF
+          )"
+          nix develop --no-pure-eval "path:$checkout_root" \
+            -c sh -lc "export TUSK_CHECKOUT_ROOT=\"$TUSK_CHECKOUT_ROOT\"; export TUSK_TRACKER_ROOT=\"$TUSK_TRACKER_ROOT\"; export DEVENV_ROOT=\"$TUSK_CHECKOUT_ROOT\"; export BEADS_WORKSPACE_ROOT=\"$TUSK_TRACKER_ROOT\"; $check_cmd"
           nix eval --raw --expr '
             let
-              flake = builtins.getFlake "path:'"$repo_root"'";
-              pkgs = flake.inputs.nixpkgs.legacyPackages.${builtins.currentSystem};
+              flake = builtins.getFlake "path:'"$checkout_root"'";
+              pkgs = flake.inputs.nixpkgs.legacyPackages.${system};
               consumer = flake.inputs.devenv.lib.mkShell {
                 inherit (flake) inputs;
                 inherit pkgs;
@@ -541,8 +588,12 @@
           ];
 
           enterShell = ''
+            source ${./scripts/tusk-paths.sh}
+            export TUSK_CHECKOUT_ROOT="$(tusk_resolve_checkout_root "$PWD")"
+            export DEVENV_ROOT="$TUSK_CHECKOUT_ROOT"
+            export BEADS_WORKSPACE_ROOT="$(tusk_resolve_tracker_root)"
+            export TUSK_TRACKER_ROOT="$BEADS_WORKSPACE_ROOT"
             export PATH="${repoCodex}/bin:$PATH"
-            export BEADS_WORKSPACE_ROOT="$DEVENV_ROOT"
             echo "tusk dogfood shell"
             echo "  CODEX_HOME=$CODEX_HOME"
             echo "  codex"
@@ -570,14 +621,19 @@
 
           processes.beads-dolt.exec = ''
             set -euo pipefail
-            cd "$DEVENV_ROOT"
+
+            tracker_root="$(git -C "$DEVENV_ROOT" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$DEVENV_ROOT")"
+            export TUSK_CHECKOUT_ROOT="$DEVENV_ROOT"
+            export BEADS_WORKSPACE_ROOT="$tracker_root"
+            export TUSK_TRACKER_ROOT="$tracker_root"
+            cd "$tracker_root"
 
             if [ ! -d .beads ]; then
               echo "beads-dolt: skipping, .beads/ is missing"
               exit 0
             fi
 
-            tuskd ensure --repo "$DEVENV_ROOT" >/dev/null
+            tuskd ensure --repo "$tracker_root" >/dev/null
             echo "beads-dolt: repo-scoped tracker backend ensured"
 
             while true; do
