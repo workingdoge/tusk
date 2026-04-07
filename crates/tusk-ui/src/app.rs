@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::action::{Direction, UiAction};
 use crate::protocol::ProtocolClient;
 use crate::theme::now_label;
 use crate::types::{
@@ -106,6 +107,65 @@ impl App {
         self.receipts.value.as_ref().map(receipts_viewmodel)
     }
 
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) {
+        match self.action_for_key(key) {
+            Ok(Some(action)) => self.dispatch_action(action),
+            Ok(None) => {}
+            Err(message) => self.status_line = message,
+        }
+    }
+
+    pub(crate) fn action_for_key(&self, key: KeyEvent) -> std::result::Result<Option<UiAction>, String> {
+        let action = match key.code {
+            KeyCode::Char('q') => Some(UiAction::Quit),
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(UiAction::Quit)
+            }
+            KeyCode::Char('c') if self.view == ViewMode::Board => Some(self.claim_action()?),
+            KeyCode::Char('f') if self.view == ViewMode::Board => Some(self.finish_action()?),
+            KeyCode::Char('l') if self.view == ViewMode::Board => Some(self.launch_action()?),
+            KeyCode::Char('r') => Some(UiAction::Refresh),
+            KeyCode::Char('p') => Some(UiAction::Ping),
+            KeyCode::Char('o') => Some(UiAction::SwitchView(ViewMode::Home)),
+            KeyCode::Char('t') => Some(UiAction::SwitchView(ViewMode::Tracker)),
+            KeyCode::Char('b') => Some(UiAction::SwitchView(ViewMode::Board)),
+            KeyCode::Char('e') => Some(UiAction::SwitchView(ViewMode::Receipts)),
+            KeyCode::Char('j') | KeyCode::Down if self.view == ViewMode::Board => {
+                Some(UiAction::MoveBoardSelection(1))
+            }
+            KeyCode::Char('k') | KeyCode::Up if self.view == ViewMode::Board => {
+                Some(UiAction::MoveBoardSelection(-1))
+            }
+            KeyCode::Tab => Some(UiAction::CycleView(Direction::Forward)),
+            KeyCode::BackTab => Some(UiAction::CycleView(Direction::Backward)),
+            _ => None,
+        };
+
+        Ok(action)
+    }
+
+    pub(crate) fn dispatch_action(&mut self, action: UiAction) {
+        match action {
+            UiAction::Quit => self.should_quit = true,
+            UiAction::Refresh => self.refresh(),
+            UiAction::Ping => self.ping(),
+            UiAction::SwitchView(view) => self.view = view,
+            UiAction::CycleView(Direction::Forward) => self.view = self.view.next(),
+            UiAction::CycleView(Direction::Backward) => self.view = self.view.previous(),
+            UiAction::MoveBoardSelection(delta) => self.move_board_selection(delta),
+            UiAction::Claim(issue_id) => self.claim_issue(&issue_id),
+            UiAction::Launch(issue_id, base_rev) => self.launch_issue(&issue_id, &base_rev),
+            UiAction::Finish(issue_id) => self.finish_lane(&issue_id),
+            UiAction::Inspect(issue_id) => {
+                self.status_line = format!("inspection is not available yet for {issue_id}");
+            }
+            UiAction::ShowHelp => {
+                self.status_line = "help overlay is not available yet".to_owned();
+            }
+            UiAction::DismissOverlay => {}
+        }
+    }
+
     fn sync_board_selection(&mut self) {
         let Some(board) = self.board.value.as_ref() else {
             self.selected_board_item_id = None;
@@ -133,16 +193,31 @@ impl App {
         self.status_line = format!("selected {next}");
     }
 
-    fn claim_selected_issue(&mut self) {
-        let Some(issue_id) = self.selected_board_item_id.clone() else {
-            self.status_line = "no ready issue selected to claim".to_owned();
-            return;
-        };
+    fn claim_action(&self) -> std::result::Result<UiAction, String> {
+        let issue_id = self
+            .selected_board_item_id
+            .clone()
+            .ok_or_else(|| "no ready issue selected to claim".to_owned())?;
+        let board = self
+            .board
+            .value
+            .as_ref()
+            .ok_or_else(|| "board data is unavailable".to_owned())?;
+        let item = selected_board_item(board, Some(issue_id.as_str()))
+            .ok_or_else(|| "selected board item is no longer available".to_owned())?;
+        if item.kind() != BoardItemKind::ReadyIssue {
+            return Err(format!("selected issue {issue_id} is not ready to claim"));
+        }
+
+        Ok(UiAction::Claim(issue_id))
+    }
+
+    fn claim_issue(&mut self, issue_id: &str) {
         let Some(board) = self.board.value.as_ref() else {
             self.status_line = "board data is unavailable".to_owned();
             return;
         };
-        let Some(item) = selected_board_item(board, Some(issue_id.as_str())) else {
+        let Some(item) = selected_board_item(board, Some(issue_id)) else {
             self.status_line = "selected board item is no longer available".to_owned();
             return;
         };
@@ -151,7 +226,7 @@ impl App {
             return;
         }
 
-        match self.client.claim_issue(&issue_id) {
+        match self.client.claim_issue(issue_id) {
             Ok(ClaimIssuePayload { issue_id }) => {
                 self.refresh();
                 self.status_line =
@@ -163,16 +238,31 @@ impl App {
         }
     }
 
-    fn launch_selected_issue(&mut self) {
-        let Some(issue_id) = self.selected_board_item_id.clone() else {
-            self.status_line = "no claimed issue selected to launch".to_owned();
-            return;
-        };
+    fn launch_action(&self) -> std::result::Result<UiAction, String> {
+        let issue_id = self
+            .selected_board_item_id
+            .clone()
+            .ok_or_else(|| "no claimed issue selected to launch".to_owned())?;
+        let board = self
+            .board
+            .value
+            .as_ref()
+            .ok_or_else(|| "board data is unavailable".to_owned())?;
+        let item = selected_board_item(board, Some(issue_id.as_str()))
+            .ok_or_else(|| "selected board item is no longer available".to_owned())?;
+        if item.kind() != BoardItemKind::ClaimedIssue {
+            return Err(format!("selected issue {issue_id} is not claimed yet"));
+        }
+
+        Ok(UiAction::Launch(issue_id, self.default_base_rev.clone()))
+    }
+
+    fn launch_issue(&mut self, issue_id: &str, base_rev: &str) {
         let Some(board) = self.board.value.as_ref() else {
             self.status_line = "board data is unavailable".to_owned();
             return;
         };
-        let Some(item) = selected_board_item(board, Some(issue_id.as_str())) else {
+        let Some(item) = selected_board_item(board, Some(issue_id)) else {
             self.status_line = "selected board item is no longer available".to_owned();
             return;
         };
@@ -181,7 +271,7 @@ impl App {
             return;
         }
 
-        match self.client.launch_lane(&issue_id, &self.default_base_rev) {
+        match self.client.launch_lane(issue_id, base_rev) {
             Ok(LaunchLanePayload {
                 issue_id,
                 workspace_name,
@@ -196,16 +286,31 @@ impl App {
         }
     }
 
-    fn finish_selected_lane(&mut self) {
-        let Some(issue_id) = self.selected_board_item_id.clone() else {
-            self.status_line = "no active lane selected to finish".to_owned();
-            return;
-        };
+    fn finish_action(&self) -> std::result::Result<UiAction, String> {
+        let issue_id = self
+            .selected_board_item_id
+            .clone()
+            .ok_or_else(|| "no active lane selected to finish".to_owned())?;
+        let board = self
+            .board
+            .value
+            .as_ref()
+            .ok_or_else(|| "board data is unavailable".to_owned())?;
+        let item = selected_board_item(board, Some(issue_id.as_str()))
+            .ok_or_else(|| "selected board item is no longer available".to_owned())?;
+        if item.kind() != BoardItemKind::ActiveLane {
+            return Err(format!("selected item {issue_id} is not an active lane"));
+        }
+
+        Ok(UiAction::Finish(issue_id))
+    }
+
+    fn finish_lane(&mut self, issue_id: &str) {
         let Some(board) = self.board.value.as_ref() else {
             self.status_line = "board data is unavailable".to_owned();
             return;
         };
-        let Some(item) = selected_board_item(board, Some(issue_id.as_str())) else {
+        let Some(item) = selected_board_item(board, Some(issue_id)) else {
             self.status_line = "selected board item is no longer available".to_owned();
             return;
         };
@@ -214,7 +319,7 @@ impl App {
             return;
         }
 
-        match self.client.finish_lane(&issue_id, "completed") {
+        match self.client.finish_lane(issue_id, "completed") {
             Ok(FinishLanePayload { issue_id, outcome }) => {
                 self.refresh();
                 self.status_line = format!("finished {issue_id} as {outcome}");
@@ -225,32 +330,6 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true
-            }
-            KeyCode::Char('c') if self.view == ViewMode::Board => self.claim_selected_issue(),
-            KeyCode::Char('f') if self.view == ViewMode::Board => self.finish_selected_lane(),
-            KeyCode::Char('l') if self.view == ViewMode::Board => self.launch_selected_issue(),
-            KeyCode::Char('r') => self.refresh(),
-            KeyCode::Char('p') => self.ping(),
-            KeyCode::Char('o') => self.view = ViewMode::Home,
-            KeyCode::Char('t') => self.view = ViewMode::Tracker,
-            KeyCode::Char('b') => self.view = ViewMode::Board,
-            KeyCode::Char('e') => self.view = ViewMode::Receipts,
-            KeyCode::Char('j') | KeyCode::Down if self.view == ViewMode::Board => {
-                self.move_board_selection(1)
-            }
-            KeyCode::Char('k') | KeyCode::Up if self.view == ViewMode::Board => {
-                self.move_board_selection(-1)
-            }
-            KeyCode::Tab => self.view = self.view.next(),
-            KeyCode::BackTab => self.view = self.view.previous(),
-            _ => {}
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -433,12 +512,17 @@ pub(crate) fn step_board_selection(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalized_board_selection, step_board_selection};
+    use std::path::PathBuf;
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::{App, ViewMode, normalized_board_selection, step_board_selection};
+    use crate::action::{Direction, UiAction};
+    use crate::protocol::ProtocolClient;
     use crate::types::{BoardIssue, BoardStatus, LaneEntry};
 
-    #[test]
-    fn selection_helpers_follow_board_item_order() {
-        let board = BoardStatus {
+    fn board_fixture() -> BoardStatus {
+        BoardStatus {
             repo_root: "/tmp/repo".to_owned(),
             generated_at: "2026-03-26T00:00:00Z".to_owned(),
             summary: None,
@@ -471,7 +555,23 @@ mod tests {
                 workspace_name: Some("tusk-d-lane".to_owned()),
             }],
             workspaces: vec![],
-        };
+        }
+    }
+
+    fn test_app() -> App {
+        App::new(
+            ProtocolClient::new(
+                PathBuf::from("/tmp/repo"),
+                PathBuf::from("/tmp/repo/.beads/tuskd/tuskd.sock"),
+            ),
+            std::time::Duration::from_secs(60),
+            "main".to_owned(),
+        )
+    }
+
+    #[test]
+    fn selection_helpers_follow_board_item_order() {
+        let board = board_fixture();
 
         assert_eq!(
             normalized_board_selection(&board, None),
@@ -509,5 +609,49 @@ mod tests {
             step_board_selection(&board, Some("tusk-b"), -1),
             Some("tusk-a".to_owned())
         );
+    }
+
+    #[test]
+    fn action_for_key_maps_board_intents_to_typed_actions() {
+        let mut app = test_app();
+        app.view = ViewMode::Board;
+        app.board.value = Some(board_fixture());
+
+        app.selected_board_item_id = Some("tusk-a".to_owned());
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+            Ok(Some(UiAction::Claim("tusk-a".to_owned())))
+        );
+
+        app.selected_board_item_id = Some("tusk-c".to_owned());
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+            Ok(Some(UiAction::Launch(
+                "tusk-c".to_owned(),
+                "main".to_owned()
+            )))
+        );
+
+        app.selected_board_item_id = Some("tusk-d".to_owned());
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)),
+            Ok(Some(UiAction::Finish("tusk-d".to_owned())))
+        );
+    }
+
+    #[test]
+    fn dispatch_action_updates_view_and_selection_without_rendering() {
+        let mut app = test_app();
+        app.board.value = Some(board_fixture());
+        app.selected_board_item_id = Some("tusk-a".to_owned());
+
+        app.dispatch_action(UiAction::SwitchView(ViewMode::Board));
+        assert_eq!(app.view, ViewMode::Board);
+
+        app.dispatch_action(UiAction::MoveBoardSelection(1));
+        assert_eq!(app.selected_board_item_id.as_deref(), Some("tusk-b"));
+
+        app.dispatch_action(UiAction::CycleView(Direction::Forward));
+        assert_eq!(app.view, ViewMode::Receipts);
     }
 }
