@@ -381,10 +381,12 @@ replace it.
 This note implies the following implementation order.
 
 1. define the transition carrier and admission law
-2. replace ad hoc per-command shell mutation logic with one serialized
+2. specialize the first Rust-owned runtime seam in
+   [`design/tusk-backend-service-carrier.md`](./tusk-backend-service-carrier.md)
+3. replace ad hoc per-command shell mutation logic with one serialized
    transition evaluator
-3. add concurrency and rollback tests at the service boundary
-4. only then consider a public `WCAT`-style action surface over the stabilized
+4. add concurrency and rollback tests at the service boundary
+5. only then consider a public `WCAT`-style action surface over the stabilized
    runtime law
 
 ## Recommendation
@@ -393,6 +395,9 @@ Proceed as if:
 
 - `tusk` is the local operational runtime layer,
 - the transition carrier is the primitive carried runtime object,
+- the first Rust extraction should specialize that carrier only for the
+  `ensure/adopt/publish` seam named in
+  [`design/tusk-backend-service-carrier.md`](./tusk-backend-service-carrier.md),
 - witnesses remain explicit,
 - admission remains distinct from realization,
 - receipts remain evidence rather than truth,
