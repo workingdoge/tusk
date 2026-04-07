@@ -3,14 +3,22 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{Frame, layout::Rect};
 
+use super::{panel_title, prepend_panel_notice};
 use crate::app::{App, ViewMode};
 use crate::theme::{error_lines, kv_line, pane_block, title_line};
 use crate::viewmodel::{BoardViewModel, IssueItem, LaneItem, SummaryView};
 
 pub(crate) fn render_board(frame: &mut Frame, area: Rect, app: &App) {
-    let block = pane_block("Board", app.view == ViewMode::Board);
+    let block = pane_block(
+        panel_title("Board", &app.board, app.refresh_interval()),
+        app.view == ViewMode::Board,
+    );
     let lines = match (app.board_viewmodel(), &app.board.error) {
-        (Some(board), _) => board_lines(&board),
+        (Some(board), _) => {
+            let mut lines = board_lines(&board);
+            prepend_panel_notice(&mut lines, &app.board);
+            lines
+        }
         (_, Some(error)) => error_lines(error),
         _ => vec![Line::from("waiting for board data")],
     };
@@ -107,7 +115,10 @@ pub(crate) fn summary_lines(summary: &SummaryView) -> Vec<Line<'static>> {
 }
 
 fn lane_lines(board: &BoardViewModel) -> Vec<Line<'static>> {
-    if board.active_lanes.is_empty() && board.finished_lanes.is_empty() && board.stale_lanes.is_empty() {
+    if board.active_lanes.is_empty()
+        && board.finished_lanes.is_empty()
+        && board.stale_lanes.is_empty()
+    {
         return vec![Line::from("none")];
     }
 

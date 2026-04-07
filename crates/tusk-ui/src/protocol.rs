@@ -59,11 +59,7 @@ impl ProtocolClient {
         )
     }
 
-    pub(crate) fn finish_lane(
-        &self,
-        issue_id: &str,
-        outcome: &str,
-    ) -> Result<FinishLanePayload> {
+    pub(crate) fn finish_lane(&self, issue_id: &str, outcome: &str) -> Result<FinishLanePayload> {
         self.query_with_payload(
             "finish_lane",
             json!({ "issue_id": issue_id, "outcome": outcome }),

@@ -638,7 +638,10 @@ enum LaneGroup {
 }
 
 fn lane_group(lane: &LaneEntry) -> LaneGroup {
-    let observed_status = lane.observed_status.as_deref().unwrap_or(lane.status.as_str());
+    let observed_status = lane
+        .observed_status
+        .as_deref()
+        .unwrap_or(lane.status.as_str());
     if observed_status == "stale" {
         LaneGroup::Stale
     } else if lane.status == "finished" || observed_status == "finished" {
@@ -667,7 +670,8 @@ mod tests {
             Some(1)
         );
         assert_eq!(
-            model.primary_action
+            model
+                .primary_action
                 .as_ref()
                 .and_then(|action| action.narrative.as_ref())
                 .map(|narrative| narrative.blockers.len()),

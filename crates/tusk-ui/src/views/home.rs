@@ -1,14 +1,14 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::app::App;
-use crate::theme::{error_lines, kv_line, title_line};
+use crate::theme::{error_lines, kv_line, pane_block, title_line};
 use crate::viewmodel::{ContextAnomaly, HistoryItem, HomeViewModel, IssueRef};
 
 use super::board::summary_lines;
-use super::render_lines_panel;
+use super::{panel_title, prepend_panel_notice, render_lines_panel};
 
 pub(crate) fn render_home(frame: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::default()
@@ -26,18 +26,56 @@ pub(crate) fn render_home(frame: &mut Frame, area: Rect, app: &App) {
 
     match (app.home_viewmodel(), &app.home.error) {
         (Some(home), _) => {
-            render_lines_panel(frame, top[0], "Now", home_now_lines(&home));
-            render_lines_panel(frame, top[1], "Next", home_next_lines(&home));
-            render_lines_panel(frame, bottom[0], "History", home_history_lines(&home));
-            render_lines_panel(frame, bottom[1], "Context", home_context_lines(&home));
+            let mut now_lines = home_now_lines(&home);
+            prepend_panel_notice(&mut now_lines, &app.home);
+            render_lines_panel(
+                frame,
+                top[0],
+                panel_title("Now", &app.home, app.refresh_interval()),
+                now_lines,
+                false,
+            );
+
+            render_lines_panel(
+                frame,
+                top[1],
+                panel_title("Next", &app.home, app.refresh_interval()),
+                home_next_lines(&home),
+                false,
+            );
+
+            render_lines_panel(
+                frame,
+                bottom[0],
+                panel_title("History", &app.home, app.refresh_interval()),
+                home_history_lines(&home),
+                false,
+            );
+
+            render_lines_panel(
+                frame,
+                bottom[1],
+                panel_title("Context", &app.home, app.refresh_interval()),
+                home_context_lines(&home),
+                false,
+            );
         }
         (_, Some(error)) => {
-            render_lines_panel(frame, area, "Home", error_lines(error));
+            render_lines_panel(
+                frame,
+                area,
+                panel_title("Home", &app.home, app.refresh_interval()),
+                error_lines(error),
+                false,
+            );
         }
         _ => {
             frame.render_widget(
                 Paragraph::new(vec![Line::from("waiting for operator snapshot")])
-                    .block(crate::theme::pane_block("Home", false))
+                    .block(pane_block(
+                        panel_title("Home", &app.home, app.refresh_interval()),
+                        false,
+                    ))
                     .wrap(Wrap { trim: false }),
                 area,
             );
@@ -203,7 +241,10 @@ pub(crate) fn home_next_lines(snapshot: &HomeViewModel) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
     lines.push(kv_line("ready", snapshot.ready_queue.len().to_string()));
     lines.push(kv_line("blocked", snapshot.blocked_queue.len().to_string()));
-    lines.push(kv_line("deferred", snapshot.deferred_queue.len().to_string()));
+    lines.push(kv_line(
+        "deferred",
+        snapshot.deferred_queue.len().to_string(),
+    ));
 
     lines.push(Line::from(""));
     lines.push(title_line("ready queue"));
@@ -301,7 +342,11 @@ pub(crate) fn home_context_lines(snapshot: &HomeViewModel) -> Vec<Line<'static>>
             let suffix = if workspace.details.is_empty() {
                 workspace.description.clone()
             } else {
-                format!("{} ({})", workspace.description, workspace.details.join(" | "))
+                format!(
+                    "{} ({})",
+                    workspace.description,
+                    workspace.details.join(" | ")
+                )
             };
             lines.push(Line::from(format!("{} {}", workspace.name, suffix)));
         }

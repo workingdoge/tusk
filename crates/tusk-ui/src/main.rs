@@ -8,8 +8,10 @@ mod theme;
 mod types;
 mod viewmodel;
 mod views;
+mod worker;
 
 use std::io;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyEventKind};
@@ -32,8 +34,11 @@ fn main() -> Result<()> {
         .socket
         .unwrap_or_else(|| default_socket_path(&repo_root));
     let client = ProtocolClient::new(repo_root, socket_path);
-    let mut app = App::new(client, std::time::Duration::from_millis(cli.refresh_ms), cli.base_rev);
-    app.refresh();
+    let app = App::new(
+        client,
+        std::time::Duration::from_millis(cli.refresh_ms),
+        cli.base_rev,
+    );
     run_tui(app)
 }
 
@@ -55,9 +60,10 @@ fn run_tui(mut app: App) -> Result<()> {
 
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     while !app.should_quit {
+        app.drain_refresh_updates();
         terminal.draw(|frame| render(frame, app))?;
 
-        let timeout = app.time_until_refresh();
+        let timeout = app.time_until_refresh().min(Duration::from_millis(100));
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
@@ -67,7 +73,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
         }
 
         if app.should_refresh() {
-            app.refresh();
+            app.request_view_refresh("background refresh");
         }
     }
 

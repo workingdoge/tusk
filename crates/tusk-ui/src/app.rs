@@ -1,6 +1,5 @@
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::action::{Direction, UiAction};
@@ -14,13 +13,15 @@ use crate::viewmodel::{
     BoardViewModel, HomeViewModel, ReceiptsViewModel, TrackerViewModel, board_viewmodel,
     home_viewmodel, receipts_viewmodel, tracker_viewmodel,
 };
+use crate::worker::{RefreshSet, RefreshUpdate, RefreshWorker};
 
 #[derive(Debug)]
 pub(crate) struct App {
     pub(crate) client: ProtocolClient,
     refresh_interval: Duration,
     pub(crate) default_base_rev: String,
-    last_refresh_started: Instant,
+    worker: RefreshWorker,
+    last_refresh_requested: Instant,
     pub(crate) status_line: String,
     pub(crate) should_quit: bool,
     pub(crate) view: ViewMode,
@@ -37,11 +38,13 @@ impl App {
         refresh_interval: Duration,
         default_base_rev: String,
     ) -> Self {
-        Self {
+        let worker = RefreshWorker::start(client.clone());
+        let mut app = Self {
             client,
             refresh_interval,
             default_base_rev,
-            last_refresh_started: Instant::now() - refresh_interval,
+            worker,
+            last_refresh_requested: Instant::now() - refresh_interval,
             status_line: "press r to refresh, o for home, b for board, q to quit".to_owned(),
             should_quit: false,
             view: ViewMode::Home,
@@ -50,31 +53,67 @@ impl App {
             tracker: PanelState::default(),
             board: PanelState::default(),
             receipts: PanelState::default(),
-        }
+        };
+        app.request_full_refresh("loading cockpit");
+        app
+    }
+
+    pub(crate) fn refresh_interval(&self) -> Duration {
+        self.refresh_interval
     }
 
     pub(crate) fn should_refresh(&self) -> bool {
-        self.last_refresh_started.elapsed() >= self.refresh_interval
+        self.last_refresh_requested.elapsed() >= self.refresh_interval
     }
 
     pub(crate) fn time_until_refresh(&self) -> Duration {
         self.refresh_interval
-            .saturating_sub(self.last_refresh_started.elapsed())
+            .saturating_sub(self.last_refresh_requested.elapsed())
     }
 
-    pub(crate) fn refresh(&mut self) {
-        self.last_refresh_started = Instant::now();
-        self.home = PanelState::from_result(self.client.operator_snapshot());
-        self.tracker = PanelState::from_result(self.client.tracker_status());
-        self.board = PanelState::from_result(self.client.board_status());
-        self.receipts = PanelState::from_result(self.client.receipts_status());
-        self.sync_board_selection();
+    pub(crate) fn request_full_refresh(&mut self, reason: &str) {
+        self.request_refresh(RefreshSet::all(), reason);
+    }
 
-        self.status_line = format!(
-            "refreshed {} from {}",
-            now_label(),
-            self.client.socket_path.display()
-        );
+    pub(crate) fn request_view_refresh(&mut self, reason: &str) {
+        self.request_refresh(self.refresh_set_for_view(), reason);
+    }
+
+    pub(crate) fn drain_refresh_updates(&mut self) {
+        let mut refreshed = RefreshSet::default();
+        let mut failures = Vec::new();
+
+        for update in self.worker.drain() {
+            match update {
+                RefreshUpdate::Home(result) => {
+                    if apply_panel_update(&mut self.home, result, "home", &mut failures) {
+                        refreshed.home = true;
+                    }
+                }
+                RefreshUpdate::Tracker(result) => {
+                    if apply_panel_update(&mut self.tracker, result, "tracker", &mut failures) {
+                        refreshed.tracker = true;
+                    }
+                }
+                RefreshUpdate::Board(result) => {
+                    if apply_panel_update(&mut self.board, result, "board", &mut failures) {
+                        refreshed.board = true;
+                        self.sync_board_selection();
+                    }
+                }
+                RefreshUpdate::Receipts(result) => {
+                    if apply_panel_update(&mut self.receipts, result, "receipts", &mut failures) {
+                        refreshed.receipts = true;
+                    }
+                }
+            }
+        }
+
+        if let Some(message) = failures.into_iter().next() {
+            self.status_line = message;
+        } else if refreshed.any() {
+            self.status_line = format!("updated {} at {}", refreshed.describe(), now_label());
+        }
     }
 
     pub(crate) fn ping(&mut self) {
@@ -115,7 +154,10 @@ impl App {
         }
     }
 
-    pub(crate) fn action_for_key(&self, key: KeyEvent) -> std::result::Result<Option<UiAction>, String> {
+    pub(crate) fn action_for_key(
+        &self,
+        key: KeyEvent,
+    ) -> std::result::Result<Option<UiAction>, String> {
         let action = match key.code {
             KeyCode::Char('q') => Some(UiAction::Quit),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -147,11 +189,20 @@ impl App {
     pub(crate) fn dispatch_action(&mut self, action: UiAction) {
         match action {
             UiAction::Quit => self.should_quit = true,
-            UiAction::Refresh => self.refresh(),
+            UiAction::Refresh => self.request_full_refresh("manual refresh"),
             UiAction::Ping => self.ping(),
-            UiAction::SwitchView(view) => self.view = view,
-            UiAction::CycleView(Direction::Forward) => self.view = self.view.next(),
-            UiAction::CycleView(Direction::Backward) => self.view = self.view.previous(),
+            UiAction::SwitchView(view) => {
+                self.view = view;
+                self.request_view_refresh("view refresh");
+            }
+            UiAction::CycleView(Direction::Forward) => {
+                self.view = self.view.next();
+                self.request_view_refresh("view refresh");
+            }
+            UiAction::CycleView(Direction::Backward) => {
+                self.view = self.view.previous();
+                self.request_view_refresh("view refresh");
+            }
             UiAction::MoveBoardSelection(delta) => self.move_board_selection(delta),
             UiAction::Claim(issue_id) => self.claim_issue(&issue_id),
             UiAction::Launch(issue_id, base_rev) => self.launch_issue(&issue_id, &base_rev),
@@ -228,9 +279,10 @@ impl App {
 
         match self.client.claim_issue(issue_id) {
             Ok(ClaimIssuePayload { issue_id }) => {
-                self.refresh();
-                self.status_line =
-                    format!("claimed {issue_id}; launch base is {}", self.default_base_rev);
+                self.request_full_refresh(&format!(
+                    "claimed {issue_id}; launch base is {}",
+                    self.default_base_rev
+                ));
             }
             Err(error) => {
                 self.status_line = format!("claim failed for {issue_id}: {error:#}");
@@ -277,8 +329,9 @@ impl App {
                 workspace_name,
                 base_rev,
             }) => {
-                self.refresh();
-                self.status_line = format!("launched {issue_id} in {workspace_name} from {base_rev}");
+                self.request_full_refresh(&format!(
+                    "launched {issue_id} in {workspace_name} from {base_rev}"
+                ));
             }
             Err(error) => {
                 self.status_line = format!("launch failed for {issue_id}: {error:#}");
@@ -321,8 +374,7 @@ impl App {
 
         match self.client.finish_lane(issue_id, "completed") {
             Ok(FinishLanePayload { issue_id, outcome }) => {
-                self.refresh();
-                self.status_line = format!("finished {issue_id} as {outcome}");
+                self.request_full_refresh(&format!("finished {issue_id} as {outcome}"));
             }
             Err(error) => {
                 self.status_line = format!("finish failed for {issue_id}: {error:#}");
@@ -330,6 +382,70 @@ impl App {
         }
     }
 
+    fn request_refresh(&mut self, requested: RefreshSet, reason: &str) {
+        let queued = self.begin_refresh(requested);
+        self.last_refresh_requested = Instant::now();
+
+        if !queued.any() {
+            self.status_line = format!("{reason}; refresh already in flight");
+            return;
+        }
+
+        match self.worker.request(queued) {
+            Ok(()) => {
+                self.status_line = format!("{reason}; updating {}", queued.describe());
+            }
+            Err(error) => {
+                self.cancel_refresh(queued);
+                self.status_line = format!("{reason}; {error}");
+            }
+        }
+    }
+
+    fn begin_refresh(&mut self, requested: RefreshSet) -> RefreshSet {
+        RefreshSet {
+            home: requested.home && self.home.begin_refresh(),
+            tracker: requested.tracker && self.tracker.begin_refresh(),
+            board: requested.board && self.board.begin_refresh(),
+            receipts: requested.receipts && self.receipts.begin_refresh(),
+        }
+    }
+
+    fn cancel_refresh(&mut self, queued: RefreshSet) {
+        if queued.home {
+            self.home.cancel_refresh();
+        }
+        if queued.tracker {
+            self.tracker.cancel_refresh();
+        }
+        if queued.board {
+            self.board.cancel_refresh();
+        }
+        if queued.receipts {
+            self.receipts.cancel_refresh();
+        }
+    }
+
+    fn refresh_set_for_view(&self) -> RefreshSet {
+        match self.view {
+            ViewMode::Home => RefreshSet {
+                home: true,
+                ..RefreshSet::default()
+            },
+            ViewMode::Tracker => RefreshSet {
+                tracker: true,
+                ..RefreshSet::default()
+            },
+            ViewMode::Board => RefreshSet {
+                board: true,
+                ..RefreshSet::default()
+            },
+            ViewMode::Receipts => RefreshSet {
+                receipts: true,
+                ..RefreshSet::default()
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -364,6 +480,8 @@ impl ViewMode {
 pub(crate) struct PanelState<T> {
     pub(crate) value: Option<T>,
     pub(crate) error: Option<String>,
+    last_success_at: Option<Instant>,
+    refresh_in_flight: bool,
 }
 
 impl<T> Default for PanelState<T> {
@@ -371,21 +489,90 @@ impl<T> Default for PanelState<T> {
         Self {
             value: None,
             error: None,
+            last_success_at: None,
+            refresh_in_flight: false,
         }
     }
 }
 
 impl<T> PanelState<T> {
-    pub(crate) fn from_result(result: Result<T>) -> Self {
+    pub(crate) fn begin_refresh(&mut self) -> bool {
+        if self.refresh_in_flight {
+            return false;
+        }
+        self.refresh_in_flight = true;
+        true
+    }
+
+    pub(crate) fn cancel_refresh(&mut self) {
+        self.refresh_in_flight = false;
+    }
+
+    pub(crate) fn apply_result(
+        &mut self,
+        result: std::result::Result<T, String>,
+    ) -> PanelApplyOutcome {
+        self.refresh_in_flight = false;
         match result {
-            Ok(value) => Self {
-                value: Some(value),
-                error: None,
-            },
-            Err(error) => Self {
-                value: None,
-                error: Some(format!("{error:#}")),
-            },
+            Ok(value) => {
+                self.value = Some(value);
+                self.error = None;
+                self.last_success_at = Some(Instant::now());
+                PanelApplyOutcome::Updated
+            }
+            Err(error) => {
+                let stale = self.value.is_some();
+                self.error = Some(error.clone());
+                if stale {
+                    PanelApplyOutcome::Stale(error)
+                } else {
+                    PanelApplyOutcome::Failed(error)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn is_refreshing(&self) -> bool {
+        self.refresh_in_flight
+    }
+
+    pub(crate) fn has_value(&self) -> bool {
+        self.value.is_some()
+    }
+
+    pub(crate) fn age(&self) -> Option<Duration> {
+        self.last_success_at.map(|instant| instant.elapsed())
+    }
+
+    pub(crate) fn stale_message(&self) -> Option<&str> {
+        self.error.as_deref().filter(|_| self.value.is_some())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum PanelApplyOutcome {
+    Updated,
+    Stale(String),
+    Failed(String),
+}
+
+fn apply_panel_update<T>(
+    panel: &mut PanelState<T>,
+    result: std::result::Result<T, String>,
+    panel_name: &str,
+    failures: &mut Vec<String>,
+) -> bool {
+    match panel.apply_result(result) {
+        PanelApplyOutcome::Updated => true,
+        PanelApplyOutcome::Stale(error) => {
+            failures.push(format!(
+                "{panel_name} refresh failed: {error}; showing last good data"
+            ));
+            false
+        }
+        PanelApplyOutcome::Failed(error) => {
+            failures.push(format!("{panel_name} refresh failed: {error}"));
+            false
         }
     }
 }
@@ -429,7 +616,10 @@ pub(crate) enum LaneGroup {
 }
 
 pub(crate) fn lane_group(lane: &LaneEntry) -> LaneGroup {
-    let observed_status = lane.observed_status.as_deref().unwrap_or(lane.status.as_str());
+    let observed_status = lane
+        .observed_status
+        .as_deref()
+        .unwrap_or(lane.status.as_str());
     if observed_status == "stale" {
         LaneGroup::Stale
     } else if lane.status == "finished" || observed_status == "finished" {
@@ -455,7 +645,11 @@ fn board_items(board: &BoardStatus) -> Vec<BoardItemRef<'_>> {
     );
     items.extend(board.ready_issues.iter().map(BoardItemRef::ReadyIssue));
     items.extend(board.claimed_issues.iter().map(BoardItemRef::ClaimedIssue));
-    items.extend(active_lanes(board).into_iter().map(BoardItemRef::ActiveLane));
+    items.extend(
+        active_lanes(board)
+            .into_iter()
+            .map(BoardItemRef::ActiveLane),
+    );
     items
 }
 

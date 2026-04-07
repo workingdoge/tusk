@@ -12,7 +12,7 @@ pub(crate) fn now_label() -> String {
     format!("epoch:{seconds}")
 }
 
-pub(crate) fn pane_block(title: &'static str, focused: bool) -> Block<'static> {
+pub(crate) fn pane_block<'a>(title: Line<'a>, focused: bool) -> Block<'a> {
     let style = if focused {
         Style::default()
             .fg(Color::Cyan)

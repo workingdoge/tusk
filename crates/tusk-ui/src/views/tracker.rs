@@ -1,3 +1,4 @@
+use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{Frame, layout::Rect};
 
@@ -6,13 +7,21 @@ use crate::theme::{error_lines, kv_line, pane_block, title_line};
 use crate::viewmodel::TrackerViewModel;
 
 use super::board::summary_lines;
+use super::{panel_title, prepend_panel_notice};
 
 pub(crate) fn render_tracker(frame: &mut Frame, area: Rect, app: &App) {
-    let block = pane_block("Tracker Service", app.view == ViewMode::Tracker);
+    let block = pane_block(
+        panel_title("Tracker Service", &app.tracker, app.refresh_interval()),
+        app.view == ViewMode::Tracker,
+    );
     let lines = match (app.tracker_viewmodel(), &app.tracker.error) {
-        (Some(tracker), _) => tracker_lines(&tracker),
+        (Some(tracker), _) => {
+            let mut lines = tracker_lines(&tracker);
+            prepend_panel_notice(&mut lines, &app.tracker);
+            lines
+        }
         (_, Some(error)) => error_lines(error),
-        _ => vec![ratatui::text::Line::from("waiting for tracker data")],
+        _ => vec![Line::from("waiting for tracker data")],
     };
 
     frame.render_widget(
