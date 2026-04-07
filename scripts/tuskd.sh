@@ -33,7 +33,7 @@ Commands:
   finish-lane   Record a terminal lane outcome without collapsing into issue closure.
   archive-lane  Remove one finished lane from live state once its workspace is gone.
   serve         Serve the local JSON protocol over a Unix socket.
-  query         Query a running tuskd socket.
+  query         Query one tuskd protocol request; read kinds are handled locally, actions require a live socket.
 
 Protocol request kinds:
   tracker_status
@@ -67,6 +67,13 @@ exec_tuskd_core() {
 
   bin="$(require_tuskd_core_bin)"
   exec "${bin}" "$@"
+}
+
+run_tuskd_core() {
+  local bin
+
+  bin="$(require_tuskd_core_bin)"
+  "${bin}" "$@"
 }
 
 now_iso8601() {
@@ -3199,6 +3206,11 @@ respond_once() {
     return 0
   fi
 
+  if payload="$(printf '%s\n' "${request_line}" | run_tuskd_core respond --repo "${repo_root}" --socket "${socket_path}" 2>/dev/null)"; then
+    printf '%s\n' "${payload}"
+    return 0
+  fi
+
   request_id="$(printf '%s' "${request_line}" | jq -r '.request_id // ""')"
   kind="$(printf '%s' "${request_line}" | jq -r '.kind // ""')"
 
@@ -3292,14 +3304,16 @@ cmd_status() {
 
 cmd_board_status() {
   local repo_root="$1"
+  local socket_path="$2"
 
-  board_status_projection "${repo_root}"
+  exec_tuskd_core board-status --repo "${repo_root}" --socket "${socket_path}"
 }
 
 cmd_receipts_status() {
   local repo_root="$1"
+  local socket_path="$2"
 
-  receipts_status_projection "${repo_root}"
+  exec_tuskd_core receipts-status --repo "${repo_root}" --socket "${socket_path}"
 }
 
 cmd_claim_issue() {
@@ -3390,15 +3404,22 @@ cmd_serve() {
 }
 
 cmd_query() {
-  local socket_path="$1"
-  local kind="$2"
-  local request_id="$3"
-  local payload_json="$4"
+  local repo_root="$1"
+  local socket_path="$2"
+  local kind="$3"
+  local request_id="$4"
+  local payload_json="$5"
   local request_json
 
   if ! printf '%s' "${payload_json}" | jq -e 'type' >/dev/null 2>&1; then
     fail "query --payload must be valid JSON"
   fi
+
+  case "${kind}" in
+    tracker_status|board_status|receipts_status|ping)
+      exec_tuskd_core query --repo "${repo_root}" --socket "${socket_path}" --kind "${kind}" --request-id "${request_id}" --payload "${payload_json}"
+      ;;
+  esac
 
   request_json="$(
     jq -cn \
@@ -3515,10 +3536,10 @@ case "${command}" in
     cmd_status "${repo_root}" "${socket_path}"
     ;;
   board-status)
-    cmd_board_status "${repo_root}"
+    cmd_board_status "${repo_root}" "${socket_path}"
     ;;
   receipts-status)
-    cmd_receipts_status "${repo_root}"
+    cmd_receipts_status "${repo_root}" "${socket_path}"
     ;;
   claim-issue)
     [ -n "${issue_id_arg}" ] || fail "claim-issue requires --issue-id"
@@ -3553,7 +3574,7 @@ case "${command}" in
     ;;
   query)
     [ -n "${kind_arg}" ] || fail "query requires --kind"
-    cmd_query "${socket_path}" "${kind_arg}" "${request_id_arg:-$(now_iso8601)}" "${payload_arg}"
+    cmd_query "${repo_root}" "${socket_path}" "${kind_arg}" "${request_id_arg:-$(now_iso8601)}" "${payload_arg}"
     ;;
   respond)
     respond_once "${repo_root}" "${socket_path}"

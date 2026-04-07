@@ -1,10 +1,11 @@
 use chrono::Utc;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -16,13 +17,21 @@ Usage:
   tuskd-core seam [--json]
   tuskd-core ensure --repo PATH [--socket PATH]
   tuskd-core status --repo PATH [--socket PATH]
+  tuskd-core board-status --repo PATH
+  tuskd-core receipts-status --repo PATH
+  tuskd-core query --repo PATH [--socket PATH] --kind KIND [--request-id ID] [--payload JSON]
+  tuskd-core respond --repo PATH [--socket PATH]
   tuskd-core help
 
 Commands:
-  seam    Print the first Rust-owned backend/service seam contract.
-  ensure  Run the Rust-owned backend ensure and service publication path.
-  status  Publish the current backend/service projection without repair.
-  help    Show this help text.
+  seam            Print the first Rust-owned backend/service seam contract.
+  ensure          Run the Rust-owned backend ensure and service publication path.
+  status          Publish the current backend/service projection without repair.
+  board-status    Publish the current board projection.
+  receipts-status Publish the current receipt projection.
+  query           Render one read-side protocol response envelope.
+  respond         Read one protocol request from stdin and answer read-side kinds.
+  help            Show this help text.
 ";
 
 const SEAM_TEXT: &str = "\
@@ -905,6 +914,247 @@ fn status_projection(repo_root: &Path, socket_path: &Path) -> Result<Value, Stri
     write_service_record(repo_root, socket_path, mode, pid, &health, &leases)
 }
 
+fn render_lines_result(name: &str, exit_code: i32, output: &str) -> Value {
+    let ok = exit_code == 0;
+    let lines = output
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| Value::String(line.to_string()))
+        .collect::<Vec<_>>();
+
+    json!({
+        "name": name,
+        "ok": ok,
+        "exit_code": exit_code,
+        "output": lines,
+    })
+}
+
+fn run_lines_command_in_repo<I, S>(
+    repo_root: &Path,
+    name: &str,
+    program: &str,
+    args: I,
+) -> Result<Value, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let (exit_code, output) = run_in_repo_capture(repo_root, program, args)?;
+    Ok(render_lines_result(name, exit_code, &output))
+}
+
+fn current_lanes(repo_root: &Path) -> Value {
+    match read_json_file(&lanes_path(repo_root)) {
+        Value::Array(items) => Value::Array(items),
+        _ => json!([]),
+    }
+}
+
+fn lane_state_projection(repo_root: &Path) -> Result<Value, String> {
+    ensure_state_files(repo_root)?;
+    let lanes = current_lanes(repo_root);
+    let mut projected = Vec::new();
+
+    if let Some(items) = lanes.as_array() {
+        for lane in items {
+            let mut lane_object = lane.as_object().cloned().unwrap_or_default();
+            let workspace_path = lane_object
+                .get("workspace_path")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let workspace_exists = !workspace_path.is_empty() && Path::new(workspace_path).is_dir();
+            let stored_status = lane_object
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("launched");
+            let observed_status = if workspace_exists || stored_status == "finished" {
+                stored_status.to_string()
+            } else {
+                "stale".to_string()
+            };
+
+            lane_object.insert(
+                "workspace_exists".to_string(),
+                Value::Bool(workspace_exists),
+            );
+            lane_object.insert(
+                "observed_status".to_string(),
+                Value::String(observed_status),
+            );
+            projected.push(Value::Object(lane_object));
+        }
+    }
+
+    Ok(Value::Array(projected))
+}
+
+fn board_status_projection(repo_root: &Path, socket_path: &Path) -> Result<Value, String> {
+    let status_result = run_tracker_json_command_in_repo(repo_root, "tracker_status", ["status"])?;
+    let ready_result = run_tracker_json_command_in_repo(repo_root, "tracker_ready", ["ready"])?;
+    let board_issues_result =
+        run_tracker_json_command_in_repo(repo_root, "tracker_board_issues", ["issues", "board"])?;
+    let workspaces_result = run_lines_command_in_repo(
+        repo_root,
+        "jj_workspace_list",
+        "jj",
+        [
+            "workspace",
+            "list",
+            "--ignore-working-copy",
+            "--color",
+            "never",
+        ],
+    )?;
+    let lanes = lane_state_projection(repo_root)?;
+
+    let summary = status_result
+        .get("output")
+        .filter(|value| value.is_object())
+        .and_then(|value| value.get("summary"))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    let ready_issues = ready_result
+        .get("output")
+        .filter(|value| value.is_array())
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+
+    let lane_ids = lanes
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|lane| lane.get("issue_id").and_then(Value::as_str))
+        .map(|value| value.to_string())
+        .collect::<HashSet<_>>();
+
+    let board_output = board_issues_result
+        .get("output")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let claimed_issues = board_output
+        .get("claimed_issues")
+        .and_then(Value::as_array)
+        .map(|issues| {
+            issues
+                .iter()
+                .filter(|issue| match issue.get("id").and_then(Value::as_str) {
+                    Some(id) => !lane_ids.contains(id),
+                    None => true,
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let blocked_issues = board_output
+        .get("blocked_issues")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let deferred_issues = board_output
+        .get("deferred_issues")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let workspaces = workspaces_result
+        .get("output")
+        .filter(|value| value.is_array())
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+
+    Ok(json!({
+        "repo_root": repo_root.to_string_lossy().into_owned(),
+        "generated_at": now_iso8601(),
+        "summary": summary,
+        "ready_issues": ready_issues,
+        "claimed_issues": claimed_issues,
+        "blocked_issues": blocked_issues,
+        "deferred_issues": deferred_issues,
+        "lanes": lanes,
+        "workspaces": workspaces,
+        "checks": {
+            "tracker_status": status_result,
+            "tracker_ready": ready_result,
+            "tracker_board_issues": board_issues_result,
+            "jj_workspace_list": workspaces_result,
+        },
+        "protocol": {
+            "kind": "unix",
+            "endpoint": socket_path.to_string_lossy().into_owned(),
+        },
+    }))
+}
+
+fn receipts_status_projection(repo_root: &Path) -> Result<Value, String> {
+    ensure_state_files(repo_root)?;
+    let path = receipts_path(repo_root);
+    let mut receipts = Vec::new();
+
+    if let Ok(contents) = fs::read_to_string(&path) {
+        let lines = contents
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+        let start = lines.len().saturating_sub(20);
+        for line in &lines[start..] {
+            match serde_json::from_str::<Value>(line) {
+                Ok(value) => receipts.push(value),
+                Err(_) => receipts.push(json!({ "invalid_line": line })),
+            }
+        }
+    }
+
+    Ok(json!({
+        "repo_root": repo_root.to_string_lossy().into_owned(),
+        "generated_at": now_iso8601(),
+        "receipts_path": path.to_string_lossy().into_owned(),
+        "receipts": receipts,
+    }))
+}
+
+fn ping_payload(repo_root: &Path) -> Value {
+    json!({
+        "repo_root": repo_root.to_string_lossy().into_owned(),
+        "timestamp": now_iso8601(),
+        "status": "ok",
+    })
+}
+
+fn read_payload_for_kind(
+    repo_root: &Path,
+    socket_path: &Path,
+    kind: &str,
+) -> Result<Option<Value>, String> {
+    match kind {
+        "tracker_status" => Ok(Some(status_projection(repo_root, socket_path)?)),
+        "board_status" => Ok(Some(board_status_projection(repo_root, socket_path)?)),
+        "receipts_status" => Ok(Some(receipts_status_projection(repo_root)?)),
+        "ping" => Ok(Some(ping_payload(repo_root))),
+        _ => Ok(None),
+    }
+}
+
+fn query_response(
+    repo_root: &Path,
+    socket_path: &Path,
+    request_id: &str,
+    kind: &str,
+) -> Result<Option<Value>, String> {
+    let Some(payload) = read_payload_for_kind(repo_root, socket_path, kind)? else {
+        return Ok(None);
+    };
+
+    Ok(Some(json!({
+        "request_id": request_id,
+        "ok": true,
+        "kind": kind,
+        "payload": payload,
+    })))
+}
+
 struct ProjectionArgs {
     repo_root: PathBuf,
     socket_path: PathBuf,
@@ -1013,6 +1263,198 @@ fn run_status(args: &[String]) -> ExitCode {
     }
 }
 
+fn print_board_status_help() {
+    println!("Usage:\n  tuskd-core board-status --repo PATH [--socket PATH]");
+}
+
+fn run_board_status(args: &[String]) -> ExitCode {
+    let parsed = match parse_projection_args(args, "board-status") {
+        Ok(parsed) => parsed,
+        Err(message) if message == "USAGE" => {
+            print_board_status_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => return fail(&message),
+    };
+
+    match board_status_projection(&parsed.repo_root, &parsed.socket_path) {
+        Ok(record) => match serde_json::to_string(&record) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => fail(&format!("failed to encode board projection: {err}")),
+        },
+        Err(message) => fail(&message),
+    }
+}
+
+fn print_receipts_status_help() {
+    println!("Usage:\n  tuskd-core receipts-status --repo PATH");
+}
+
+fn run_receipts_status(args: &[String]) -> ExitCode {
+    let parsed = match parse_projection_args(args, "receipts-status") {
+        Ok(parsed) => parsed,
+        Err(message) if message == "USAGE" => {
+            print_receipts_status_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => return fail(&message),
+    };
+
+    match receipts_status_projection(&parsed.repo_root) {
+        Ok(record) => match serde_json::to_string(&record) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => fail(&format!("failed to encode receipts projection: {err}")),
+        },
+        Err(message) => fail(&message),
+    }
+}
+
+struct QueryArgs {
+    repo_root: PathBuf,
+    socket_path: PathBuf,
+    kind: String,
+    request_id: String,
+}
+
+fn parse_query_args(args: &[String]) -> Result<QueryArgs, String> {
+    let mut repo_root: Option<PathBuf> = None;
+    let mut socket_path: Option<PathBuf> = None;
+    let mut kind: Option<String> = None;
+    let mut request_id: Option<String> = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--repo" => {
+                let value = args.get(index + 1).ok_or("--repo requires a path")?;
+                repo_root = Some(repo_root_arg(value)?);
+                index += 2;
+            }
+            "--socket" => {
+                let value = args.get(index + 1).ok_or("--socket requires a path")?;
+                socket_path = Some(PathBuf::from(value));
+                index += 2;
+            }
+            "--kind" => {
+                let value = args.get(index + 1).ok_or("--kind requires a value")?;
+                kind = Some(value.clone());
+                index += 2;
+            }
+            "--request-id" => {
+                let value = args.get(index + 1).ok_or("--request-id requires a value")?;
+                request_id = Some(value.clone());
+                index += 2;
+            }
+            "--payload" => {
+                let _ = args
+                    .get(index + 1)
+                    .ok_or("--payload requires a JSON value")?;
+                index += 2;
+            }
+            "--help" | "-h" => return Err("USAGE".to_string()),
+            flag => return Err(format!("unknown query argument: {flag}")),
+        }
+    }
+
+    let repo_root = repo_root.ok_or("query requires --repo")?;
+    let socket_path = socket_path.unwrap_or_else(|| default_socket_path(&repo_root));
+    let kind = kind.ok_or("query requires --kind")?;
+    let request_id = request_id.unwrap_or_else(now_iso8601);
+
+    Ok(QueryArgs {
+        repo_root,
+        socket_path,
+        kind,
+        request_id,
+    })
+}
+
+fn print_query_help() {
+    println!(
+        "Usage:\n  tuskd-core query --repo PATH [--socket PATH] --kind KIND [--request-id ID] [--payload JSON]"
+    );
+}
+
+fn run_query(args: &[String]) -> ExitCode {
+    let parsed = match parse_query_args(args) {
+        Ok(parsed) => parsed,
+        Err(message) if message == "USAGE" => {
+            print_query_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => return fail(&message),
+    };
+
+    match query_response(
+        &parsed.repo_root,
+        &parsed.socket_path,
+        &parsed.request_id,
+        &parsed.kind,
+    ) {
+        Ok(Some(response)) => match serde_json::to_string(&response) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => fail(&format!("failed to encode query response: {err}")),
+        },
+        Ok(None) => fail(&format!("unsupported query kind: {}", parsed.kind)),
+        Err(message) => fail(&message),
+    }
+}
+
+fn print_respond_help() {
+    println!("Usage:\n  tuskd-core respond --repo PATH [--socket PATH]");
+}
+
+fn run_respond(args: &[String]) -> ExitCode {
+    let parsed = match parse_projection_args(args, "respond") {
+        Ok(parsed) => parsed,
+        Err(message) if message == "USAGE" => {
+            print_respond_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => return fail(&message),
+    };
+
+    let mut request_line = String::new();
+    if let Err(err) = std::io::stdin().read_to_string(&mut request_line) {
+        return fail(&format!("failed to read request body: {err}"));
+    }
+    if request_line.trim().is_empty() {
+        return fail("missing request body");
+    }
+
+    let request = match serde_json::from_str::<Value>(&request_line) {
+        Ok(value) => value,
+        Err(err) => return fail(&format!("request was not valid JSON: {err}")),
+    };
+
+    let request_id = request
+        .get("request_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let kind = request.get("kind").and_then(Value::as_str).unwrap_or("");
+
+    match query_response(&parsed.repo_root, &parsed.socket_path, request_id, kind) {
+        Ok(Some(response)) => match serde_json::to_string(&response) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => fail(&format!("failed to encode respond payload: {err}")),
+        },
+        Ok(None) => ExitCode::from(64),
+        Err(message) => fail(&message),
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
 
@@ -1038,6 +1480,10 @@ fn main() -> ExitCode {
         },
         Some("ensure") => run_ensure(&args[1..]),
         Some("status") => run_status(&args[1..]),
+        Some("board-status") => run_board_status(&args[1..]),
+        Some("receipts-status") => run_receipts_status(&args[1..]),
+        Some("query") => run_query(&args[1..]),
+        Some("respond") => run_respond(&args[1..]),
         Some(command) => fail(&format!("unknown command: {command}")),
     }
 }
