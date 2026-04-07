@@ -21,7 +21,7 @@ These instructions apply to the canonical `tusk` repo checkout.
 ```bash
 nix develop --no-pure-eval path:.
 devenv up
-bd init -p tusk
+bd init -p tusk --server
 bd ready --json
 bd status --json
 nix run .#tusk-tracker -- status --repo "$PWD"

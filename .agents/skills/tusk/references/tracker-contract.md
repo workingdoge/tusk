@@ -6,6 +6,7 @@ Use this reference when a lane depends on `bd` and Dolt being healthy, when shar
 
 - Run `bd` from the canonical repo root.
 - Treat the tracker as shared infrastructure, not as a per-workspace concern.
+- For repos that use `tuskd`, server-mode Dolt is part of the runtime contract. Fresh tracker bootstrap should use `bd init --server`; embedded mode requires explicit migration work.
 - The normal `tusk` tracker scope is:
   - read issue state,
   - claim an issue,
@@ -40,6 +41,7 @@ Do not treat these as implicit worker responsibilities:
 
 - `bd init`
 - first-time Dolt server setup
+- migrating an embedded Dolt tracker to server mode for `tuskd`
 - tracker schema or admin repair
 - tracker migration or data recovery
 - flake, shell, or `devenv` authoring required just to make the tracker available

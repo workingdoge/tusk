@@ -17,6 +17,7 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
 2. Preflight the tracker before relying on `bd` mutations.
    - Run one read command such as `bd ready --json` or `bd show <id> --json` from the repo root.
    - Check `bd dolt status` when the tracker uses Dolt server mode.
+   - If the repo uses `tuskd`, treat server-mode Dolt as part of the contract. Fresh trackers should be initialized with `bd init --server`; embedded mode is a migration or unblocker task, not normal lane work.
    - If the repo documents a wrapper, dev shell, or service supervisor, use that before ad hoc recovery. Some repos require entering a managed shell and keeping a long-lived service session alive before `bd` is healthy.
    - If the repo uses `devenv up` or a similar interactive supervisor, keep it running in a PTY-backed coordinator session for the duration of tracker-dependent work instead of pushing that ownership into the worker lane.
    - If tracker health is bad, fix that first or downgrade the worker brief so `codex exec` does code work only and leaves issue mutation to the outer shell.
@@ -83,6 +84,7 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
 - Make shared backend ownership explicit. Default owner: the coordinator shell, especially when `devenv up` or another singleton supervisor keeps Dolt alive.
 - Default tracker scope inside `tusk`: claim, read, update, and close existing issues only when the backend is healthy.
 - First-time tracker bootstrap, `bd init`, Dolt setup, schema/admin repair, or tracker migration are not default lane work. Make those explicit tasks instead of surprising a worker with shared-state repair.
+- If the repo uses `tuskd`, embedded Dolt mode is incompatible with the normal tracker contract. Fresh bootstrap should use `bd init --server`, and legacy embedded trackers should be handled as explicit migration work.
 - If tracker readiness depends on shell, flake, `devenv`, or tool-provisioning changes, load the repo's Nix environment skill, such as `nix-interrogation`, if available.
 
 ## Environment Contract
