@@ -2,7 +2,7 @@
 set -euo pipefail
 
 program_name="${0##*/}"
-default_bookmark="tusk-flake"
+default_bookmark="main"
 paths_sh="${TUSK_PATHS_SH:?TUSK_PATHS_SH is required}"
 
 source "${paths_sh}"
@@ -16,7 +16,7 @@ Print the canonical local and publishable flake reference forms for this repo.
 
 Options:
   --repo PATH         Resolve refs for PATH instead of the current repo.
-  --bookmark NAME     Bookmark/branch name to publish. Default: tusk-flake
+  --bookmark NAME     Bookmark/branch name to publish. Default: main
   --remote NAME       Git remote name to use. Defaults to origin, then the first remote.
   --remote-url URL    Override the remote URL directly.
   --json              Print a machine-readable JSON object.

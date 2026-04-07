@@ -9,7 +9,7 @@ These instructions apply to the canonical `tusk` repo checkout.
 - Run `devenv up` inside the dev shell to ensure repo-scoped tracker services when `.beads/` exists. `tuskd ensure` owns backend reuse and host-local coordination; shells must not stop Dolt on exit.
 - Bootstrap fresh trackers for `tuskd` with `bd init --server`; embedded Dolt mode is not a valid `tuskd` substrate.
 - Use this repo to develop `tusk` as a standalone flake and skill/tooling home; keep consumer-specific `bd-*` wrappers in the consuming repo unless they are intentionally promoted.
-- When changing the canonical repo home, prefer a fresh `jj git clone --colocate` from the exported `tusk-flake` line and re-bootstrap local `.beads/` runtime state there instead of moving the live `.jj/` directory in place.
+- When changing the canonical repo home, prefer a fresh `jj git clone --colocate` from the exported `main` line and re-bootstrap local `.beads/` runtime state there instead of moving the live `.jj/` directory in place.
 - Use `glistix` for Nix-target Gleam work; the shell also keeps upstream `gleam` available for generic tooling and language-server compatibility checks.
 - Use `lib.crane` from the flake for Rust package definitions so Rust builds share the same pinned `rust-overlay` toolchain as the shell, and run packaged Rust apps via `nix build` / `nix run` instead of mutating manifests ad hoc from outside Nix.
 - `tuskd` writes repo-local service state under `.beads/tuskd/` and a host-local registry under `$TUSK_HOST_STATE_ROOT`, `$XDG_STATE_HOME/tusk`, or `~/Library/Caches/tusk` on macOS.
@@ -57,7 +57,7 @@ nix run .#tusk-ui -- --help
 ## Repo Shape
 
 - `flake.nix` exports `lib.tusk`, `flakeModules.tusk`, the development shell, `tusk-tracker`, `tuskd`, `tusk-ui`, the installable OpenAI/Codex skill bundle, and `devenvModules.{codex,scratch,consumer,dogfood,tusk-skill,ops-skill,nix-skill}`.
-- `tusk-flake` is the intended moving bookmark for flake consumers; once exported to Git and pushed, consumers can pin the repo with `?ref=tusk-flake` and optionally a specific revision.
+- `main` is the intended moving bookmark for flake consumers; once exported to Git and pushed, consumers can pin the repo with `?ref=main` and optionally a specific revision.
 - `flake.nix` also exports a flake-owned `bd`/`beads` wrapper app so raw-shell `nix run` calls reuse repo-scoped tracker state instead of ambient host Beads configuration.
 - `flake.nix` also exports `tusk-flake-ref`, which prints the canonical `path:`, `git+file:`, and remote `git+...?...ref=` forms for this repo and reports when no publish remote is configured.
 - `devenv-codex-module.nix` owns the shared `codex.skills` option declaration, repo-local `CODEX_HOME` bootstrap, and `.codex/skills` projection logic for `devenv` consumers.
@@ -112,7 +112,7 @@ nix run .#tusk-ui -- --help
 - `nix run .#tusk-ui -- --help`
 - `nix eval --raw path:.#packages.aarch64-darwin.rust-toolchain.name`
 - `nix eval --raw path:.#packages.aarch64-darwin.tusk-ui.name`
-- `nix flake metadata "git+file://$PWD?ref=tusk-flake"`
+- `nix flake metadata "git+file://$PWD?ref=main"`
 - `nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "not callable"' path:.#lib.crane.buildDepsOnly`
 - `nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && bd version && jj --version && dolt version'`
 - `nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && glistix --help >/dev/null && erl -eval "erlang:halt()." -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null'`

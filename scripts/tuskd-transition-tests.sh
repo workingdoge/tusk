@@ -11,7 +11,7 @@ Usage:
 Options:
   --source-repo PATH   Source repo or workspace to replay into an isolated temp clone.
                        Defaults to the current working directory.
-  --base-rev REV       Base revision used for the replay patch. Defaults to tusk-flake.
+  --base-rev REV       Base revision used for the replay patch. Defaults to main.
   --keep-temp          Keep the temp clone even on success.
   --help               Show this help.
 EOF
@@ -563,7 +563,7 @@ run_outer_harness() {
 
 main() {
   local source_repo="."
-  local base_rev="${TUSKD_TRANSITION_TESTS_BASE_REV:-tusk-flake}"
+  local base_rev="${TUSKD_TRANSITION_TESTS_BASE_REV:-main}"
   local keep_temp=false
   local inner_repo=""
   local host_state_root=""
