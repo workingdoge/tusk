@@ -3330,7 +3330,7 @@ cmd_query() {
   fi
 
   case "${kind}" in
-    tracker_status|operator_snapshot|board_status|receipts_status|ping)
+    tracker_status|operator_snapshot|board_status|receipts_status|issue_inspect|ping)
       exec_tuskd_core query --repo "${repo_root}" --socket "${socket_path}" --kind "${kind}" --request-id "${request_id}" --payload "${payload_json}"
       ;;
   esac

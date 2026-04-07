@@ -336,9 +336,61 @@ pub(crate) struct OperatorContextCounts {
     pub(crate) workspaces: u64,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct IssueInspection {
+    pub(crate) repo_root: String,
+    pub(crate) issue: InspectedIssue,
+    #[serde(default)]
+    pub(crate) dependencies: Vec<OperatorIssueRef>,
+    #[serde(default)]
+    pub(crate) dependents: Vec<OperatorIssueRef>,
+    pub(crate) lane: Option<InspectLane>,
+    #[serde(default)]
+    pub(crate) recent_receipts: Vec<OperatorReceipt>,
+    pub(crate) available_receipts: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct InspectedIssue {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) status: Option<String>,
+    pub(crate) priority: Option<String>,
+    pub(crate) issue_type: Option<String>,
+    pub(crate) parent: Option<String>,
+    pub(crate) dependency_count: Option<u64>,
+    pub(crate) dependent_count: Option<u64>,
+    pub(crate) created_at: Option<String>,
+    pub(crate) updated_at: Option<String>,
+    pub(crate) closed_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct InspectLane {
+    pub(crate) issue_id: String,
+    pub(crate) issue_title: Option<String>,
+    pub(crate) status: String,
+    pub(crate) observed_status: Option<String>,
+    pub(crate) workspace_path: Option<String>,
+    pub(crate) workspace_name: Option<String>,
+    pub(crate) workspace_exists: Option<bool>,
+    pub(crate) base_rev: Option<String>,
+    pub(crate) revision: Option<String>,
+    pub(crate) outcome: Option<String>,
+    pub(crate) note: Option<String>,
+    pub(crate) created_at: Option<String>,
+    pub(crate) updated_at: Option<String>,
+    pub(crate) handoff_at: Option<String>,
+    pub(crate) finished_at: Option<String>,
+}
+
 #[cfg(test)]
 pub(crate) const GOLDEN_OPERATOR_SNAPSHOT_FIXTURE_JSON: &str =
     crate::fixtures::GOLDEN_OPERATOR_SNAPSHOT_FIXTURE_JSON;
+
+#[cfg(test)]
+pub(crate) const GOLDEN_ISSUE_INSPECTION_FIXTURE_JSON: &str =
+    crate::fixtures::GOLDEN_ISSUE_INSPECTION_FIXTURE_JSON;
 
 #[cfg(test)]
 pub(crate) fn golden_operator_snapshot() -> OperatorSnapshot {
@@ -352,8 +404,17 @@ pub(crate) fn sample_operator_snapshot() -> OperatorSnapshot {
 }
 
 #[cfg(test)]
+pub(crate) fn golden_issue_inspection() -> IssueInspection {
+    serde_json::from_str(GOLDEN_ISSUE_INSPECTION_FIXTURE_JSON)
+        .expect("golden issue inspection fixture should deserialize")
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{GOLDEN_OPERATOR_SNAPSHOT_FIXTURE_JSON, OperatorSnapshot};
+    use super::{
+        GOLDEN_ISSUE_INSPECTION_FIXTURE_JSON, GOLDEN_OPERATOR_SNAPSHOT_FIXTURE_JSON,
+        IssueInspection, OperatorSnapshot,
+    };
 
     #[test]
     fn operator_snapshot_fixture_deserializes() {
@@ -373,6 +434,21 @@ mod tests {
         assert_eq!(
             snapshot.history.narrative.first().map(String::as_str),
             Some("1m ago: claimed tusk-ready")
+        );
+    }
+
+    #[test]
+    fn issue_inspection_fixture_deserializes() {
+        let inspection: IssueInspection =
+            serde_json::from_str(GOLDEN_ISSUE_INSPECTION_FIXTURE_JSON)
+                .expect("fixture should deserialize");
+
+        assert_eq!(inspection.issue.id, "tusk-ready");
+        assert_eq!(inspection.dependencies.len(), 1);
+        assert_eq!(inspection.dependents.len(), 1);
+        assert_eq!(
+            inspection.lane.as_ref().and_then(|lane| lane.base_rev.as_deref()),
+            Some("main")
         );
     }
 }

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Number, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::env;
@@ -1269,6 +1269,14 @@ fn compact_focus_issue_projection(issue: &Value) -> Value {
     Value::Object(object)
 }
 
+fn issue_priority_label(issue: &Value) -> Option<String> {
+    match issue.get("priority") {
+        Some(Value::Number(number)) => number.as_i64().map(|value| format!("P{value}")),
+        Some(Value::String(text)) if !text.is_empty() => Some(text.clone()),
+        _ => None,
+    }
+}
+
 fn issue_output_from_result(result: &Value) -> Option<Value> {
     match result.get("output") {
         Some(Value::Array(items)) => items.first().cloned(),
@@ -2061,16 +2069,81 @@ fn ping_payload(repo_root: &Path) -> Value {
     })
 }
 
+fn issue_inspect_projection(repo_root: &Path, issue_id_input: &str) -> Result<Value, String> {
+    if issue_id_input.is_empty() {
+        return Err("issue_inspect requires payload.issue_id".to_owned());
+    }
+
+    let issue_result = run_tracker_json_command_in_repo(
+        repo_root,
+        "tracker_issue_show",
+        ["issue", "show", issue_id_input],
+    )?;
+    let Some(issue) = issue_output_from_result(&issue_result) else {
+        return Err(format!("issue {issue_id_input} was not found"));
+    };
+
+    let dependencies = open_issue_relation_entries(&issue, "dependencies")
+        .into_iter()
+        .map(|entry| compact_issue_relation_projection(&entry))
+        .collect::<Vec<_>>();
+    let dependents = open_issue_relation_entries(&issue, "dependents")
+        .into_iter()
+        .map(|entry| compact_issue_relation_projection(&entry))
+        .collect::<Vec<_>>();
+
+    let issue_id = issue_id(&issue).unwrap_or(issue_id_input);
+    let lane = current_lane_for_issue(repo_root, issue_id);
+    let recent_receipts = recent_issue_receipts_projection(repo_root, issue_id, 6);
+    let available_receipts = issue_receipt_refs(repo_root, issue_id)
+        .as_array()
+        .map(|rows| rows.len())
+        .unwrap_or(0);
+
+    let mut issue_projection = compact_issue_projection(&issue);
+    if let Some(object) = issue_projection.as_object_mut() {
+        if let Some(priority) = issue_priority_label(&issue) {
+            object.insert("priority".to_owned(), Value::String(priority));
+        }
+        object.insert(
+            "dependency_count".to_owned(),
+            Value::Number(Number::from(dependencies.len() as u64)),
+        );
+        object.insert(
+            "dependent_count".to_owned(),
+            Value::Number(Number::from(dependents.len() as u64)),
+        );
+    }
+
+    Ok(json!({
+        "repo_root": repo_root.to_string_lossy().into_owned(),
+        "issue": issue_projection,
+        "dependencies": dependencies,
+        "dependents": dependents,
+        "lane": if lane.is_null() { Value::Null } else { compact_lane_projection(&lane) },
+        "recent_receipts": recent_receipts,
+        "available_receipts": available_receipts,
+    }))
+}
+
 fn read_payload_for_kind(
     repo_root: &Path,
     socket_path: &Path,
     kind: &str,
+    payload: &Value,
 ) -> Result<Option<Value>, String> {
     match kind {
         "tracker_status" => Ok(Some(status_projection(repo_root, socket_path)?)),
         "operator_snapshot" => Ok(Some(operator_snapshot_projection(repo_root, socket_path)?)),
         "board_status" => Ok(Some(board_status_projection(repo_root, socket_path)?)),
         "receipts_status" => Ok(Some(receipts_status_projection(repo_root)?)),
+        "issue_inspect" => Ok(Some(issue_inspect_projection(
+            repo_root,
+            payload
+                .get("issue_id")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        )?)),
         "ping" => Ok(Some(ping_payload(repo_root))),
         _ => Ok(None),
     }
@@ -2081,8 +2154,9 @@ fn query_response(
     socket_path: &Path,
     request_id: &str,
     kind: &str,
+    payload: &Value,
 ) -> Result<Option<Value>, String> {
-    let Some(payload) = read_payload_for_kind(repo_root, socket_path, kind)? else {
+    let Some(payload) = read_payload_for_kind(repo_root, socket_path, kind, payload)? else {
         return Ok(None);
     };
 
@@ -2167,6 +2241,32 @@ fn issue_receipt_refs(repo_root: &Path, issue_id: &str) -> Value {
     }
 
     Value::Array(refs)
+}
+
+fn recent_issue_receipts_projection(repo_root: &Path, issue_id: &str, limit: usize) -> Vec<Value> {
+    if issue_id.is_empty() {
+        return Vec::new();
+    }
+
+    let path = receipts_path(repo_root);
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+
+    let mut receipts = contents
+        .lines()
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .map(|value| compact_receipt_projection(&value))
+        .filter(|value| value.get("issue_id").and_then(Value::as_str) == Some(issue_id))
+        .collect::<Vec<_>>();
+
+    if receipts.len() > limit {
+        let split_at = receipts.len() - limit;
+        receipts = receipts.split_off(split_at);
+    }
+
+    receipts
 }
 
 fn receipt_refs_by_kind(repo_root: &Path, kind: &str) -> Value {
@@ -4444,6 +4544,7 @@ struct QueryArgs {
     socket_path: PathBuf,
     kind: String,
     request_id: String,
+    payload: Value,
 }
 
 fn parse_query_args(args: &[String]) -> Result<QueryArgs, String> {
@@ -4451,6 +4552,7 @@ fn parse_query_args(args: &[String]) -> Result<QueryArgs, String> {
     let mut socket_path: Option<PathBuf> = None;
     let mut kind: Option<String> = None;
     let mut request_id: Option<String> = None;
+    let mut payload: Option<Value> = None;
     let mut index = 0;
 
     while index < args.len() {
@@ -4476,9 +4578,13 @@ fn parse_query_args(args: &[String]) -> Result<QueryArgs, String> {
                 index += 2;
             }
             "--payload" => {
-                let _ = args
+                let value = args
                     .get(index + 1)
                     .ok_or("--payload requires a JSON value")?;
+                payload = Some(
+                    serde_json::from_str(value)
+                        .map_err(|err| format!("invalid --payload: {err}"))?,
+                );
                 index += 2;
             }
             "--help" | "-h" => return Err("USAGE".to_string()),
@@ -4496,6 +4602,7 @@ fn parse_query_args(args: &[String]) -> Result<QueryArgs, String> {
         socket_path,
         kind,
         request_id,
+        payload: payload.unwrap_or_else(|| json!({})),
     })
 }
 
@@ -4647,6 +4754,7 @@ fn run_query(args: &[String]) -> ExitCode {
         &parsed.socket_path,
         &parsed.request_id,
         &parsed.kind,
+        &parsed.payload,
     ) {
         Ok(Some(response)) => match serde_json::to_string(&response) {
             Ok(text) => {
@@ -4694,7 +4802,7 @@ fn run_respond(args: &[String]) -> ExitCode {
     let kind = request.get("kind").and_then(Value::as_str).unwrap_or("");
     let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
 
-    match query_response(&parsed.repo_root, &parsed.socket_path, request_id, kind) {
+    match query_response(&parsed.repo_root, &parsed.socket_path, request_id, kind, &payload) {
         Ok(Some(response)) => match serde_json::to_string(&response) {
             Ok(text) => {
                 println!("{text}");

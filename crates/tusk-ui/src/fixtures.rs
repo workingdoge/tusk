@@ -197,3 +197,72 @@ pub(crate) const GOLDEN_OPERATOR_SNAPSHOT_FIXTURE_JSON: &str = r#"{
     }
   }
 }"#;
+
+pub(crate) const GOLDEN_ISSUE_INSPECTION_FIXTURE_JSON: &str = r#"{
+  "repo_root": "/tmp/repo",
+  "issue": {
+    "id": "tusk-ready",
+    "title": "ready issue",
+    "status": "open",
+    "priority": "P2",
+    "issue_type": "task",
+    "parent": "tusk-ux",
+    "dependency_count": 1,
+    "dependent_count": 1,
+    "created_at": "2026-04-07T19:00:00Z",
+    "updated_at": "2026-04-07T20:00:00Z",
+    "closed_at": null
+  },
+  "dependencies": [
+    {
+      "id": "tusk-parent",
+      "title": "parent issue",
+      "status": "open",
+      "dependency_type": "blocks"
+    }
+  ],
+  "dependents": [
+    {
+      "id": "tusk-child",
+      "title": "child issue",
+      "status": "open",
+      "dependency_type": "blocks"
+    }
+  ],
+  "lane": {
+    "issue_id": "tusk-ready",
+    "issue_title": "ready issue",
+    "status": "launched",
+    "observed_status": "launched",
+    "workspace_path": "/tmp/repo/.jj-workspaces/tusk-ready",
+    "workspace_name": "tusk-ready",
+    "workspace_exists": true,
+    "base_rev": "main",
+    "revision": "abc123",
+    "outcome": null,
+    "note": null,
+    "created_at": "2026-04-07T19:30:00Z",
+    "updated_at": "2026-04-07T20:00:00Z",
+    "handoff_at": null,
+    "finished_at": null
+  },
+  "recent_receipts": [
+    {
+      "timestamp": "2026-04-07T19:59:00Z",
+      "kind": "issue.claim",
+      "issue_id": "tusk-ready",
+      "details": {
+        "reason": "demo"
+      }
+    },
+    {
+      "timestamp": "2026-04-07T20:00:00Z",
+      "kind": "lane.launch",
+      "issue_id": "tusk-ready",
+      "details": {
+        "revision": "abc123"
+      }
+    }
+  ],
+  "available_receipts": 2
+}"#;

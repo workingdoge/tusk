@@ -85,6 +85,7 @@ Keys:
   Up / Down    scroll the current panel, or move board selection on the board
   PageUp/Down  scroll the current panel by a page
   g / G        jump to the top or bottom of the current panel
+  i            inspect the home focus issue or selected board item
   c            claim the selected ready issue from the board
   l            launch a lane for the selected claimed issue
   f            finish the selected active lane as completed

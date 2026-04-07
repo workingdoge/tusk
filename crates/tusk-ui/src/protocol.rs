@@ -10,8 +10,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::types::{
-    BoardStatus, ClaimIssuePayload, FinishLanePayload, LaunchLanePayload, OperatorSnapshot,
-    PingStatus, ReceiptsStatus, Response, TrackerStatus,
+    BoardStatus, ClaimIssuePayload, FinishLanePayload, IssueInspection, LaunchLanePayload,
+    OperatorSnapshot, PingStatus, ReceiptsStatus, Response, TrackerStatus,
 };
 
 #[derive(Debug, Clone)]
@@ -42,6 +42,10 @@ impl ProtocolClient {
 
     pub(crate) fn receipts_status(&self) -> Result<ReceiptsStatus> {
         self.query("receipts_status")
+    }
+
+    pub(crate) fn inspect_issue(&self, issue_id: &str) -> Result<IssueInspection> {
+        self.query_with_payload("issue_inspect", json!({ "issue_id": issue_id }))
     }
 
     pub(crate) fn ping(&self) -> Result<PingStatus> {

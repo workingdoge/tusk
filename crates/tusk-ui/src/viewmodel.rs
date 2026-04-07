@@ -1,9 +1,12 @@
 use std::path::Path;
 
+use serde_json::Value;
+
 use crate::types::{
-    BoardIssue, BoardStatus, BoardSummary, LaneEntry, OperatorContext, OperatorFocusIssue,
-    OperatorHistory, OperatorIssueRef, OperatorLane, OperatorReceipt, OperatorRecommendation,
-    OperatorSnapshot, ReceiptEntry, ReceiptsStatus, TrackerStatus, WorkspaceEntry,
+    BoardIssue, BoardStatus, BoardSummary, InspectLane, IssueInspection, LaneEntry,
+    OperatorContext, OperatorFocusIssue, OperatorHistory, OperatorIssueRef, OperatorLane,
+    OperatorReceipt, OperatorRecommendation, OperatorSnapshot, ReceiptEntry, ReceiptsStatus,
+    TrackerStatus, WorkspaceEntry,
 };
 
 #[allow(dead_code)]
@@ -197,6 +200,48 @@ pub(crate) struct ReceiptsViewModel {
     pub(crate) receipts: Vec<ReceiptItem>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InspectLaneView {
+    pub(crate) issue_id: String,
+    pub(crate) issue_title: Option<String>,
+    pub(crate) status: String,
+    pub(crate) observed_status: Option<String>,
+    pub(crate) workspace_name: Option<String>,
+    pub(crate) workspace_exists: Option<bool>,
+    pub(crate) workspace_path: Option<String>,
+    pub(crate) base_rev: Option<String>,
+    pub(crate) revision: Option<String>,
+    pub(crate) outcome: Option<String>,
+    pub(crate) note: Option<String>,
+    pub(crate) created_at: Option<String>,
+    pub(crate) updated_at: Option<String>,
+    pub(crate) handoff_at: Option<String>,
+    pub(crate) finished_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct IssueInspectViewModel {
+    pub(crate) repo_root: String,
+    pub(crate) issue_id: String,
+    pub(crate) title: String,
+    pub(crate) status: Option<String>,
+    pub(crate) priority: Option<String>,
+    pub(crate) issue_type: Option<String>,
+    pub(crate) parent: Option<String>,
+    pub(crate) created_at: Option<String>,
+    pub(crate) updated_at: Option<String>,
+    pub(crate) closed_at: Option<String>,
+    pub(crate) dependency_count: usize,
+    pub(crate) dependent_count: usize,
+    pub(crate) dependencies: Vec<IssueRef>,
+    pub(crate) dependents: Vec<IssueRef>,
+    pub(crate) lane: Option<InspectLaneView>,
+    pub(crate) recent_receipts: Vec<HistoryItem>,
+    pub(crate) available_receipts: u64,
+    pub(crate) recommendation: Option<ActionItem>,
+    pub(crate) focus_rationale: Vec<String>,
+}
+
 pub(crate) fn home_viewmodel(snapshot: &OperatorSnapshot) -> HomeViewModel {
     let focus = build_focus_narrative(
         snapshot.briefing.focus_issue.as_ref(),
@@ -352,6 +397,78 @@ pub(crate) fn receipts_viewmodel(receipts: &ReceiptsStatus) -> ReceiptsViewModel
                 label: receipt_label(receipt),
             })
             .collect(),
+    }
+}
+
+pub(crate) fn issue_inspect_viewmodel(
+    inspection: &IssueInspection,
+    home: Option<&HomeViewModel>,
+) -> IssueInspectViewModel {
+    let recommendation = home
+        .and_then(|home| home.primary_action.clone())
+        .filter(|action| action.issue_id.as_deref() == Some(inspection.issue.id.as_str()));
+    let focus_rationale = home
+        .and_then(|home| home.focus.as_ref())
+        .filter(|focus| focus.issue_id == inspection.issue.id)
+        .map(|focus| focus.rationale.clone())
+        .unwrap_or_default();
+
+    IssueInspectViewModel {
+        repo_root: inspection.repo_root.clone(),
+        issue_id: inspection.issue.id.clone(),
+        title: inspection.issue.title.clone(),
+        status: inspection.issue.status.clone(),
+        priority: inspection.issue.priority.clone(),
+        issue_type: inspection.issue.issue_type.clone(),
+        parent: inspection.issue.parent.clone(),
+        created_at: inspection.issue.created_at.clone(),
+        updated_at: inspection.issue.updated_at.clone(),
+        closed_at: inspection.issue.closed_at.clone(),
+        dependency_count: inspection
+            .issue
+            .dependency_count
+            .unwrap_or(inspection.dependencies.len() as u64) as usize,
+        dependent_count: inspection
+            .issue
+            .dependent_count
+            .unwrap_or(inspection.dependents.len() as u64) as usize,
+        dependencies: inspection.dependencies.iter().map(issue_ref).collect(),
+        dependents: inspection.dependents.iter().map(issue_ref).collect(),
+        lane: inspection.lane.as_ref().map(inspect_lane_view),
+        recent_receipts: inspection
+            .recent_receipts
+            .iter()
+            .map(|receipt| HistoryItem {
+                timestamp: receipt.timestamp.clone(),
+                kind: receipt
+                    .kind
+                    .clone()
+                    .unwrap_or_else(|| "transition".to_owned()),
+                issue_id: receipt.issue_id.clone(),
+                narrative: operator_receipt_label(receipt),
+                consequence: receipt
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("reason").and_then(Value::as_str))
+                    .or_else(|| {
+                        receipt
+                            .details
+                            .as_ref()
+                            .and_then(|details| details.get("note").and_then(Value::as_str))
+                    })
+                    .or_else(|| {
+                        receipt
+                            .details
+                            .as_ref()
+                            .and_then(|details| details.get("outcome").and_then(Value::as_str))
+                    })
+                    .map(ToOwned::to_owned),
+                source: Source::Authoritative,
+            })
+            .collect(),
+        available_receipts: inspection.available_receipts.unwrap_or_default(),
+        recommendation,
+        focus_rationale,
     }
 }
 
@@ -584,6 +701,26 @@ fn issue_ref(reference: &OperatorIssueRef) -> IssueRef {
     }
 }
 
+fn inspect_lane_view(lane: &InspectLane) -> InspectLaneView {
+    InspectLaneView {
+        issue_id: lane.issue_id.clone(),
+        issue_title: lane.issue_title.clone(),
+        status: lane.status.clone(),
+        observed_status: lane.observed_status.clone(),
+        workspace_name: lane.workspace_name.clone(),
+        workspace_exists: lane.workspace_exists,
+        workspace_path: lane.workspace_path.clone(),
+        base_rev: lane.base_rev.clone(),
+        revision: lane.revision.clone(),
+        outcome: lane.outcome.clone(),
+        note: lane.note.clone(),
+        created_at: lane.created_at.clone(),
+        updated_at: lane.updated_at.clone(),
+        handoff_at: lane.handoff_at.clone(),
+        finished_at: lane.finished_at.clone(),
+    }
+}
+
 fn receipt_label(receipt: &ReceiptEntry) -> String {
     if let Some(invalid) = &receipt.invalid_line {
         return format!("invalid {invalid}");
@@ -653,8 +790,8 @@ fn lane_group(lane: &LaneEntry) -> LaneGroup {
 
 #[cfg(test)]
 mod tests {
-    use super::home_viewmodel;
-    use crate::types::golden_operator_snapshot;
+    use super::{home_viewmodel, issue_inspect_viewmodel};
+    use crate::types::{golden_issue_inspection, golden_operator_snapshot};
 
     #[test]
     fn home_viewmodel_keeps_dependency_narrative_structured() {
@@ -678,5 +815,23 @@ mod tests {
             Some(1)
         );
         assert_eq!(model.context.repo_name, "repo");
+    }
+
+    #[test]
+    fn issue_inspect_viewmodel_carries_authoritative_and_heuristic_context() {
+        let home = home_viewmodel(&golden_operator_snapshot());
+        let model = issue_inspect_viewmodel(&golden_issue_inspection(), Some(&home));
+
+        assert_eq!(model.issue_id, "tusk-ready");
+        assert_eq!(model.dependencies.len(), 1);
+        assert_eq!(model.dependents.len(), 1);
+        assert_eq!(model.recent_receipts.len(), 2);
+        assert_eq!(
+            model
+                .recommendation
+                .as_ref()
+                .and_then(|action| action.issue_id.as_deref()),
+            Some("tusk-ready")
+        );
     }
 }

@@ -11,11 +11,12 @@ use crate::types::{
 };
 use crate::views::board::{board_lines, selected_line_offset};
 use crate::views::home::{home_context_lines, home_history_lines, home_next_lines, home_now_lines};
+use crate::views::overlay::issue_inspection_lines;
 use crate::views::receipts::receipt_lines;
 use crate::views::tracker::tracker_lines;
 use crate::viewmodel::{
     BoardViewModel, HomeViewModel, ReceiptsViewModel, TrackerViewModel, board_viewmodel,
-    home_viewmodel, receipts_viewmodel, tracker_viewmodel,
+    home_viewmodel, issue_inspect_viewmodel, receipts_viewmodel, tracker_viewmodel,
 };
 use crate::worker::{RefreshSet, RefreshUpdate, RefreshWorker};
 
@@ -194,10 +195,10 @@ impl App {
 
         match self.view {
             ViewMode::Home => {
-                "o/t/b/e view  Tab cycle  ? help  j/k scroll  PgUp/PgDn page  g/G edge  b board  r refresh  p ping  q quit"
+                "o/t/b/e view  Tab cycle  ? help  i inspect  j/k scroll  PgUp/PgDn page  g/G edge  b board  r refresh  p ping  q quit"
             }
             ViewMode::Board => {
-                "o/t/b/e view  Tab cycle  ? help  j/k move  PgUp/PgDn page  g/G edge  c claim  l launch  f finish  r refresh  p ping  q quit"
+                "o/t/b/e view  Tab cycle  ? help  i inspect  j/k move  PgUp/PgDn page  g/G edge  c claim  l launch  f finish  r refresh  p ping  q quit"
             }
             _ => "o/t/b/e view  Tab cycle  ? help  j/k scroll  PgUp/PgDn page  g/G edge  r refresh  p ping  q quit",
         }
@@ -264,6 +265,9 @@ impl App {
             KeyCode::Char('r') => Some(UiAction::Refresh),
             KeyCode::Char('p') => Some(UiAction::Ping),
             KeyCode::Char('?') | KeyCode::Char('h') => Some(UiAction::ShowHelp),
+            KeyCode::Char('i') if matches!(self.view, ViewMode::Home | ViewMode::Board) => {
+                Some(self.inspect_action()?)
+            }
             KeyCode::Char('j') | KeyCode::Down if self.view != ViewMode::Board => {
                 Some(UiAction::Scroll(1))
             }
@@ -317,9 +321,7 @@ impl App {
             UiAction::Claim(issue_id) => self.open_claim_overlay(&issue_id),
             UiAction::Launch(issue_id, base_rev) => self.open_launch_overlay(&issue_id, &base_rev),
             UiAction::Finish(issue_id) => self.open_finish_overlay(&issue_id),
-            UiAction::Inspect(issue_id) => {
-                self.status_line = format!("inspection is not available yet for {issue_id}");
-            }
+            UiAction::Inspect(issue_id) => self.open_inspect_overlay(&issue_id),
             UiAction::ShowHelp => self.show_help_overlay(),
             UiAction::ConfirmOverlay => self.confirm_overlay(),
             UiAction::DismissOverlay => self.dismiss_overlay(),
@@ -335,6 +337,11 @@ impl App {
             KeyCode::Esc => Some(UiAction::DismissOverlay),
             KeyCode::Char('?') | KeyCode::Char('h')
                 if self.overlay.as_ref().is_some_and(OverlayState::is_help) =>
+            {
+                Some(UiAction::DismissOverlay)
+            }
+            KeyCode::Char('i')
+                if self.overlay.as_ref().is_some_and(OverlayState::is_inspect) =>
             {
                 Some(UiAction::DismissOverlay)
             }
@@ -518,6 +525,31 @@ impl App {
         }
     }
 
+    fn inspect_action(&self) -> std::result::Result<UiAction, String> {
+        match self.view {
+            ViewMode::Home => {
+                let home = self
+                    .home_viewmodel()
+                    .ok_or_else(|| "home snapshot is unavailable".to_owned())?;
+                let issue_id = home
+                    .primary_action
+                    .as_ref()
+                    .and_then(|action| action.issue_id.clone())
+                    .or_else(|| home.focus.as_ref().map(|focus| focus.issue_id.clone()))
+                    .ok_or_else(|| "no focus issue is available to inspect".to_owned())?;
+                Ok(UiAction::Inspect(issue_id))
+            }
+            ViewMode::Board => {
+                let issue_id = self
+                    .selected_board_item_id
+                    .clone()
+                    .ok_or_else(|| "no board item is selected to inspect".to_owned())?;
+                Ok(UiAction::Inspect(issue_id))
+            }
+            _ => Err("inspection is only available from home or board".to_owned()),
+        }
+    }
+
     fn request_refresh(&mut self, requested: RefreshSet, reason: &str) {
         let queued = self.begin_refresh(requested);
         self.last_refresh_requested = Instant::now();
@@ -588,6 +620,23 @@ impl App {
         self.status_line = "showing help overlay".to_owned();
     }
 
+    fn open_inspect_overlay(&mut self, issue_id: &str) {
+        match self.client.inspect_issue(issue_id) {
+            Ok(inspection) => {
+                let home = self.home_viewmodel();
+                let model = issue_inspect_viewmodel(&inspection, home.as_ref());
+                self.overlay = Some(OverlayState::inspect(
+                    format!("Inspect — {}", model.issue_id),
+                    issue_inspection_lines(&model),
+                ));
+                self.status_line = format!("inspecting {issue_id}");
+            }
+            Err(error) => {
+                self.status_line = format!("inspect failed for {issue_id}: {error:#}");
+            }
+        }
+    }
+
     fn dismiss_overlay(&mut self) {
         if self.overlay.take().is_some() {
             self.status_line = "dismissed overlay".to_owned();
@@ -604,6 +653,9 @@ impl App {
                 self.status_line = "dismissed help overlay".to_owned();
             }
             OverlayKind::Confirm(action) => self.execute_pending_action(action),
+            OverlayKind::Inspect => {
+                self.status_line = "dismissed inspection overlay".to_owned();
+            }
         }
     }
 
@@ -819,6 +871,7 @@ impl OverlayState {
             ViewMode::Home => {
                 body.push("Home".to_owned());
                 body.push("  j / k or Up / Down scroll the briefing".to_owned());
+                body.push("  i              inspect the focus issue".to_owned());
                 body.push("  Read the current briefing, next move, and recent history".to_owned());
                 body.push("  Press b to jump into the board for action".to_owned());
             }
@@ -832,6 +885,7 @@ impl OverlayState {
                 body.push("  j / k or Up / Down  move selection".to_owned());
                 body.push("  PageUp / PageDown   scroll the board without changing selection".to_owned());
                 body.push("  g / G               jump to top or bottom of the board".to_owned());
+                body.push("  i                  inspect the selected issue or lane".to_owned());
                 body.push("  c                  confirm claim for selected ready issue".to_owned());
                 body.push(
                     "  l                  confirm lane launch for selected claimed issue"
@@ -863,6 +917,14 @@ impl OverlayState {
         }
     }
 
+    fn inspect(title: String, body: Vec<String>) -> Self {
+        Self {
+            title,
+            body,
+            kind: OverlayKind::Inspect,
+        }
+    }
+
     pub(crate) fn is_help(&self) -> bool {
         matches!(self.kind, OverlayKind::Help)
     }
@@ -871,10 +933,15 @@ impl OverlayState {
         matches!(self.kind, OverlayKind::Confirm(_))
     }
 
+    pub(crate) fn is_inspect(&self) -> bool {
+        matches!(self.kind, OverlayKind::Inspect)
+    }
+
     pub(crate) fn footer_hint(&self) -> &'static str {
         match self.kind {
             OverlayKind::Help => "Esc dismiss  q quit",
             OverlayKind::Confirm(_) => "Enter/y confirm  n/Esc cancel  q quit",
+            OverlayKind::Inspect => "i/Esc dismiss  q quit",
         }
     }
 }
@@ -883,6 +950,7 @@ impl OverlayState {
 enum OverlayKind {
     Help,
     Confirm(PendingAction),
+    Inspect,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1126,12 +1194,12 @@ mod tests {
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::{App, ViewMode, normalized_board_selection, step_board_selection};
+    use super::{App, OverlayState, ViewMode, normalized_board_selection, step_board_selection};
     use crate::action::{Direction, UiAction};
     use crate::protocol::ProtocolClient;
     use crate::types::{
         BackendStatus, BoardIssue, BoardStatus, HealthStatus, LaneEntry, TrackerProtocol,
-        TuskdState,
+        TuskdState, sample_operator_snapshot,
     };
 
     fn board_fixture() -> BoardStatus {
@@ -1378,5 +1446,44 @@ mod tests {
             app.action_for_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
             Ok(Some(UiAction::DismissOverlay))
         );
+    }
+
+    #[test]
+    fn inspect_intent_maps_from_home_focus_and_board_selection() {
+        let mut app = test_app();
+        app.home.value = Some(sample_operator_snapshot());
+
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)),
+            Ok(Some(UiAction::Inspect("tusk-ready".to_owned())))
+        );
+
+        app.view = ViewMode::Board;
+        app.board.value = Some(board_fixture());
+        app.selected_board_item_id = Some("tusk-c".to_owned());
+
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)),
+            Ok(Some(UiAction::Inspect("tusk-c".to_owned())))
+        );
+    }
+
+    #[test]
+    fn inspect_overlay_dismisses_with_i_or_escape() {
+        let mut app = test_app();
+        app.overlay = Some(OverlayState::inspect(
+            "Inspect".to_owned(),
+            vec!["fact: demo".to_owned()],
+        ));
+
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)),
+            Ok(Some(UiAction::DismissOverlay))
+        );
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Ok(Some(UiAction::DismissOverlay))
+        );
+        assert!(app.overlay().is_some_and(|overlay| overlay.is_inspect()));
     }
 }
