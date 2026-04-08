@@ -16,6 +16,8 @@ These instructions apply to the canonical `tusk` repo checkout.
 - Runtime wrappers distinguish the active checkout root (`TUSK_CHECKOUT_ROOT` / `DEVENV_ROOT`) from the canonical tracker root (`TUSK_TRACKER_ROOT` / `BEADS_WORKSPACE_ROOT`); workspace-local `CODEX_HOME` follows the checkout, while tracker state stays in the canonical repo.
 - Use `tusk-codex --checkout <workspace>` when you need Codex to follow a live lane workspace, and `tusk-skill-loop --checkout <workspace>` when iterating on `.agents/skills/**`; the loop validates before restart and does fast relaunch rather than pretending in-process hot reload exists.
 - `tuskd` is the coordinator action and receipt surface; `tusk-tracker` is the internal tracker adapter seam behind it.
+- `tusk-radicle` is the repo-owned helper for attaching the canonical checkout to the live Radicle RID while preserving GitHub as the `main` upstream.
+  `tusk-radicle status` also surfaces best-effort publish drift between local `main`, `origin`, and `rad`.
 - `.beads/tuskd/lanes.json` is the first-class lane state record; receipts remain the audit log of lane transitions.
 - Outside the dev shell, use `nix run .#bd -- ...` instead of an ambient host `bd`; the wrapper reads the `tuskd` service record and exports the repo-scoped Dolt endpoint before execing Beads.
 
@@ -35,6 +37,7 @@ jj st
 nix build .#tusk-openai-skill
 nix run .#install-tusk-openai-skill
 nix run .#tusk-flake-ref -- --json
+nix run .#tusk-radicle -- status
 nix eval --raw path:.#packages.aarch64-darwin.rust-toolchain.name
 nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "not callable"' path:.#lib.crane.buildDepsOnly
 nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && bd version && jj --version && dolt version'
@@ -66,15 +69,18 @@ nix run .#tusk-ui -- --help
 - `main` is the intended moving bookmark for flake consumers; once exported to Git and pushed, consumers can pin the repo with `?ref=main` and optionally a specific revision.
 - `flake.nix` also exports a flake-owned `bd`/`beads` wrapper app so raw-shell `nix run` calls reuse repo-scoped tracker state instead of ambient host Beads configuration.
 - `flake.nix` also exports `tusk-flake-ref`, which prints the canonical `path:`, `git+file:`, and remote `git+...?...ref=` forms for this repo and reports when no publish remote is configured.
+- `flake.nix` also exports `tusk-radicle`, which attaches the existing Radicle RID to a checkout without repointing `main` away from `origin`.
 - `devenv-codex-module.nix` owns the shared `codex.skills` option declaration, repo-local `CODEX_HOME` bootstrap, and `.codex/skills` projection logic for `devenv` consumers.
 - Repo-local skill projection under `.codex/skills/` is one managed symlink per skill root; the runtime should not materialize fragile per-file link trees there.
 - `devenv-scratch-module.nix` owns the shared per-repo scratch relocation policy for common build tools in consumer shells.
 - `devenvModules.consumer` is the reusable downstream shell surface: repo-local `CODEX_HOME`, explicit skill opt-in, scratch relocation, and the conservative `tusk-clean` helper.
-- `devenvModules.dogfood` is the repo's own downstream composition of `codex` plus all repo-authored shared skills from `.agents/skills/`.
+- `devenvModules.dogfood` is the repo's own downstream composition of `codex` plus explicit `tusk`/`ops`/`nix` skill packs.
+- `devenvModules.dogfood` is the repo's own downstream composition of `codex` plus explicit `tusk`/`ops`/`nix`/`skill-dev` skill packs.
 - `scripts/codex-home-bootstrap.sh` copies auth/config/rules from `~/.codex` only as a first-use migration into the repo-local `.codex` home.
 - `scripts/tusk-codex.sh` launches Codex against an explicit checkout while preserving canonical tracker-root wiring.
 - `scripts/tusk-skill-loop.sh` watches `.agents/skills/**`, reruns `tusk-skill-contract-check`, and relaunches `tusk-codex` only after validation passes.
 - `scripts/tusk-clean.sh` contains the conservative cleanup/quarantine script for rebuildable repo-local artifacts.
+- `scripts/tusk-radicle.sh` contains the hybrid GitHub/Radicle pilot helper for attaching the existing RID and inspecting local wiring.
 - `scripts/tusk-paths.sh` centralizes checkout-root vs tracker-root resolution for flake-owned wrappers and local control-plane scripts.
 - `lib.nix` contains the generic `tusk` normalization and validation logic.
 - `flake-module.nix` contains the reusable Nix module surface for `tusk`.
@@ -107,6 +113,7 @@ nix run .#tusk-ui -- --help
 - Prefer `codex-nix-check` and a shell smoke test after changing the flake or module surface.
 - Prefer `tusk-skill-contract-check` when the change is specifically about repo-authored skills or their projection contract.
 - Prefer `tusk-skill-loop` when iterating on repo-authored skills; it keeps the runtime repo-local and makes the restart contract honest.
+- Use `tusk-radicle init-existing` to attach the canonical checkout to the existing RID; keep `origin` as the `main` upstream and treat `rad` as the additive distribution/review remote.
 - If you initialize `.beads/` here for dogfooding, treat it as this repo's own tracker, not as an extension of `config`. The tracker state is local and ignored by Git in this repo.
 
 ## Verification
@@ -118,6 +125,7 @@ nix run .#tusk-ui -- --help
 - `nix build .#tusk-openai-skill`
 - `nix run .#install-tusk-openai-skill`
 - `nix run .#tusk-flake-ref -- --repo "$PWD" --json`
+- `nix run .#tusk-radicle -- status`
 - `nix run .#tusk-tracker -- status --repo "$PWD"`
 - `nix run .#tusk-tracker -- issues board --repo "$PWD"`
 - `nix run .#tusk-tracker -- backend show --repo "$PWD"`

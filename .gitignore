@@ -6,6 +6,7 @@
 .jj-workspaces/
 .codex/
 .codex-prompts/
+.gitsigners
 result
 result-*
 crates/*/target/

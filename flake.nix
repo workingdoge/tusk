@@ -45,13 +45,15 @@
       tuskFlakeModule = import ./flake-module.nix { inherit tuskLib; };
       devenvCodexModule = import ./devenv-codex-module.nix { inherit tuskLib; };
       devenvScratchModule = import ./devenv-scratch-module.nix;
-      codexSkillRoots = nixpkgs.lib.filterAttrs (_: kind: kind == "directory") (builtins.readDir ./.agents/skills);
-      codexSkillNames = builtins.attrNames codexSkillRoots;
-      codexSkillSources = nixpkgs.lib.mapAttrs (name: _: ./.agents/skills + "/${name}") codexSkillRoots;
+      codexSkillSources = {
+        tusk = ./.agents/skills/tusk;
+        ops = ./.agents/skills/ops;
+        nix = ./.agents/skills/nix;
+        skill-dev = ./.agents/skills/skill-dev;
+      };
       mkSkillModule = name: {
         codex.skills.${name}.source = codexSkillSources.${name};
       };
-      dogfoodSkillModules = builtins.map mkSkillModule codexSkillNames;
       devenvTuskSkillModule = mkSkillModule "tusk";
       devenvOpsSkillModule = mkSkillModule "ops";
       devenvNixSkillModule = mkSkillModule "nix";
@@ -423,6 +425,17 @@
           exec bash ${./scripts/tusk-flake-ref.sh} "$@"
         '';
       };
+      tuskRadiclePackage = pkgs.writeShellApplication {
+        name = "tusk-radicle";
+        runtimeInputs = [
+          pkgs.git
+          pkgs.radicle-node
+        ];
+        text = ''
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+          exec bash ${./scripts/tusk-radicle.sh} "$@"
+        '';
+      };
       tuskUiSrc = craneLib.cleanCargoSource ./crates/tusk-ui;
       tuskUiCommonArgs = {
         src = tuskUiSrc;
@@ -498,6 +511,7 @@
           pkgs.rust-analyzer
           tuskClean
           tuskFlakeRefPackage
+          tuskRadiclePackage
           tuskSkillContractCheck
           tuskTrackerPackage
           tuskdTransitionTestsPackage
@@ -564,7 +578,13 @@
       dogfoodModule =
         { ... }:
         {
-          imports = [ devenvCodexModule ] ++ dogfoodSkillModules;
+          imports = [
+            devenvCodexModule
+            devenvTuskSkillModule
+            devenvOpsSkillModule
+            devenvNixSkillModule
+            devenvSkillDevSkillModule
+          ];
 
           packages = [
             codexNixCheck
@@ -687,6 +707,7 @@
         tusk-skill-loop = tuskSkillLoopPackage;
         tusk-clean = tuskClean;
         tusk-flake-ref = tuskFlakeRefPackage;
+        tusk-radicle = tuskRadiclePackage;
         tusk-tracker = tuskTrackerPackage;
         tuskd-core = tuskdCorePackage;
         tuskd-transition-tests = tuskdTransitionTestsPackage;
@@ -734,6 +755,10 @@
         tusk-flake-ref = {
           type = "app";
           program = "${tuskFlakeRefPackage}/bin/tusk-flake-ref";
+        };
+        tusk-radicle = {
+          type = "app";
+          program = "${tuskRadiclePackage}/bin/tusk-radicle";
         };
         tuskd = {
           type = "app";
