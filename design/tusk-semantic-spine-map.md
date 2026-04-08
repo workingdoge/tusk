@@ -176,7 +176,8 @@ These parts are still conceptual or only partially implemented:
 - typed witness payloads beyond id/kind/format/path/description
 - receipt records as runtime facts rather than only expected shapes
 - executor- and driver-specific flake modules such as GitHub driver support,
-  Hercules executor support, or a local trace/null executor
+  Hercules executor support, or richer executor families beyond the first
+  local trace carrier
 
 ## Current Typeholes
 
@@ -231,12 +232,16 @@ without a stabilized type or resolver contract.
 That does not break correctness, but it blurs the core operational surface with
 repo-dogfood runtime convenience code.
 
-### 6. No Trace Executor Slice Yet
+### 6. Thin Executor Admission
 
-The architecture recommends a local trace/null executor as the first dry
-planning surface.
-The schema can represent that executor today, but the repo does not yet ship it
-as a concrete flake-module slice.
+The repo now ships one concrete `local-trace` executor slice and one repo-local
+trace realization, but the general admission law is still thin.
+
+It still does not answer broader questions such as:
+
+- executor capability availability beyond `enable = true`
+- multi-executor choice or ranking
+- policy admission distinct from executor admission
 
 ## First Reviewable Core Slices
 
@@ -300,6 +305,11 @@ Why fourth:
 - it gives the executor a stable self-hosting witness root to consume
 - it proves the executor/driver/receipt path without jumping straight to a
   remote backend
+
+Status:
+- complete for the first repo-local `local-trace` carrier
+- follow-on work should now widen admission law and later remote executors,
+  not rediscover the first trace path
 
 ## Dependency Read
 

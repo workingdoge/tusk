@@ -1,6 +1,7 @@
 { lib }:
 let
   inherit (builtins)
+    hasAttr
     pathExists
     removeAttrs
     ;
@@ -243,6 +244,38 @@ let
     description = realization.description or null;
   };
 
+  normalizeRealizationAdmission =
+    effects: executors: effectAdmission: realization:
+    let
+      effectState =
+        if hasAttr realization.effect effectAdmission then
+          effectAdmission.${realization.effect}
+        else
+          {
+            status = "blocked";
+            blockers = [ "missing effect" ];
+          };
+      executorState =
+        if hasAttr realization.executor executors then
+          executors.${realization.executor}
+        else
+          {
+            enable = false;
+          };
+      blockers =
+        effectState.blockers
+        ++ optional (!(executorState.enable or false)) "executor disabled";
+    in
+    {
+      effect = realization.effect;
+      executor = realization.executor;
+      driver = realization.driver;
+      effectStatus = effectState.status or "blocked";
+      executorEnabled = executorState.enable or false;
+      blockers = blockers;
+      status = if blockers == [ ] then "admitted" else "blocked";
+    };
+
   collectWitnesses =
     bases:
     listToAttrs (
@@ -373,6 +406,15 @@ let
         ) effects
       );
 
+      realizationAdmission = listToAttrs (
+        mapAttrsToList (
+          _: realization:
+          nameValuePair realization.id (
+            normalizeRealizationAdmission effects executors admission realization
+          )
+        ) realizations
+      );
+
       structurallyReadyEffectIds = map (effect: effect.id) (
         filter (effect: (effectBlockers baseIds witnessIds effect) == [ ]) (attrValues effects)
       );
@@ -383,6 +425,18 @@ let
 
       pendingCapabilityEffectIds = map (effect: effect.id) (
         filter (effect: flattenCapabilities effect.requires.capabilities != [ ]) (attrValues effects)
+      );
+
+      admittedRealizationIds = map (realization: realization.id) (
+        filter (realization: (realizationAdmission.${realization.id}.status or "blocked") == "admitted") (
+          attrValues realizations
+        )
+      );
+
+      blockedRealizationIds = map (realization: realization.id) (
+        filter (realization: (realizationAdmission.${realization.id}.status or "blocked") != "admitted") (
+          attrValues realizations
+        )
       );
     in
     {
@@ -399,6 +453,10 @@ let
         declaredEffectIds = effectIds;
         inherit structurallyReadyEffectIds blockedEffectIds pendingCapabilityEffectIds;
         byEffect = admission;
+        realizations = {
+          inherit admittedRealizationIds blockedRealizationIds;
+          byRealization = realizationAdmission;
+        };
       };
       receipts = {
         expected = mapAttrs (_: realization: realization.receipt) realizations;

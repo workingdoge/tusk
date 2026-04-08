@@ -441,6 +441,10 @@ This note should now split naturally into:
 5. connect `config-8vr.2` so skills and tool surfaces can be exported through
    the same flake story
 
+The first part of step 2 now exists as the repo-local `local-trace` executor
+and `tusk-trace-executor` runtime entrypoint described in
+[`design/tusk-local-trace-executor.md`](./tusk-local-trace-executor.md).
+
 ## Recommendation
 
 Proceed as if:

@@ -479,6 +479,20 @@
           exec bash ${./scripts/tusk-tracker.sh} "$@"
         '';
       };
+      tuskTraceExecutorPackage = pkgs.writeShellApplication {
+        name = "tusk-trace-executor";
+        runtimeInputs = [
+          pkgs.jq
+          pkgs.nix
+        ];
+        text = ''
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+          export TUSKD_CORE_BIN=${tuskdCorePackage}/bin/tuskd-core
+          export JQ_BIN=${pkgs.jq}/bin/jq
+          export NIX_BIN=${pkgs.nix}/bin/nix
+          exec bash ${./scripts/tusk-trace-executor.sh} "$@"
+        '';
+      };
       tuskdPackage = pkgs.writeShellApplication {
         name = "tuskd";
         runtimeInputs = [
@@ -909,6 +923,12 @@
           };
         };
       };
+      repoSelfHostWitnessIds = [
+        "base.self.codex-nix-check.contract"
+        "base.self.tuskd-core-build.binary"
+        "base.self.tusk-ui-build.binary"
+        "base.self.tuskd-status.service"
+      ];
       repoSelfHostTusk =
         (
           nixpkgs.lib.evalModules {
@@ -928,12 +948,53 @@
                 tusk = {
                   enable = true;
                   base = repoSelfHostBase;
+                  effects."self.trace-core-health" = {
+                    requires.base = builtins.attrNames repoSelfHostBase;
+                    inputs = repoSelfHostWitnessIds;
+                    intent = {
+                      kind = "self-host.trace";
+                      target = "tusk";
+                      action = "core-health";
+                      description = "Record a local trace over the first self-host witness set.";
+                    };
+                    description = "Trace the first self-host witness root through a safe repo-local executor.";
+                  };
+                  executors.local-trace = {
+                    enable = true;
+                    kind = "local-trace";
+                    description = "Safe repo-local executor that realizes admitted effects by appending trace receipts only.";
+                    mode = "receipt-only";
+                    receiptKind = "effect.trace";
+                  };
+                  drivers.local.receipts = {
+                    kind = "local-receipt";
+                    description = "Repo-local driver that sinks trace realizations into tuskd receipts.";
+                    sink = ".beads/tuskd/receipts.jsonl";
+                  };
+                  realizations."self.trace-core-health.local" = {
+                    effect = "self.trace-core-health";
+                    executor = "local-trace";
+                    driver = "local.receipts";
+                    receipt = {
+                      kind = "effect.trace";
+                      mode = "local-trace";
+                      description = "Repo-local trace receipt for the first self-host realization.";
+                    };
+                    description = "Bind the first self-host trace effect to the local receipt sink.";
+                  };
                 };
               }
             ];
           }
         ).config.flake.tusk;
       repoSelfHostWitnessCheck = pkgs.writeText "tusk-self-host-witnesses.json" (builtins.toJSON repoSelfHostTusk);
+      repoSelfHostTraceCheck = pkgs.writeText "tusk-self-host-trace.json" (
+        builtins.toJSON {
+          admittedRealizations = repoSelfHostTusk.admission.realizations.admittedRealizationIds;
+          localTraceExecutor = repoSelfHostTusk.executors.local-trace;
+          traceRealization = repoSelfHostTusk.realizations."self.trace-core-health.local";
+        }
+      );
     in
     {
       tusk = repoSelfHostTusk;
@@ -962,6 +1023,7 @@
         radicle-flake-wasm-plugin = radicleFlakeWasmPluginPackage;
         radicle-flake-wasm-resolver-wasi = radicleFlakeWasmResolverWasiCheck;
         tusk-self-host-witnesses = repoSelfHostWitnessCheck;
+        tusk-self-host-trace = repoSelfHostTraceCheck;
       };
       packages.${system} = {
         rust-toolchain = rustToolchain;
@@ -975,6 +1037,7 @@
         radicle-flake-wasm-resolver = radicleFlakeWasmResolverPackage;
         tusk-clean = tuskClean;
         tusk-flake-ref = tuskFlakeRefPackage;
+        tusk-trace-executor = tuskTraceExecutorPackage;
         tusk-tracker = tuskTrackerPackage;
         tuskd-core = tuskdCorePackage;
         tuskd-transition-tests = tuskdTransitionTestsPackage;
@@ -1030,6 +1093,10 @@
         tusk-flake-ref = {
           type = "app";
           program = "${tuskFlakeRefPackage}/bin/tusk-flake-ref";
+        };
+        tusk-trace-executor = {
+          type = "app";
+          program = "${tuskTraceExecutorPackage}/bin/tusk-trace-executor";
         };
         tuskd = {
           type = "app";
