@@ -74,7 +74,7 @@ mod tests {
             }],
         };
 
-        let rendered = crate::viewmodel::receipts_viewmodel(&receipts)
+        let rendered = crate::viewmodel::receipts_viewmodel(&receipts, None)
             .receipts
             .into_iter()
             .map(|item| item.label)

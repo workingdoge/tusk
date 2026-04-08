@@ -166,7 +166,9 @@ pub(crate) fn issue_inspection_lines(model: &IssueInspectViewModel) -> Vec<Strin
     lines.push(String::new());
     lines.push(format!(
         "authoritative receipts ({})",
-        model.available_receipts.max(model.recent_receipts.len() as u64)
+        model
+            .available_receipts
+            .max(model.recent_receipts.len() as u64)
     ));
     if model.recent_receipts.is_empty() {
         lines.push("  none".to_owned());

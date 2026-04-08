@@ -85,12 +85,13 @@ Keys:
   Up / Down    scroll the current panel, or move board selection on the board
   PageUp/Down  scroll the current panel by a page
   g / G        jump to the top or bottom of the current panel
+  /            open the local filter on board or receipts
   i            inspect the home focus issue or selected board item
   c            claim the selected ready issue from the board
   l            launch a lane for the selected claimed issue
   f            finish the selected active lane as completed
   Enter / y    confirm an overlay action
-  n / Esc      dismiss an overlay
+  n / Esc      dismiss an overlay, or clear the active filter
 "
     );
 }

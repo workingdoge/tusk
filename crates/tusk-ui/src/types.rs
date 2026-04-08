@@ -447,7 +447,10 @@ mod tests {
         assert_eq!(inspection.dependencies.len(), 1);
         assert_eq!(inspection.dependents.len(), 1);
         assert_eq!(
-            inspection.lane.as_ref().and_then(|lane| lane.base_rev.as_deref()),
+            inspection
+                .lane
+                .as_ref()
+                .and_then(|lane| lane.base_rev.as_deref()),
             Some("main")
         );
     }

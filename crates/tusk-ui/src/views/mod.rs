@@ -12,20 +12,31 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Tabs, Wrap};
 
-use crate::app::{App, PanelState, ViewMode};
+use crate::app::{App, FilterBarState, PanelState, ViewMode};
 use crate::theme::{
     active_tab_style, chrome_block, error_style, muted_style, pane_block, strong_style,
     subtle_style, success_style, tab_style, text_style, transport_style, warning_style,
 };
 
 pub(crate) fn render(frame: &mut Frame, app: &App) {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    let has_filter_bar = app.filter_bar().is_some();
+    let constraints = if has_filter_bar {
+        vec![
+            Constraint::Length(4),
+            Constraint::Min(8),
+            Constraint::Length(3),
+            Constraint::Length(4),
+        ]
+    } else {
+        vec![
             Constraint::Length(4),
             Constraint::Min(8),
             Constraint::Length(4),
-        ])
+        ]
+    };
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(frame.area());
 
     render_header(frame, vertical[0], app);
@@ -41,7 +52,14 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
         overlay::render_overlay(frame, vertical[1], app);
     }
 
-    render_footer(frame, vertical[2], app);
+    let footer_index = if let Some(filter) = app.filter_bar() {
+        render_filter_bar(frame, vertical[2], &filter);
+        3
+    } else {
+        2
+    };
+
+    render_footer(frame, vertical[footer_index], app);
 }
 
 pub(crate) fn panel_title<T>(
@@ -235,6 +253,49 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(
         Paragraph::new(Line::from(app.status_line.clone())).wrap(Wrap { trim: false }),
+        rows[1],
+    );
+}
+
+fn render_filter_bar(frame: &mut Frame, area: Rect, filter: &FilterBarState) {
+    let block = chrome_block("Filter");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .split(inner);
+
+    let mode_label = if filter.editing { "editing" } else { "active" };
+    let summary = if filter.query.is_empty() {
+        filter.placeholder.clone()
+    } else {
+        filter.query.clone()
+    };
+    let summary_style = if filter.query.is_empty() {
+        subtle_style()
+    } else {
+        text_style()
+    };
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(filter.scope.clone(), strong_style()),
+            Span::raw("  "),
+            Span::styled(mode_label, transport_style(filter.editing)),
+            Span::raw("  "),
+            Span::styled(format!("{} matches", filter.visible_items), muted_style()),
+        ])),
+        rows[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("/ ", strong_style()),
+            Span::styled(summary, summary_style),
+        ]))
+        .wrap(Wrap { trim: false }),
         rows[1],
     );
 }

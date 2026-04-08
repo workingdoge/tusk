@@ -335,15 +335,20 @@ pub(crate) fn tracker_viewmodel(tracker: &TrackerStatus) -> TrackerViewModel {
 pub(crate) fn board_viewmodel(
     board: &BoardStatus,
     selected_board_item_id: Option<&str>,
+    filter_query: Option<&str>,
 ) -> BoardViewModel {
     let mut active_lanes = Vec::new();
     let mut finished_lanes = Vec::new();
     let mut stale_lanes = Vec::new();
+    let filter = normalized_filter_query(filter_query);
 
     let mut ordered = board.lanes.clone();
     ordered.sort_by(|left, right| left.issue_id.cmp(&right.issue_id));
 
     for lane in ordered {
+        if !lane_matches_filter(&lane, filter.as_deref()) {
+            continue;
+        }
         let selected = selected_board_item_id == Some(lane.issue_id.as_str());
         match lane_group(&lane) {
             LaneGroup::Active => active_lanes.push(lane_item_from_lane(&lane, selected)),
@@ -359,21 +364,25 @@ pub(crate) fn board_viewmodel(
         ready_issues: board
             .ready_issues
             .iter()
+            .filter(|issue| board_issue_matches_filter(issue, filter.as_deref()))
             .map(|issue| issue_item(issue, selected_board_item_id == Some(issue.id.as_str())))
             .collect(),
         claimed_issues: board
             .claimed_issues
             .iter()
+            .filter(|issue| board_issue_matches_filter(issue, filter.as_deref()))
             .map(|issue| issue_item(issue, selected_board_item_id == Some(issue.id.as_str())))
             .collect(),
         blocked_issues: board
             .blocked_issues
             .iter()
+            .filter(|issue| board_issue_matches_filter(issue, filter.as_deref()))
             .map(|issue| issue_item(issue, false))
             .collect(),
         deferred_issues: board
             .deferred_issues
             .iter()
+            .filter(|issue| board_issue_matches_filter(issue, filter.as_deref()))
             .map(|issue| issue_item(issue, false))
             .collect(),
         active_lanes,
@@ -383,7 +392,12 @@ pub(crate) fn board_viewmodel(
     }
 }
 
-pub(crate) fn receipts_viewmodel(receipts: &ReceiptsStatus) -> ReceiptsViewModel {
+pub(crate) fn receipts_viewmodel(
+    receipts: &ReceiptsStatus,
+    filter_query: Option<&str>,
+) -> ReceiptsViewModel {
+    let filter = normalized_filter_query(filter_query);
+
     ReceiptsViewModel {
         repo_root: receipts.repo_root.clone(),
         updated_at: receipts.generated_at.clone(),
@@ -392,6 +406,7 @@ pub(crate) fn receipts_viewmodel(receipts: &ReceiptsStatus) -> ReceiptsViewModel
             .receipts
             .iter()
             .rev()
+            .filter(|receipt| receipt_matches_filter(receipt, filter.as_deref()))
             .take(10)
             .map(|receipt| ReceiptItem {
                 label: receipt_label(receipt),
@@ -639,6 +654,32 @@ fn issue_item(issue: &BoardIssue, selected: bool) -> IssueItem {
     }
 }
 
+fn normalized_filter_query(query: Option<&str>) -> Option<String> {
+    query
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_lowercase())
+}
+
+fn contains_filter(haystack: &str, filter: Option<&str>) -> bool {
+    match filter {
+        Some(filter) => haystack.to_lowercase().contains(filter),
+        None => true,
+    }
+}
+
+fn board_issue_matches_filter(issue: &BoardIssue, filter: Option<&str>) -> bool {
+    contains_filter(&format!("{} {}", issue.id, issue.title), filter)
+}
+
+fn lane_matches_filter(lane: &LaneEntry, filter: Option<&str>) -> bool {
+    contains_filter(&format!("{} {}", lane.issue_id, lane.issue_title), filter)
+}
+
+fn receipt_matches_filter(receipt: &ReceiptEntry, filter: Option<&str>) -> bool {
+    contains_filter(&receipt_label(receipt), filter)
+}
+
 fn lane_item_from_operator_lane(lane: &OperatorLane, selected: bool) -> LaneItem {
     LaneItem {
         issue_id: lane.issue_id.clone(),
@@ -790,8 +831,11 @@ fn lane_group(lane: &LaneEntry) -> LaneGroup {
 
 #[cfg(test)]
 mod tests {
-    use super::{home_viewmodel, issue_inspect_viewmodel};
-    use crate::types::{golden_issue_inspection, golden_operator_snapshot};
+    use super::{board_viewmodel, home_viewmodel, issue_inspect_viewmodel, receipts_viewmodel};
+    use crate::types::{
+        BoardIssue, BoardStatus, LaneEntry, ReceiptEntry, ReceiptsStatus, golden_issue_inspection,
+        golden_operator_snapshot,
+    };
 
     #[test]
     fn home_viewmodel_keeps_dependency_narrative_structured() {
@@ -833,5 +877,76 @@ mod tests {
                 .and_then(|action| action.issue_id.as_deref()),
             Some("tusk-ready")
         );
+    }
+
+    #[test]
+    fn board_viewmodel_filters_issue_and_lane_sections() {
+        let board = BoardStatus {
+            repo_root: "/tmp/repo".to_owned(),
+            generated_at: "2026-04-07T20:00:00Z".to_owned(),
+            summary: None,
+            ready_issues: vec![BoardIssue {
+                id: "tusk-ready".to_owned(),
+                title: "ready issue".to_owned(),
+                status: Some("open".to_owned()),
+            }],
+            claimed_issues: vec![BoardIssue {
+                id: "tusk-claim".to_owned(),
+                title: "claimed issue".to_owned(),
+                status: Some("in_progress".to_owned()),
+            }],
+            blocked_issues: vec![BoardIssue {
+                id: "tusk-blocked".to_owned(),
+                title: "blocked issue".to_owned(),
+                status: Some("open".to_owned()),
+            }],
+            deferred_issues: vec![],
+            lanes: vec![LaneEntry {
+                issue_id: "tusk-lane".to_owned(),
+                issue_title: "live lane".to_owned(),
+                status: "launched".to_owned(),
+                observed_status: Some("launched".to_owned()),
+                workspace_exists: Some(true),
+                outcome: None,
+                workspace_name: Some("tusk-lane".to_owned()),
+            }],
+            workspaces: vec![],
+        };
+
+        let model = board_viewmodel(&board, Some("tusk-lane"), Some("lane"));
+
+        assert!(model.ready_issues.is_empty());
+        assert!(model.claimed_issues.is_empty());
+        assert_eq!(model.active_lanes.len(), 1);
+        assert_eq!(model.active_lanes[0].issue_id, "tusk-lane");
+        assert!(model.active_lanes[0].selected);
+    }
+
+    #[test]
+    fn receipts_viewmodel_filters_by_label_text() {
+        let receipts = ReceiptsStatus {
+            repo_root: "/tmp/repo".to_owned(),
+            generated_at: "2026-04-07T20:00:00Z".to_owned(),
+            receipts_path: "/tmp/repo/.beads/tuskd/receipts.jsonl".to_owned(),
+            receipts: vec![
+                ReceiptEntry {
+                    timestamp: Some("2026-04-07T19:59:00Z".to_owned()),
+                    kind: Some("issue.claim".to_owned()),
+                    payload: None,
+                    invalid_line: None,
+                },
+                ReceiptEntry {
+                    timestamp: Some("2026-04-07T20:00:00Z".to_owned()),
+                    kind: Some("lane.launch".to_owned()),
+                    payload: None,
+                    invalid_line: None,
+                },
+            ],
+        };
+
+        let model = receipts_viewmodel(&receipts, Some("launch"));
+
+        assert_eq!(model.receipts.len(), 1);
+        assert!(model.receipts[0].label.contains("lane.launch"));
     }
 }

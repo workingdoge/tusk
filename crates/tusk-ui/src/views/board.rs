@@ -240,7 +240,10 @@ fn issue_lines_len(issues: &[IssueItem]) -> usize {
 }
 
 fn selected_issue_line(issues: &[IssueItem], start: usize) -> Option<usize> {
-    issues.iter().position(|issue| issue.selected).map(|idx| start + idx)
+    issues
+        .iter()
+        .position(|issue| issue.selected)
+        .map(|idx| start + idx)
 }
 
 fn lane_section_len(lanes: &[LaneItem], present: bool) -> usize {
@@ -304,7 +307,7 @@ mod tests {
             workspaces: vec!["default".to_owned()],
         };
 
-        let rendered = board_lines(&board_viewmodel(&board, None))
+        let rendered = board_lines(&board_viewmodel(&board, None, None))
             .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
@@ -340,7 +343,7 @@ mod tests {
             workspaces: vec![],
         };
 
-        let rendered = board_lines(&board_viewmodel(&board, None))
+        let rendered = board_lines(&board_viewmodel(&board, None, None))
             .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
@@ -396,7 +399,7 @@ mod tests {
             workspaces: vec![],
         };
 
-        let rendered = board_lines(&board_viewmodel(&board, None))
+        let rendered = board_lines(&board_viewmodel(&board, None, None))
             .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
@@ -440,7 +443,7 @@ mod tests {
             workspaces: vec![],
         };
 
-        let rendered = board_lines(&board_viewmodel(&board, Some("tusk-b")))
+        let rendered = board_lines(&board_viewmodel(&board, Some("tusk-b"), None))
             .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
@@ -472,7 +475,7 @@ mod tests {
             workspaces: vec![],
         };
 
-        let rendered = board_lines(&board_viewmodel(&board, Some("tusk-b")))
+        let rendered = board_lines(&board_viewmodel(&board, Some("tusk-b"), None))
             .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
@@ -504,7 +507,7 @@ mod tests {
             workspaces: vec![],
         };
 
-        let rendered = board_lines(&board_viewmodel(&board, Some("tusk-live")))
+        let rendered = board_lines(&board_viewmodel(&board, Some("tusk-live"), None))
             .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()

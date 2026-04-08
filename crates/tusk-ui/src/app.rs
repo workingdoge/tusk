@@ -9,15 +9,15 @@ use crate::types::{
     BoardIssue, BoardStatus, ClaimIssuePayload, FinishLanePayload, LaneEntry, LaunchLanePayload,
     OperatorSnapshot, PingStatus, ReceiptsStatus, TrackerStatus,
 };
+use crate::viewmodel::{
+    BoardViewModel, HomeViewModel, ReceiptsViewModel, TrackerViewModel, board_viewmodel,
+    home_viewmodel, issue_inspect_viewmodel, receipts_viewmodel, tracker_viewmodel,
+};
 use crate::views::board::{board_lines, selected_line_offset};
 use crate::views::home::{home_context_lines, home_history_lines, home_next_lines, home_now_lines};
 use crate::views::overlay::issue_inspection_lines;
 use crate::views::receipts::receipt_lines;
 use crate::views::tracker::tracker_lines;
-use crate::viewmodel::{
-    BoardViewModel, HomeViewModel, ReceiptsViewModel, TrackerViewModel, board_viewmodel,
-    home_viewmodel, issue_inspect_viewmodel, receipts_viewmodel, tracker_viewmodel,
-};
 use crate::worker::{RefreshSet, RefreshUpdate, RefreshWorker};
 
 #[derive(Debug)]
@@ -31,6 +31,8 @@ pub(crate) struct App {
     pub(crate) should_quit: bool,
     pub(crate) view: ViewMode,
     pub(crate) selected_board_item_id: Option<String>,
+    input_mode: InputMode,
+    filters: ViewFilters,
     scroll: ScrollOffsets,
     overlay: Option<OverlayState>,
     pub(crate) home: PanelState<OperatorSnapshot>,
@@ -56,6 +58,8 @@ impl App {
             should_quit: false,
             view: ViewMode::Home,
             selected_board_item_id: None,
+            input_mode: InputMode::Normal,
+            filters: ViewFilters::default(),
             scroll: ScrollOffsets::default(),
             overlay: None,
             home: PanelState::default(),
@@ -145,18 +149,69 @@ impl App {
     }
 
     pub(crate) fn board_viewmodel(&self) -> Option<BoardViewModel> {
-        self.board
-            .value
-            .as_ref()
-            .map(|board| board_viewmodel(board, self.selected_board_item_id.as_deref()))
+        self.board.value.as_ref().map(|board| {
+            board_viewmodel(
+                board,
+                self.selected_board_item_id.as_deref(),
+                self.board_filter_query(),
+            )
+        })
     }
 
     pub(crate) fn receipts_viewmodel(&self) -> Option<ReceiptsViewModel> {
-        self.receipts.value.as_ref().map(receipts_viewmodel)
+        self.receipts
+            .value
+            .as_ref()
+            .map(|receipts| receipts_viewmodel(receipts, self.receipts_filter_query()))
     }
 
     pub(crate) fn overlay(&self) -> Option<&OverlayState> {
         self.overlay.as_ref()
+    }
+
+    pub(crate) fn filter_bar(&self) -> Option<FilterBarState> {
+        if !matches!(self.view, ViewMode::Board | ViewMode::Receipts) {
+            return None;
+        }
+
+        let query = self.active_filter_text();
+        if !self.is_filter_mode() && query.is_empty() {
+            return None;
+        }
+
+        let (scope, placeholder, visible_items) = match self.view {
+            ViewMode::Board => (
+                "board",
+                "filter issues and lanes by id or title",
+                self.board_viewmodel()
+                    .map(|board| {
+                        board.ready_issues.len()
+                            + board.claimed_issues.len()
+                            + board.blocked_issues.len()
+                            + board.deferred_issues.len()
+                            + board.active_lanes.len()
+                            + board.finished_lanes.len()
+                            + board.stale_lanes.len()
+                    })
+                    .unwrap_or_default(),
+            ),
+            ViewMode::Receipts => (
+                "receipts",
+                "filter receipts by kind or timestamp",
+                self.receipts_viewmodel()
+                    .map(|receipts| receipts.receipts.len())
+                    .unwrap_or_default(),
+            ),
+            _ => return None,
+        };
+
+        Some(FilterBarState {
+            scope: scope.to_owned(),
+            query: query.to_owned(),
+            placeholder: placeholder.to_owned(),
+            editing: self.is_filter_mode(),
+            visible_items,
+        })
     }
 
     pub(crate) fn repo_name(&self) -> String {
@@ -193,14 +248,23 @@ impl App {
             return overlay.footer_hint();
         }
 
+        if self.is_filter_mode() {
+            return "type to filter  Backspace delete  Enter keep query  Esc clear  q quit";
+        }
+
         match self.view {
             ViewMode::Home => {
                 "o/t/b/e view  Tab cycle  ? help  i inspect  j/k scroll  PgUp/PgDn page  g/G edge  b board  r refresh  p ping  q quit"
             }
             ViewMode::Board => {
-                "o/t/b/e view  Tab cycle  ? help  i inspect  j/k move  PgUp/PgDn page  g/G edge  c claim  l launch  f finish  r refresh  p ping  q quit"
+                "o/t/b/e view  Tab cycle  ? help  / filter  i inspect  j/k move  PgUp/PgDn page  g/G edge  Esc clear  c claim  l launch  f finish  r refresh  p ping  q quit"
             }
-            _ => "o/t/b/e view  Tab cycle  ? help  j/k scroll  PgUp/PgDn page  g/G edge  r refresh  p ping  q quit",
+            ViewMode::Receipts => {
+                "o/t/b/e view  Tab cycle  ? help  / filter  j/k scroll  PgUp/PgDn page  g/G edge  Esc clear  r refresh  p ping  q quit"
+            }
+            _ => {
+                "o/t/b/e view  Tab cycle  ? help  j/k scroll  PgUp/PgDn page  g/G edge  r refresh  p ping  q quit"
+            }
         }
     }
 
@@ -254,10 +318,18 @@ impl App {
             return Ok(self.overlay_action_for_key(key));
         }
 
+        if self.is_filter_mode() {
+            return Ok(self.filter_action_for_key(key));
+        }
+
         let action = match key.code {
             KeyCode::Char('q') => Some(UiAction::Quit),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(UiAction::Quit)
+            }
+            KeyCode::Esc if self.has_active_filter() => Some(UiAction::ClearFilter),
+            KeyCode::Char('/') if matches!(self.view, ViewMode::Board | ViewMode::Receipts) => {
+                Some(UiAction::StartFilter)
             }
             KeyCode::Char('c') if self.view == ViewMode::Board => Some(self.claim_action()?),
             KeyCode::Char('f') if self.view == ViewMode::Board => Some(self.finish_action()?),
@@ -301,15 +373,26 @@ impl App {
             UiAction::Quit => self.should_quit = true,
             UiAction::Refresh => self.request_full_refresh("manual refresh"),
             UiAction::Ping => self.ping(),
+            UiAction::StartFilter => self.start_filter(),
+            UiAction::FilterAppend(ch) => self.append_filter(ch),
+            UiAction::FilterBackspace => self.backspace_filter(),
+            UiAction::CommitFilter => self.commit_filter(),
+            UiAction::ClearFilter => self.clear_filter(),
             UiAction::SwitchView(view) => {
+                self.clear_all_filters();
+                self.input_mode = InputMode::Normal;
                 self.view = view;
                 self.request_view_refresh("view refresh");
             }
             UiAction::CycleView(Direction::Forward) => {
+                self.clear_all_filters();
+                self.input_mode = InputMode::Normal;
                 self.view = self.view.next();
                 self.request_view_refresh("view refresh");
             }
             UiAction::CycleView(Direction::Backward) => {
+                self.clear_all_filters();
+                self.input_mode = InputMode::Normal;
                 self.view = self.view.previous();
                 self.request_view_refresh("view refresh");
             }
@@ -328,6 +411,26 @@ impl App {
         }
     }
 
+    fn filter_action_for_key(&self, key: KeyEvent) -> Option<UiAction> {
+        match key.code {
+            KeyCode::Char('q') => Some(UiAction::Quit),
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(UiAction::Quit)
+            }
+            KeyCode::Enter => Some(UiAction::CommitFilter),
+            KeyCode::Esc => Some(UiAction::ClearFilter),
+            KeyCode::Backspace => Some(UiAction::FilterBackspace),
+            KeyCode::Char(ch)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                Some(UiAction::FilterAppend(ch))
+            }
+            _ => None,
+        }
+    }
+
     fn overlay_action_for_key(&self, key: KeyEvent) -> Option<UiAction> {
         match key.code {
             KeyCode::Char('q') => Some(UiAction::Quit),
@@ -340,9 +443,7 @@ impl App {
             {
                 Some(UiAction::DismissOverlay)
             }
-            KeyCode::Char('i')
-                if self.overlay.as_ref().is_some_and(OverlayState::is_inspect) =>
-            {
+            KeyCode::Char('i') if self.overlay.as_ref().is_some_and(OverlayState::is_inspect) => {
                 Some(UiAction::DismissOverlay)
             }
             KeyCode::Enter | KeyCode::Char('y')
@@ -364,8 +465,11 @@ impl App {
             return;
         };
 
-        self.selected_board_item_id =
-            normalized_board_selection(board, self.selected_board_item_id.as_deref());
+        self.selected_board_item_id = normalized_board_selection(
+            board,
+            self.selected_board_item_id.as_deref(),
+            self.board_filter_query(),
+        );
         self.sync_board_scroll();
     }
 
@@ -375,8 +479,12 @@ impl App {
             return;
         };
 
-        let Some(next) = step_board_selection(board, self.selected_board_item_id.as_deref(), delta)
-        else {
+        let Some(next) = step_board_selection(
+            board,
+            self.selected_board_item_id.as_deref(),
+            delta,
+            self.board_filter_query(),
+        ) else {
             self.selected_board_item_id = None;
             self.status_line = "no selectable board items".to_owned();
             return;
@@ -547,6 +655,74 @@ impl App {
                 Ok(UiAction::Inspect(issue_id))
             }
             _ => Err("inspection is only available from home or board".to_owned()),
+        }
+    }
+
+    fn start_filter(&mut self) {
+        if !matches!(self.view, ViewMode::Board | ViewMode::Receipts) {
+            self.status_line = "filtering is only available on board or receipts".to_owned();
+            return;
+        }
+
+        self.input_mode = InputMode::Filter;
+        self.status_line = format!("editing {} filter", self.view.label());
+    }
+
+    fn append_filter(&mut self, ch: char) {
+        let Some(query) = self.active_filter_text_mut() else {
+            self.status_line = "no active filter target".to_owned();
+            return;
+        };
+
+        query.push(ch);
+        self.apply_filter_change();
+        self.status_line = format!(
+            "{} filter: {}",
+            self.view.label(),
+            self.active_filter_text()
+        );
+    }
+
+    fn backspace_filter(&mut self) {
+        let Some(query) = self.active_filter_text_mut() else {
+            self.status_line = "no active filter target".to_owned();
+            return;
+        };
+
+        query.pop();
+        self.apply_filter_change();
+        self.status_line = if self.active_filter_text().is_empty() {
+            format!("{} filter cleared", self.view.label())
+        } else {
+            format!(
+                "{} filter: {}",
+                self.view.label(),
+                self.active_filter_text()
+            )
+        };
+    }
+
+    fn commit_filter(&mut self) {
+        self.input_mode = InputMode::Normal;
+        self.status_line = if self.has_active_filter() {
+            format!(
+                "{} filter locked: {}",
+                self.view.label(),
+                self.active_filter_text()
+            )
+        } else {
+            format!("{} filter cleared", self.view.label())
+        };
+    }
+
+    fn clear_filter(&mut self) {
+        let cleared = self.clear_active_filter();
+        self.input_mode = InputMode::Normal;
+        if cleared {
+            self.apply_filter_change();
+            self.status_line = format!("cleared {} filter", self.view.label());
+        } else {
+            self.status_line = format!("{} filter already empty", self.view.label());
         }
     }
 
@@ -731,6 +907,63 @@ impl App {
         })
     }
 
+    fn is_filter_mode(&self) -> bool {
+        self.input_mode == InputMode::Filter
+    }
+
+    fn has_active_filter(&self) -> bool {
+        !self.active_filter_text().trim().is_empty()
+    }
+
+    fn board_filter_query(&self) -> Option<&str> {
+        normalized_filter_query(self.filters.board.as_str())
+    }
+
+    fn receipts_filter_query(&self) -> Option<&str> {
+        normalized_filter_query(self.filters.receipts.as_str())
+    }
+
+    fn active_filter_text(&self) -> &str {
+        match self.view {
+            ViewMode::Board => &self.filters.board,
+            ViewMode::Receipts => &self.filters.receipts,
+            _ => "",
+        }
+    }
+
+    fn active_filter_text_mut(&mut self) -> Option<&mut String> {
+        match self.view {
+            ViewMode::Board => Some(&mut self.filters.board),
+            ViewMode::Receipts => Some(&mut self.filters.receipts),
+            _ => None,
+        }
+    }
+
+    fn clear_active_filter(&mut self) -> bool {
+        let Some(query) = self.active_filter_text_mut() else {
+            return false;
+        };
+        let had_value = !query.is_empty();
+        query.clear();
+        had_value
+    }
+
+    fn clear_all_filters(&mut self) {
+        self.filters = ViewFilters::default();
+    }
+
+    fn apply_filter_change(&mut self) {
+        match self.view {
+            ViewMode::Board => {
+                self.sync_board_selection();
+            }
+            ViewMode::Receipts => {
+                self.scroll.receipts = 0;
+            }
+            _ => {}
+        }
+    }
+
     fn current_scroll_offset_mut(&mut self) -> &mut u16 {
         match self.view {
             ViewMode::Home => &mut self.scroll.home,
@@ -808,6 +1041,28 @@ pub(crate) struct ScrollOffsets {
     receipts: u16,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum InputMode {
+    #[default]
+    Normal,
+    Filter,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ViewFilters {
+    board: String,
+    receipts: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FilterBarState {
+    pub(crate) scope: String,
+    pub(crate) query: String,
+    pub(crate) placeholder: String,
+    pub(crate) editing: bool,
+    pub(crate) visible_items: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ViewMode {
     Home,
@@ -882,8 +1137,11 @@ impl OverlayState {
             }
             ViewMode::Board => {
                 body.push("Board".to_owned());
+                body.push("  /                  edit the local board filter".to_owned());
                 body.push("  j / k or Up / Down  move selection".to_owned());
-                body.push("  PageUp / PageDown   scroll the board without changing selection".to_owned());
+                body.push(
+                    "  PageUp / PageDown   scroll the board without changing selection".to_owned(),
+                );
                 body.push("  g / G               jump to top or bottom of the board".to_owned());
                 body.push("  i                  inspect the selected issue or lane".to_owned());
                 body.push("  c                  confirm claim for selected ready issue".to_owned());
@@ -897,6 +1155,7 @@ impl OverlayState {
             }
             ViewMode::Receipts => {
                 body.push("Receipts".to_owned());
+                body.push("  /                  edit the local receipts filter".to_owned());
                 body.push("  j / k or Up / Down scroll recent receipts".to_owned());
                 body.push("  Review recent authoritative transitions from tuskd".to_owned());
             }
@@ -1123,15 +1382,55 @@ pub(crate) fn active_lanes(board: &BoardStatus) -> Vec<&LaneEntry> {
     lanes
 }
 
-fn board_items(board: &BoardStatus) -> Vec<BoardItemRef<'_>> {
+fn normalized_filter_query(query: &str) -> Option<&str> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn filter_matches(haystack: &str, filter_query: Option<&str>) -> bool {
+    match filter_query {
+        Some(filter) => haystack.to_lowercase().contains(&filter.to_lowercase()),
+        None => true,
+    }
+}
+
+fn board_issue_matches_filter(issue: &BoardIssue, filter_query: Option<&str>) -> bool {
+    filter_matches(&format!("{} {}", issue.id, issue.title), filter_query)
+}
+
+fn lane_matches_filter(lane: &LaneEntry, filter_query: Option<&str>) -> bool {
+    filter_matches(
+        &format!("{} {}", lane.issue_id, lane.issue_title),
+        filter_query,
+    )
+}
+
+fn board_items<'a>(board: &'a BoardStatus, filter_query: Option<&str>) -> Vec<BoardItemRef<'a>> {
     let mut items = Vec::with_capacity(
         board.ready_issues.len() + board.claimed_issues.len() + board.lanes.len(),
     );
-    items.extend(board.ready_issues.iter().map(BoardItemRef::ReadyIssue));
-    items.extend(board.claimed_issues.iter().map(BoardItemRef::ClaimedIssue));
+    items.extend(
+        board
+            .ready_issues
+            .iter()
+            .filter(|issue| board_issue_matches_filter(issue, filter_query))
+            .map(BoardItemRef::ReadyIssue),
+    );
+    items.extend(
+        board
+            .claimed_issues
+            .iter()
+            .filter(|issue| board_issue_matches_filter(issue, filter_query))
+            .map(BoardItemRef::ClaimedIssue),
+    );
     items.extend(
         active_lanes(board)
             .into_iter()
+            .filter(|lane| lane_matches_filter(lane, filter_query))
             .map(BoardItemRef::ActiveLane),
     );
     items
@@ -1142,7 +1441,7 @@ fn selected_board_item<'a>(
     selected_board_item_id: Option<&str>,
 ) -> Option<BoardItemRef<'a>> {
     let selected_board_item_id = selected_board_item_id?;
-    board_items(board)
+    board_items(board, None)
         .into_iter()
         .find(|item| item.id() == selected_board_item_id)
 }
@@ -1150,14 +1449,17 @@ fn selected_board_item<'a>(
 pub(crate) fn normalized_board_selection(
     board: &BoardStatus,
     selected_board_item_id: Option<&str>,
+    filter_query: Option<&str>,
 ) -> Option<String> {
-    let items = board_items(board);
+    let items = board_items(board, filter_query);
     if items.is_empty() {
         return None;
     }
 
-    if let Some(selected) = selected_board_item(board, selected_board_item_id) {
-        return Some(selected.id().to_owned());
+    if let Some(selected_board_item_id) = selected_board_item_id {
+        if items.iter().any(|item| item.id() == selected_board_item_id) {
+            return Some(selected_board_item_id.to_owned());
+        }
     }
 
     Some(items[0].id().to_owned())
@@ -1167,13 +1469,14 @@ pub(crate) fn step_board_selection(
     board: &BoardStatus,
     selected_board_item_id: Option<&str>,
     delta: isize,
+    filter_query: Option<&str>,
 ) -> Option<String> {
-    let items = board_items(board);
+    let items = board_items(board, filter_query);
     if items.is_empty() {
         return None;
     }
 
-    let current_index = selected_board_item_id
+    let current_index: usize = selected_board_item_id
         .and_then(|selected| items.iter().position(|item| item.id() == selected))
         .unwrap_or(0);
 
@@ -1255,40 +1558,54 @@ mod tests {
         let board = board_fixture();
 
         assert_eq!(
-            normalized_board_selection(&board, None),
+            normalized_board_selection(&board, None, None),
             Some("tusk-a".to_owned())
         );
         assert_eq!(
-            step_board_selection(&board, Some("tusk-a"), 1),
+            step_board_selection(&board, Some("tusk-a"), 1, None),
             Some("tusk-b".to_owned())
         );
         assert_eq!(
-            step_board_selection(&board, Some("tusk-b"), 1),
+            step_board_selection(&board, Some("tusk-b"), 1, None),
             Some("tusk-c".to_owned())
         );
         assert_eq!(
-            step_board_selection(&board, Some("tusk-c"), 1),
+            step_board_selection(&board, Some("tusk-c"), 1, None),
             Some("tusk-d".to_owned())
         );
         assert_eq!(
-            step_board_selection(&board, Some("tusk-d"), 1),
+            step_board_selection(&board, Some("tusk-d"), 1, None),
             Some("tusk-d".to_owned())
         );
         assert_eq!(
-            step_board_selection(&board, Some("tusk-d"), -1),
+            step_board_selection(&board, Some("tusk-d"), -1, None),
             Some("tusk-c".to_owned())
         );
         assert_eq!(
-            normalized_board_selection(&board, Some("tusk-d")),
+            normalized_board_selection(&board, Some("tusk-d"), None),
             Some("tusk-d".to_owned())
         );
         assert_eq!(
-            step_board_selection(&board, Some("tusk-c"), -1),
+            step_board_selection(&board, Some("tusk-c"), -1, None),
             Some("tusk-b".to_owned())
         );
         assert_eq!(
-            step_board_selection(&board, Some("tusk-b"), -1),
+            step_board_selection(&board, Some("tusk-b"), -1, None),
             Some("tusk-a".to_owned())
+        );
+    }
+
+    #[test]
+    fn selection_helpers_follow_filtered_board_order() {
+        let board = board_fixture();
+
+        assert_eq!(
+            normalized_board_selection(&board, None, Some("claimed")),
+            Some("tusk-c".to_owned())
+        );
+        assert_eq!(
+            step_board_selection(&board, Some("tusk-c"), 1, Some("claimed")),
+            Some("tusk-c".to_owned())
         );
     }
 
@@ -1485,5 +1802,40 @@ mod tests {
             Ok(Some(UiAction::DismissOverlay))
         );
         assert!(app.overlay().is_some_and(|overlay| overlay.is_inspect()));
+    }
+
+    #[test]
+    fn board_filter_mode_edits_and_clears_query() {
+        let mut app = test_app();
+        app.view = ViewMode::Board;
+        app.board.value = Some(board_fixture());
+        app.sync_board_selection();
+
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
+            Ok(Some(UiAction::StartFilter))
+        );
+
+        app.dispatch_action(UiAction::StartFilter);
+        assert!(app.is_filter_mode());
+
+        for ch in ['c', 'l', 'a', 'i', 'm'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+
+        assert_eq!(app.active_filter_text(), "claim");
+        assert_eq!(app.selected_board_item_id.as_deref(), Some("tusk-c"));
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.is_filter_mode());
+        assert_eq!(app.active_filter_text(), "claim");
+
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Ok(Some(UiAction::ClearFilter))
+        );
+
+        app.dispatch_action(UiAction::ClearFilter);
+        assert_eq!(app.active_filter_text(), "");
     }
 }
