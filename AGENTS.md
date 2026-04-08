@@ -53,6 +53,7 @@ nix run .#tuskd -- status --repo "$PWD"
 nix run .#tuskd -- board-status --repo "$PWD"
 nix run .#tuskd-transition-tests -- --source-repo "$PWD"
 nix run .#tuskd -- claim-issue --repo "$PWD" --issue-id tusk-123
+nix run .#tuskd -- autonomous-lane --repo "$PWD" --issue-id tusk-123 --base-rev main --plan
 nix run .#tuskd -- close-issue --repo "$PWD" --issue-id tusk-123 --reason "completed in visible commit"
 nix run .#tuskd -- launch-lane --repo "$PWD" --issue-id tusk-123 --base-rev main
 nix run .#tuskd -- dispatch-lane --repo "$PWD" --issue-id tusk-123 --plan

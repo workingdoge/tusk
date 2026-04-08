@@ -67,6 +67,22 @@ The operator should not treat raw `codex exec` as the public automation API.
 materialization, and the `lane.dispatch` receipt, while `tusk-codex` only
 adapts the active checkout and tracker roots for the worker process.
 
+The next bounded class is:
+
+- command: `tuskd autonomous-lane`
+- issue admission: `task` issues labeled `place:tusk` and `autonomy:v1-safe`
+- execution model: claim, launch, `dispatch-lane --mode exec`, run the issue
+  Verification commands in the lane checkout, require one clean visible
+  revision, then `complete-lane`
+
+That command is intentionally not a scheduler.
+It still requires an explicit issue id, and it fails safely by leaving the lane
+inspectable when the worker does not cut a visible revision or when
+verification fails.
+
+Successful runs append `lane.autonomous` in addition to the underlying
+`lane.dispatch` and `lane.complete` receipts.
+
 `board-status` now carries the latest `self_host.run` summary so operators do
 not need a separate tool to see whether the fixed-point run last passed or
 failed.

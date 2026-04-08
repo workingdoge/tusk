@@ -170,9 +170,14 @@ create_codex_stub_launcher() {
 set -euo pipefail
 
 output_path=""
+checkout_path=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --checkout)
+      checkout_path="${2:?--checkout requires a path}"
+      shift 2
+      ;;
     --output-last-message)
       output_path="${2:?--output-last-message requires a path}"
       shift 2
@@ -188,6 +193,11 @@ if [ -n "${output_path}" ]; then
   mkdir -p "$(dirname "${output_path}")"
   printf 'stub worker completed\n' > "${output_path}"
   printf '%s\n' "${prompt}" > "${output_path}.prompt"
+fi
+
+if [ "${TUSKD_TEST_STUB_COMMIT:-0}" = "1" ] && [ -n "${checkout_path}" ]; then
+  printf 'stub autonomous change\n' > "${checkout_path}/autonomous-stub.txt"
+  jj --repository "${checkout_path}" commit -m "${TUSKD_TEST_STUB_COMMIT_MESSAGE:-stub autonomous commit}" >/dev/null
 fi
 
 printf '{"ok":true,"runner":"stub-codex"}\n'
@@ -737,6 +747,147 @@ test_dispatch_lane() {
   note "dispatch-lane: ok"
 }
 
+test_autonomous_lane_success() {
+  local repo_root="$1"
+  local base_rev="$2"
+  local issue_id=""
+  local issue_description=""
+  local plan_json=""
+  local plan_status=0
+  local autonomous_json=""
+  local autonomous_status=0
+  local status_json=""
+  local show_json=""
+  local show_status=0
+  local landed_revision=""
+  local git_main_commit=""
+  local stub_path=""
+
+  note "autonomous-lane success: begin"
+  issue_description=$'Goal:\nExercise the bounded autonomous lane success path.\n\nVerification:\n- test -f autonomous-stub.txt\n- bash -n scripts/tuskd.sh'
+  issue_id="$(create_labeled_issue "${repo_root}" "transition autonomous lane success probe" "${issue_description}" "place:tusk,track:core,surface:self-hosting,autonomy:v1-safe")"
+  stub_path="$(create_codex_stub_launcher "${repo_root}")"
+
+  run_cli_json plan_json plan_status \
+    env TUSKD_CODEX_LAUNCHER="${stub_path}" \
+      tuskd autonomous-lane --repo "${repo_root}" --issue-id "${issue_id}" --base-rev "${base_rev}" --slug autonomous-lane-probe --plan
+  assert_status "${plan_status}" "0" "autonomous-lane plan"
+  assert_json_value "${plan_json}" '.status' "plan" "autonomous-lane plan status"
+  assert_json_value "${plan_json}" '.policy_class' "tusk.autonomous.v1" "autonomous-lane plan policy"
+  assert_json_value "${plan_json}" '.verification | length' "2" "autonomous-lane plan verification count"
+
+  run_cli_json autonomous_json autonomous_status \
+    env \
+      TUSKD_CODEX_LAUNCHER="${stub_path}" \
+      TUSKD_TEST_STUB_COMMIT=1 \
+      TUSKD_TEST_STUB_COMMIT_MESSAGE="${issue_id}: autonomous stub commit" \
+      tuskd autonomous-lane --repo "${repo_root}" --issue-id "${issue_id}" --base-rev "${base_rev}" --slug autonomous-lane-probe --note "autonomous success probe"
+  assert_status "${autonomous_status}" "0" "autonomous-lane success run"
+  assert_json_value "${autonomous_json}" '.status' "completed" "autonomous-lane success status"
+  assert_json_value "${autonomous_json}" '.policy_class' "tusk.autonomous.v1" "autonomous-lane success policy"
+  assert_json_value "${autonomous_json}" '.dispatch.status' "executed" "autonomous-lane dispatch status"
+  assert_json_value "${autonomous_json}" '.verification.ok' "true" "autonomous-lane verification ok"
+  assert_json_value "${autonomous_json}" '.complete.status' "completed" "autonomous-lane complete status"
+  assert_json_value "${autonomous_json}" '.receipt.kind' "lane.autonomous" "autonomous-lane receipt kind"
+
+  landed_revision="$(jq -r '.complete.revision // ""' <<<"${autonomous_json}")"
+  [ -n "${landed_revision}" ] || fail "autonomous-lane success missing landed revision"$'\n'"${autonomous_json}"
+  git_main_commit="$(git -C "${repo_root}" rev-parse refs/heads/main)"
+  [ "${git_main_commit}" = "${landed_revision}" ] || fail "autonomous-lane success git main mismatch: ${git_main_commit} vs ${landed_revision}"
+
+  status_json="$(tuskd coordinator-status --repo "${repo_root}")"
+  assert_json_value "${status_json}" '.status' "in_sync" "autonomous-lane success coordinator status"
+  assert_json_value "${status_json}" '.parent_commits[0]' "${landed_revision}" "autonomous-lane success coordinator parent"
+
+  run_cli_json show_json show_status bd show "${issue_id}" --json
+  assert_status "${show_status}" "0" "autonomous-lane success issue show"
+  assert_json_value "${show_json}" '.[0].status' "closed" "autonomous-lane success issue closed"
+  [ "$(lane_count "${repo_root}" "${issue_id}")" = "0" ] || fail "autonomous-lane success left lane state behind for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.dispatch")" = "1" ] || fail "autonomous-lane success lane.dispatch receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.complete")" = "1" ] || fail "autonomous-lane success lane.complete receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.autonomous")" = "1" ] || fail "autonomous-lane success lane.autonomous receipt count mismatch for ${issue_id}"
+
+  note "autonomous-lane success: ok"
+}
+
+test_autonomous_lane_missing_revision() {
+  local repo_root="$1"
+  local base_rev="$2"
+  local issue_id=""
+  local issue_description=""
+  local autonomous_json=""
+  local autonomous_status=0
+  local board_json=""
+  local show_json=""
+  local show_status=0
+  local stub_path=""
+
+  note "autonomous-lane missing revision: begin"
+  issue_description=$'Goal:\nExercise autonomous failure when the worker leaves no visible revision.\n\nVerification:\n- bash -n scripts/tuskd.sh'
+  issue_id="$(create_labeled_issue "${repo_root}" "transition autonomous lane missing revision probe" "${issue_description}" "place:tusk,track:core,surface:self-hosting,autonomy:v1-safe")"
+  stub_path="$(create_codex_stub_launcher "${repo_root}")"
+
+  run_cli_json autonomous_json autonomous_status \
+    env TUSKD_CODEX_LAUNCHER="${stub_path}" \
+      tuskd autonomous-lane --repo "${repo_root}" --issue-id "${issue_id}" --base-rev "${base_rev}" --slug autonomous-missing-revision-probe
+  assert_status "${autonomous_status}" "1" "autonomous-lane missing revision exit"
+  assert_json_value "${autonomous_json}" '.error.message' "autonomous_lane requires a clean visible revision from the worker lane" "autonomous-lane missing revision message"
+
+  board_json="$(tuskd board-status --repo "${repo_root}")"
+  assert_json_jq "${board_json}" "autonomous missing revision lane did not stay inspectable" --arg issue_id "${issue_id}" '
+    [.lanes[] | select(.issue_id == $issue_id and .status == "launched" and .dispatch.status == "executed")] | length == 1
+  '
+
+  run_cli_json show_json show_status bd show "${issue_id}" --json
+  assert_status "${show_status}" "0" "autonomous-lane missing revision issue show"
+  assert_json_value "${show_json}" '.[0].status' "in_progress" "autonomous-lane missing revision issue status"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.dispatch")" = "1" ] || fail "autonomous-lane missing revision lane.dispatch receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.autonomous")" = "0" ] || fail "autonomous-lane missing revision lane.autonomous receipt count mismatch for ${issue_id}"
+
+  note "autonomous-lane missing revision: ok"
+}
+
+test_autonomous_lane_verification_failure() {
+  local repo_root="$1"
+  local base_rev="$2"
+  local issue_id=""
+  local issue_description=""
+  local autonomous_json=""
+  local autonomous_status=0
+  local board_json=""
+  local show_json=""
+  local show_status=0
+  local stub_path=""
+
+  note "autonomous-lane verification failure: begin"
+  issue_description=$'Goal:\nExercise autonomous failure when lane verification fails.\n\nVerification:\n- false'
+  issue_id="$(create_labeled_issue "${repo_root}" "transition autonomous lane verification failure probe" "${issue_description}" "place:tusk,track:core,surface:self-hosting,autonomy:v1-safe")"
+  stub_path="$(create_codex_stub_launcher "${repo_root}")"
+
+  run_cli_json autonomous_json autonomous_status \
+    env \
+      TUSKD_CODEX_LAUNCHER="${stub_path}" \
+      TUSKD_TEST_STUB_COMMIT=1 \
+      TUSKD_TEST_STUB_COMMIT_MESSAGE="${issue_id}: autonomous verification failure stub commit" \
+      tuskd autonomous-lane --repo "${repo_root}" --issue-id "${issue_id}" --base-rev "${base_rev}" --slug autonomous-verification-failure-probe
+  assert_status "${autonomous_status}" "1" "autonomous-lane verification failure exit"
+  assert_json_value "${autonomous_json}" '.error.message' "autonomous_lane verification failed" "autonomous-lane verification failure message"
+  assert_json_value "${autonomous_json}" '.payload.verification.ok' "false" "autonomous-lane verification failure result"
+
+  board_json="$(tuskd board-status --repo "${repo_root}")"
+  assert_json_jq "${board_json}" "autonomous verification failure lane did not stay inspectable" --arg issue_id "${issue_id}" '
+    [.lanes[] | select(.issue_id == $issue_id and .status == "launched" and .dispatch.status == "executed")] | length == 1
+  '
+
+  run_cli_json show_json show_status bd show "${issue_id}" --json
+  assert_status "${show_status}" "0" "autonomous-lane verification failure issue show"
+  assert_json_value "${show_json}" '.[0].status' "in_progress" "autonomous-lane verification failure issue status"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.dispatch")" = "1" ] || fail "autonomous-lane verification failure lane.dispatch receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.autonomous")" = "0" ] || fail "autonomous-lane verification failure lane.autonomous receipt count mismatch for ${issue_id}"
+
+  note "autonomous-lane verification failure: ok"
+}
+
 test_complete_lane() {
   local repo_root="$1"
   local base_rev="$2"
@@ -889,11 +1040,22 @@ test_land_main() {
   local status_json=""
   local status_exit=0
   local git_main_commit=""
+  local land_receipt_count_before=""
   local land_receipt_count=""
 
   note "land-main: begin"
 
   printf '\nland-main probe\n' >> "${repo_root}/AGENTS.md"
+
+  land_receipt_count_before="$(
+    jq -Rsc \
+      '
+        split("\n")
+        | map(select(length > 0) | fromjson?)
+        | map(select(.kind == "land.main"))
+        | length
+      ' <"$(receipts_path "${repo_root}")"
+  )"
 
   jj --repository "${repo_root}" workspace add "${landing_path}" --name "${landing_name}" -r main >/dev/null
   printf 'land-main landed probe\n' > "${landing_path}/land-main-probe.txt"
@@ -934,7 +1096,7 @@ test_land_main() {
         | length
       ' <"$(receipts_path "${repo_root}")"
   )"
-  [ "${land_receipt_count}" = "1" ] || fail "land-main receipt count mismatch: ${land_receipt_count}"
+  [ "${land_receipt_count}" = "$((land_receipt_count_before + 1))" ] || fail "land-main receipt count mismatch: ${land_receipt_count} (before ${land_receipt_count_before})"
 
   forget_and_remove_workspace "${repo_root}" "${landing_name}" "${landing_path}"
   note "land-main: ok"
@@ -961,6 +1123,9 @@ run_inner_tests() {
   test_concurrent_claims "${repo_root}"
   test_launch_rollback "${repo_root}" "${base_rev}"
   test_dispatch_lane "${repo_root}" "${base_rev}"
+  test_autonomous_lane_missing_revision "${repo_root}" "${base_rev}"
+  test_autonomous_lane_verification_failure "${repo_root}" "${base_rev}"
+  test_autonomous_lane_success "${repo_root}" "${base_rev}"
   test_compact_lane_remove "${repo_root}" "${base_rev}"
   test_compact_lane_quarantine "${repo_root}" "${base_rev}"
   test_coordinator_repair "${repo_root}" "${base_rev}"

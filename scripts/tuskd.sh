@@ -23,6 +23,7 @@ Usage:
   tuskd close-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON
   tuskd launch-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --base-rev REV [--slug SLUG]
   tuskd dispatch-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID [--worker WORKER] [--mode MODE] [--note TEXT] [--plan]
+  tuskd autonomous-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID [--base-rev REV] [--slug SLUG] [--worker WORKER] [--note TEXT] [--quarantine] [--plan]
   tuskd handoff-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --revision REV [--note TEXT]
   tuskd finish-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --outcome OUTCOME [--note TEXT]
   tuskd archive-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID [--note TEXT]
@@ -46,6 +47,7 @@ Commands:
   close-issue   Close one issue through the coordinator action surface.
   launch-lane   Create one dedicated issue workspace through the coordinator action surface.
   dispatch-lane Prepare or execute one bounded worker dispatch through the repo-aware codex adapter.
+  autonomous-lane Run the first bounded autonomous lane class through claim, dispatch, verification, and governed closeout.
   handoff-lane  Record a lane handoff with an explicit revision.
   finish-lane   Record a terminal lane outcome without collapsing into issue closure.
   archive-lane  Remove one finished lane from live state once its workspace is gone.
@@ -137,6 +139,21 @@ summary_next_action() {
       else
         printf 'restore or relaunch the lane workspace before dispatching the worker'
       fi
+      ;;
+    "autonomous_lane requires an open issue")
+      printf 'pick an open autonomy:v1-safe task issue before retrying autonomous-lane'
+      ;;
+    "autonomous_lane requires no existing live lane")
+      printf 'finish, inspect, or archive the existing live lane before retrying autonomous-lane'
+      ;;
+    "autonomous_lane only admits autonomy:v1-safe place:tusk task issues")
+      printf 'label the issue autonomy:v1-safe and keep it as a place:tusk task before using autonomous-lane'
+      ;;
+    "autonomous_lane requires explicit verification commands")
+      printf 'add a Verification section with runnable commands before retrying autonomous-lane'
+      ;;
+    "autonomous_lane requires a clean visible revision from the worker lane")
+      printf 'inspect the lane workspace, cut one visible jj commit, and keep the working copy clean before retrying closeout'
       ;;
     "dispatch_lane only admits place:tusk task issues")
       printf 'use the v1 autonomous dispatch class only for task issues labeled place:tusk'
@@ -995,6 +1012,35 @@ run_in_repo_capture() {
   )
 }
 
+run_in_checkout_capture() {
+  local checkout_root="$1"
+  local tracker_root="$2"
+  shift 2
+
+  (
+    cd "${checkout_root}"
+    tusk_export_runtime_roots "${checkout_root}" "${tracker_root}"
+    "$@" 2>&1
+  )
+}
+
+run_shell_command_in_checkout() {
+  local checkout_root="$1"
+  local tracker_root="$2"
+  local name="$3"
+  local command="$4"
+  local output=""
+  local exit_code=0
+
+  if output="$(run_in_checkout_capture "${checkout_root}" "${tracker_root}" sh -lc "${command}")"; then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+
+  render_command_result "${name}" "${exit_code}" "${output}"
+}
+
 run_json_command_in_repo() {
   local repo_root="$1"
   local name="$2"
@@ -1312,8 +1358,25 @@ issue_verification_lines() {
   fi
 }
 
+issue_verification_commands_json() {
+  local description="$1"
+
+  jq -c '
+    map(
+      gsub("^[[:space:]]*[-*][[:space:]]+"; "")
+      | sub("^`"; "")
+      | sub("`$"; "")
+      | select(length > 0)
+    )
+  ' <<<"$(issue_verification_lines "${description}")"
+}
+
 dispatch_policy_class_id() {
   printf 'tusk.low-risk.v1\n'
+}
+
+autonomous_policy_class_id() {
+  printf 'tusk.autonomous.v1\n'
 }
 
 dispatch_worker_launcher() {
@@ -1557,6 +1620,119 @@ run_dispatch_worker() {
       exit_code: $exit_code,
       ok: ($exit_code == 0),
       output: (if ($output | length) > 0 then $output else null end)
+    }'
+}
+
+autonomous_issue_is_admitted() {
+  local issue_json="$1"
+
+  if [ "$(jq -r '.issue_type // ""' <<<"${issue_json}")" != "task" ]; then
+    return 1
+  fi
+
+  issue_has_label "${issue_json}" "place:tusk" &&
+    issue_has_label "${issue_json}" "autonomy:v1-safe"
+}
+
+resolve_autonomous_handoff_revision() {
+  local workspace_path="$1"
+  local tracker_root="$2"
+  local base_commit="$3"
+  local parent_output=""
+  local parent_exit=0
+  local parent_commit=""
+  local diff_output=""
+  local diff_exit=0
+  local working_copy_clean=false
+  local ok_json=false
+
+  if parent_output="$(run_in_checkout_capture "${workspace_path}" "${tracker_root}" jj --repository "${workspace_path}" log -r '@-' --no-graph -T 'commit_id ++ "\n"')"; then
+    parent_exit=0
+  else
+    parent_exit=$?
+  fi
+  parent_commit="$(printf '%s' "${parent_output}" | awk 'NF { print; exit }')"
+
+  if diff_output="$(run_in_checkout_capture "${workspace_path}" "${tracker_root}" jj --repository "${workspace_path}" diff --summary -r @)"; then
+    diff_exit=0
+  else
+    diff_exit=$?
+  fi
+
+  if [ "${diff_exit}" -eq 0 ] && [ -z "${diff_output}" ]; then
+    working_copy_clean=true
+  fi
+  if [ "${parent_exit}" -eq 0 ] && [ -n "${parent_commit}" ] && [ "${parent_commit}" != "${base_commit}" ] && [ "${working_copy_clean}" = "true" ]; then
+    ok_json=true
+  fi
+
+  jq -cn \
+    --arg workspace_path "${workspace_path}" \
+    --arg base_commit "${base_commit}" \
+    --arg parent_commit "${parent_commit}" \
+    --arg parent_output "${parent_output}" \
+    --arg diff_output "${diff_output}" \
+    --argjson parent_exit "${parent_exit}" \
+    --argjson diff_exit "${diff_exit}" \
+    --argjson working_copy_clean "$(json_bool "${working_copy_clean}")" \
+    --argjson ok "$(json_bool "${ok_json}")" \
+    '{
+      ok: $ok,
+      workspace_path: $workspace_path,
+      base_commit: (if ($base_commit | length) > 0 then $base_commit else null end),
+      resolved_revision: (if ($parent_commit | length) > 0 then $parent_commit else null end),
+      working_copy_clean: $working_copy_clean,
+      parent_lookup: {
+        exit_code: $parent_exit,
+        output_text: (if ($parent_output | length) > 0 then $parent_output else null end)
+      },
+      diff_summary: {
+        exit_code: $diff_exit,
+        output_text: (if ($diff_output | length) > 0 then $diff_output else null end)
+      }
+    }'
+}
+
+run_issue_verification_in_checkout() {
+  local checkout_root="$1"
+  local tracker_root="$2"
+  local commands_json="$3"
+  local results="[]"
+  local index=0
+  local command=""
+  local result=""
+  local ok_json=true
+  local failed_command=""
+  local command_count=0
+
+  command_count="$(jq 'length' <<<"${commands_json}")"
+  while IFS= read -r command; do
+    [ -n "${command}" ] || continue
+    index=$((index + 1))
+    result="$(run_shell_command_in_checkout "${checkout_root}" "${tracker_root}" "verification_${index}" "${command}")"
+    result="$(jq -c --arg command "${command}" '. + {command:$command}' <<<"${result}")"
+    results="$(jq -c --argjson result "${result}" '. + [$result]' <<<"${results}")"
+    if ! jq -e '.ok == true' >/dev/null <<<"${result}"; then
+      ok_json=false
+      failed_command="${command}"
+      break
+    fi
+  done < <(jq -r '.[]' <<<"${commands_json}")
+
+  jq -cn \
+    --arg checkout_root "${checkout_root}" \
+    --arg tracker_root "${tracker_root}" \
+    --arg failed_command "${failed_command}" \
+    --argjson ok "$(json_bool "${ok_json}")" \
+    --argjson command_count "${command_count}" \
+    --argjson results "${results}" \
+    '{
+      ok: $ok,
+      checkout_root: $checkout_root,
+      tracker_root: $tracker_root,
+      command_count: $command_count,
+      failed_command: (if ($failed_command | length) > 0 then $failed_command else null end),
+      results: $results
     }'
 }
 
@@ -4876,6 +5052,304 @@ cmd_dispatch_lane() {
   return 1
 }
 
+autonomous_lane_action() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local base_rev="${4:-main}"
+  local slug="${5:-}"
+  local worker="${6:-codex}"
+  local note="${7:-}"
+  local quarantine_requested="${8:-false}"
+  local plan_only="${9:-false}"
+  local issue_result="null"
+  local issue_json="null"
+  local verification_json="[]"
+  local claim_result='{"ok":true,"payload":null}'
+  local launch_result='{"ok":true,"payload":null}'
+  local dispatch_result='{"ok":true,"payload":null}'
+  local lane_json="null"
+  local workspace_path=""
+  local workspace_name=""
+  local lane_base_commit=""
+  local revision_probe='null'
+  local verification_result='null'
+  local resolved_revision=""
+  local reason=""
+  local complete_result='{"ok":true,"payload":null}'
+  local receipt_payload=""
+  local receipt_json=""
+
+  if [ -z "${issue_id}" ]; then
+    jq -cn '{ok:false, error:{message:"autonomous_lane requires issue_id"}}'
+    return 0
+  fi
+
+  ensure_state_files "${repo_root}"
+  issue_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_issue_show" issue show "${issue_id}")"
+  issue_json="$(issue_snapshot_from_result "${issue_result}")"
+  if [ "${issue_json}" = "null" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson tracker "${issue_result}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"autonomous_lane requires an existing issue", details:{tracker:$tracker}}}'
+    return 0
+  fi
+
+  if [ "$(jq -r '.status // ""' <<<"${issue_json}")" != "open" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson issue "${issue_json}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"autonomous_lane requires an open issue", details:{issue:$issue}}}'
+    return 0
+  fi
+
+  lane_json="$(current_lane_for_issue "${repo_root}" "${issue_id}")"
+  if [ "${lane_json}" != "null" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson lane "${lane_json}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"autonomous_lane requires no existing live lane", details:{lane:$lane}}}'
+    return 0
+  fi
+
+  if ! autonomous_issue_is_admitted "${issue_json}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson issue "${issue_json}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"autonomous_lane only admits autonomy:v1-safe place:tusk task issues", details:{issue:$issue}}}'
+    return 0
+  fi
+
+  verification_json="$(issue_verification_commands_json "$(jq -r '.description // ""' <<<"${issue_json}")")"
+  if [ "$(jq 'length' <<<"${verification_json}")" -eq 0 ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson issue "${issue_json}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"autonomous_lane requires explicit verification commands", details:{issue:$issue}}}'
+    return 0
+  fi
+
+  if [ "${plan_only}" = "true" ]; then
+    jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg issue_id "${issue_id}" \
+      --arg base_rev "${base_rev}" \
+      --arg slug "${slug}" \
+      --arg worker "${worker}" \
+      --arg note "${note}" \
+      --arg policy_class "$(autonomous_policy_class_id)" \
+      --argjson verification "${verification_json}" \
+      --argjson quarantine_requested "$(json_bool "${quarantine_requested}")" \
+      --argjson issue "${issue_json}" \
+      '{
+        ok: true,
+        payload: {
+          status: "plan",
+          repo_root: $repo_root,
+          issue_id: $issue_id,
+          base_rev: $base_rev,
+          slug: (if ($slug | length) > 0 then $slug else null end),
+          worker: $worker,
+          policy_class: $policy_class,
+          note: (if ($note | length) > 0 then $note else null end),
+          quarantine_requested: $quarantine_requested,
+          issue: $issue,
+          verification: $verification,
+          commands: [
+            ("tuskd claim-issue --repo " + $repo_root + " --issue-id " + $issue_id),
+            ("tuskd launch-lane --repo " + $repo_root + " --issue-id " + $issue_id + " --base-rev " + $base_rev + (if ($slug | length) > 0 then " --slug " + $slug else "" end)),
+            ("tuskd dispatch-lane --repo " + $repo_root + " --issue-id " + $issue_id + " --mode exec --worker " + $worker),
+            "run issue Verification commands in the lane checkout",
+            "resolve one clean visible jj revision from the lane workspace",
+            ("tuskd complete-lane --repo " + $repo_root + " --issue-id " + $issue_id + " --revision <resolved-rev> --reason \"completed in visible commit <resolved-rev>\"")
+          ]
+        }
+      }'
+    return 0
+  fi
+
+  claim_result="$(run_transition_action "${repo_root}" "${socket_path}" "claim_issue" "$(jq -cn --arg issue_id "${issue_id}" '{issue_id:$issue_id}')")"
+  if ! jq -e '.ok == true' >/dev/null <<<"${claim_result}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson details "${claim_result}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"autonomous_lane failed during claim_issue", details:$details}}'
+    return 0
+  fi
+
+  launch_result="$(run_transition_action "${repo_root}" "${socket_path}" "launch_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg base_rev "${base_rev}" --arg slug "${slug}" '{issue_id:$issue_id, base_rev:$base_rev, slug:(if ($slug | length) > 0 then $slug else null end)}')")"
+  if ! jq -e '.ok == true' >/dev/null <<<"${launch_result}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson details "${launch_result}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"autonomous_lane failed during launch_lane", details:$details}}'
+    return 0
+  fi
+
+  dispatch_result="$(dispatch_lane_action "${repo_root}" "${socket_path}" "${issue_id}" "${worker}" "exec" "${note}" "false")"
+  if ! jq -e '.ok == true' >/dev/null <<<"${dispatch_result}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson details "${dispatch_result}" \
+      --argjson claim "$(jq -c '.payload' <<<"${claim_result}")" \
+      --argjson launch "$(jq -c '.payload' <<<"${launch_result}")" \
+      '{ok:false, issue_id:$issue_id, error:{message:"autonomous_lane failed during dispatch_lane", details:$details}, payload:{issue_id:$issue_id, status:"failed", phase:"dispatch", claim:$claim, launch:$launch}}'
+    return 0
+  fi
+
+  lane_json="$(current_lane_for_issue "${repo_root}" "${issue_id}")"
+  workspace_path="$(jq -r '.workspace_path // ""' <<<"${lane_json}")"
+  workspace_name="$(jq -r '.workspace_name // ""' <<<"${lane_json}")"
+  lane_base_commit="$(jq -r '.base_commit // ""' <<<"${lane_json}")"
+
+  revision_probe="$(resolve_autonomous_handoff_revision "${workspace_path}" "${repo_root}" "${lane_base_commit}")"
+  if ! jq -e '.ok == true' >/dev/null <<<"${revision_probe}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson claim "$(jq -c '.payload' <<<"${claim_result}")" \
+      --argjson launch "$(jq -c '.payload' <<<"${launch_result}")" \
+      --argjson dispatch "$(jq -c '.payload' <<<"${dispatch_result}")" \
+      --argjson revision_probe "${revision_probe}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"autonomous_lane requires a clean visible revision from the worker lane", details:{revision_probe:$revision_probe}}, payload:{issue_id:$issue_id, status:"failed", phase:"revision", claim:$claim, launch:$launch, dispatch:$dispatch, revision_probe:$revision_probe}}'
+    return 0
+  fi
+  resolved_revision="$(jq -r '.resolved_revision // ""' <<<"${revision_probe}")"
+
+  verification_result="$(run_issue_verification_in_checkout "${workspace_path}" "${repo_root}" "${verification_json}")"
+  if ! jq -e '.ok == true' >/dev/null <<<"${verification_result}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson claim "$(jq -c '.payload' <<<"${claim_result}")" \
+      --argjson launch "$(jq -c '.payload' <<<"${launch_result}")" \
+      --argjson dispatch "$(jq -c '.payload' <<<"${dispatch_result}")" \
+      --argjson revision_probe "${revision_probe}" \
+      --argjson verification "${verification_result}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"autonomous_lane verification failed", details:{verification:$verification}}, payload:{issue_id:$issue_id, status:"failed", phase:"verification", claim:$claim, launch:$launch, dispatch:$dispatch, revision_probe:$revision_probe, verification:$verification}}'
+    return 0
+  fi
+
+  reason="completed in visible commit ${resolved_revision}"
+  complete_result="$(complete_lane_action "${repo_root}" "${socket_path}" "${issue_id}" "${resolved_revision}" "${reason}" "completed" "${note}" "${quarantine_requested}" "false")"
+  if ! jq -e '.ok == true' >/dev/null <<<"${complete_result}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson claim "$(jq -c '.payload' <<<"${claim_result}")" \
+      --argjson launch "$(jq -c '.payload' <<<"${launch_result}")" \
+      --argjson dispatch "$(jq -c '.payload' <<<"${dispatch_result}")" \
+      --argjson revision_probe "${revision_probe}" \
+      --argjson verification "${verification_result}" \
+      --argjson complete "${complete_result}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"autonomous_lane failed during complete_lane", details:$complete}, payload:{issue_id:$issue_id, status:"failed", phase:"closeout", claim:$claim, launch:$launch, dispatch:$dispatch, revision_probe:$revision_probe, verification:$verification, complete:$complete}}'
+    return 0
+  fi
+
+  receipt_payload="$(
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg policy_class "$(autonomous_policy_class_id)" \
+      --arg worker "${worker}" \
+      --arg base_rev "${base_rev}" \
+      --arg workspace_name "${workspace_name}" \
+      --arg workspace_path "${workspace_path}" \
+      --arg reason "${reason}" \
+      --arg note "${note}" \
+      --argjson claim "$(jq -c '.payload' <<<"${claim_result}")" \
+      --argjson launch "$(jq -c '.payload' <<<"${launch_result}")" \
+      --argjson dispatch "$(jq -c '.payload' <<<"${dispatch_result}")" \
+      --argjson revision_probe "${revision_probe}" \
+      --argjson verification "${verification_result}" \
+      --argjson complete "$(jq -c '.payload' <<<"${complete_result}")" \
+      '{
+        issue_id: $issue_id,
+        policy_class: $policy_class,
+        worker: $worker,
+        base_rev: $base_rev,
+        workspace: {
+          name: $workspace_name,
+          path: $workspace_path
+        },
+        status: "completed",
+        reason: $reason,
+        note: (if ($note | length) > 0 then $note else null end),
+        claim: $claim,
+        launch: $launch,
+        dispatch: $dispatch,
+        revision_probe: $revision_probe,
+        verification: $verification,
+        complete: $complete
+      }'
+  )"
+  if ! receipt_json="$(append_receipt_capture "${repo_root}" "lane.autonomous" "${receipt_payload}")"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson claim "$(jq -c '.payload' <<<"${claim_result}")" \
+      --argjson launch "$(jq -c '.payload' <<<"${launch_result}")" \
+      --argjson dispatch "$(jq -c '.payload' <<<"${dispatch_result}")" \
+      --argjson revision_probe "${revision_probe}" \
+      --argjson verification "${verification_result}" \
+      --argjson complete "$(jq -c '.payload' <<<"${complete_result}")" \
+      '{ok:false, issue_id:$issue_id, error:{message:"autonomous_lane failed to append lane.autonomous receipt"}, payload:{issue_id:$issue_id, status:"completed", claim:$claim, launch:$launch, dispatch:$dispatch, revision_probe:$revision_probe, verification:$verification, complete:$complete}}'
+    return 1
+  fi
+
+  jq -cn \
+    --arg issue_id "${issue_id}" \
+    --arg policy_class "$(autonomous_policy_class_id)" \
+    --arg worker "${worker}" \
+    --arg base_rev "${base_rev}" \
+    --arg reason "${reason}" \
+    --arg note "${note}" \
+    --argjson claim "$(jq -c '.payload' <<<"${claim_result}")" \
+    --argjson launch "$(jq -c '.payload' <<<"${launch_result}")" \
+    --argjson dispatch "$(jq -c '.payload' <<<"${dispatch_result}")" \
+    --argjson revision_probe "${revision_probe}" \
+    --argjson verification "${verification_result}" \
+    --argjson complete "$(jq -c '.payload' <<<"${complete_result}")" \
+    --argjson receipt "${receipt_json}" \
+    '{
+      ok: true,
+      payload: {
+        issue_id: $issue_id,
+        status: "completed",
+        policy_class: $policy_class,
+        worker: $worker,
+        base_rev: $base_rev,
+        reason: $reason,
+        note: (if ($note | length) > 0 then $note else null end),
+        claim: $claim,
+        launch: $launch,
+        dispatch: $dispatch,
+        revision_probe: $revision_probe,
+        verification: $verification,
+        complete: $complete,
+        receipt: $receipt
+      }
+    }'
+}
+
+cmd_autonomous_lane() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local base_rev="${4:-main}"
+  local slug="${5:-}"
+  local worker="${6:-codex}"
+  local note="${7:-}"
+  local quarantine_requested="${8:-false}"
+  local plan_only="${9:-false}"
+  local autonomous_result=""
+
+  autonomous_result="$(autonomous_lane_action "${repo_root}" "${socket_path}" "${issue_id}" "${base_rev}" "${slug}" "${worker}" "${note}" "${quarantine_requested}" "${plan_only}")"
+  if jq -e '.ok == true' >/dev/null <<<"${autonomous_result}"; then
+    jq -c '.payload' <<<"${autonomous_result}"
+    return 0
+  fi
+
+  jq -c '.' <<<"${autonomous_result}"
+  return 1
+}
+
 cmd_handoff_lane() {
   local repo_root="$1"
   local socket_path="$2"
@@ -5656,6 +6130,10 @@ case "${command}" in
   dispatch-lane)
     [ -n "${issue_id_arg}" ] || fail "dispatch-lane requires --issue-id"
     cmd_dispatch_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${worker_arg:-codex}" "${mode_arg:-handoff}" "${note_arg}" "${plan_arg:-false}"
+    ;;
+  autonomous-lane)
+    [ -n "${issue_id_arg}" ] || fail "autonomous-lane requires --issue-id"
+    cmd_autonomous_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${base_rev_arg:-main}" "${slug_arg}" "${worker_arg:-codex}" "${note_arg}" "${quarantine_arg}" "${plan_arg:-false}"
     ;;
   handoff-lane)
     [ -n "${issue_id_arg}" ] || fail "handoff-lane requires --issue-id"
