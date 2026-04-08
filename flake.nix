@@ -396,6 +396,21 @@
           exec ${codexPkg}/bin/codex "$@"
         '';
       };
+      repoTuskCodex = pkgs.writeShellApplication {
+        name = "tusk-codex";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.git
+          repoBeads
+        ];
+        text = ''
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+          export TUSK_CODEX_BOOTSTRAP_SH=${./scripts/codex-home-bootstrap.sh}
+          export TUSK_REAL_BD=${repoBeads}/bin/bd
+          export TUSK_REAL_CODEX=${codexPkg}/bin/codex
+          exec bash ${./scripts/tusk-codex.sh} "$@"
+        '';
+      };
       tuskFlakeRefPackage = pkgs.writeShellApplication {
         name = "tusk-flake-ref";
         runtimeInputs = [
@@ -455,6 +470,22 @@
           exec bash ${./scripts/tusk-skill-contract-check.sh} "$@"
         '';
       };
+      tuskSkillLoopPackage = pkgs.writeShellApplication {
+        name = "tusk-skill-loop";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.findutils
+          pkgs.git
+          repoTuskCodex
+          tuskSkillContractCheck
+        ];
+        text = ''
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+          export TUSK_CODEX_LAUNCHER=${repoTuskCodex}/bin/tusk-codex
+          export TUSK_SKILL_CONTRACT_CHECK_BIN=${tuskSkillContractCheck}/bin/tusk-skill-contract-check
+          exec bash ${./scripts/tusk-skill-loop.sh} "$@"
+        '';
+      };
       codexNixCheck = pkgs.writeShellApplication {
         name = "codex-nix-check";
         runtimeInputs = [
@@ -495,6 +526,8 @@
           jj --version >/dev/null
           dolt version >/dev/null
           codex --help >/dev/null
+          tusk-codex --launcher-help >/dev/null
+          tusk-skill-loop --watch-help >/dev/null
           tusk-clean --help >/dev/null
           tusk-tracker --help >/dev/null
           tuskd-transition-tests --help >/dev/null
@@ -543,6 +576,7 @@
             glistixPkg
             installTuskOpenaiSkill
             repoBeads
+            repoTuskCodex
             pkgs.deadnix
             pkgs.direnv
             pkgs.dolt
@@ -564,6 +598,7 @@
             pkgs.statix
             repoCodex
             tuskSkillContractCheck
+            tuskSkillLoopPackage
             tuskClean
             tuskFlakeRefPackage
             tuskTrackerPackage
@@ -582,6 +617,8 @@
             echo "tusk dogfood shell"
             echo "  CODEX_HOME=$CODEX_HOME"
             echo "  codex"
+            echo "  tusk-codex --launcher-help"
+            echo "  tusk-skill-loop --watch-help"
             echo "  devenv up"
             echo "  bd status --json"
             echo "  bd ready --json"
@@ -649,7 +686,9 @@
         rust-toolchain = rustToolchain;
         bd = repoBeads;
         beads = repoBeads;
+        tusk-codex = repoTuskCodex;
         tusk-skill-contract-check = tuskSkillContractCheck;
+        tusk-skill-loop = tuskSkillLoopPackage;
         tusk-clean = tuskClean;
         tusk-flake-ref = tuskFlakeRefPackage;
         tusk-tracker = tuskTrackerPackage;
@@ -672,6 +711,10 @@
           type = "app";
           program = "${repoCodex}/bin/codex";
         };
+        tusk-codex = {
+          type = "app";
+          program = "${repoTuskCodex}/bin/tusk-codex";
+        };
         codex-nix-check = {
           type = "app";
           program = "${codexNixCheck}/bin/codex-nix-check";
@@ -679,6 +722,10 @@
         tusk-skill-contract-check = {
           type = "app";
           program = "${tuskSkillContractCheck}/bin/tusk-skill-contract-check";
+        };
+        tusk-skill-loop = {
+          type = "app";
+          program = "${tuskSkillLoopPackage}/bin/tusk-skill-loop";
         };
         install-tusk-openai-skill = {
           type = "app";
