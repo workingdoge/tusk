@@ -750,6 +750,16 @@
             devenvSkillDevClaudeSkillModule
           ];
 
+          codex.skills.tusk.runtimePath = ".agents/skills/tusk";
+          codex.skills.ops.runtimePath = ".agents/skills/ops";
+          codex.skills.nix.runtimePath = ".agents/skills/nix";
+          codex.skills.skill-dev.runtimePath = ".agents/skills/skill-dev";
+
+          claude.skills.tusk.runtimePath = ".agents/skills/tusk";
+          claude.skills.ops.runtimePath = ".agents/skills/ops";
+          claude.skills.nix.runtimePath = ".agents/skills/nix";
+          claude.skills.skill-dev.runtimePath = ".agents/skills/skill-dev";
+
           packages = [
             codexNixCheck
             glistixPkg

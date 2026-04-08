@@ -88,12 +88,31 @@ for skill_name in "${skill_names[@]}"; do
   check_skill_source "$skill_name"
 done
 
-check_cmd="$(cat <<'EOF'
+check_script="$(mktemp "${TMPDIR:-/tmp}/tusk-skill-contract-check.XXXXXX")"
+trap 'rm -f "$check_script"' EXIT
+cat >"$check_script" <<'EOF'
 cd "$DEVENV_ROOT"
+shopt -s nullglob
 test "$CODEX_HOME" = "$DEVENV_ROOT/.codex"
+check_no_store_skill_artifacts() {
+  local skill_root link_path link_target
+  skill_root="$1"
+  for link_path in "$skill_root"/*; do
+    [ -e "$link_path" ] || continue
+    [ -L "$link_path" ] || continue
+    link_target="$(readlink "$link_path")"
+    case "$link_target" in
+      /nix/store/*-skill|/nix/store/*-openai-skill)
+        echo "unexpected projected store skill artifact under $skill_root" >&2
+        exit 1
+        ;;
+    esac
+  done
+}
 for skill_root in .agents/skills/*; do
   [ -d "$skill_root" ] || continue
   skill_name="$(basename "$skill_root")"
+  check_no_store_skill_artifacts "$skill_root"
   test -L ".codex/skills/$skill_name"
   test "$(readlink ".codex/skills/$skill_name")" = "$DEVENV_ROOT/.agents/skills/$skill_name"
   test -f ".codex/skills/$skill_name/SKILL.md"
@@ -102,13 +121,17 @@ for skill_root in .agents/skills/*; do
   test -f ".claude/skills/$skill_name/SKILL.md"
 done
 EOF
-)"
 
 if [ "${DEVENV_ROOT:-}" = "$checkout_root" ] && [ "${CODEX_HOME:-}" = "$checkout_root/.codex" ]; then
-  sh -lc "$check_cmd"
+  bash "$check_script"
 else
   nix develop --no-pure-eval "path:$checkout_root" \
-    -c sh -lc "export TUSK_CHECKOUT_ROOT=\"$TUSK_CHECKOUT_ROOT\"; export TUSK_TRACKER_ROOT=\"$TUSK_TRACKER_ROOT\"; export DEVENV_ROOT=\"$TUSK_CHECKOUT_ROOT\"; export BEADS_WORKSPACE_ROOT=\"$TUSK_TRACKER_ROOT\"; $check_cmd"
+    -c env \
+      TUSK_CHECKOUT_ROOT="$TUSK_CHECKOUT_ROOT" \
+      TUSK_TRACKER_ROOT="$TUSK_TRACKER_ROOT" \
+      DEVENV_ROOT="$TUSK_CHECKOUT_ROOT" \
+      BEADS_WORKSPACE_ROOT="$TUSK_TRACKER_ROOT" \
+      bash "$check_script"
 fi
 
 nix eval --impure --raw --expr '
@@ -133,6 +156,8 @@ nix eval --impure --raw --expr '
     };
     consumerFiles = consumer.config.files or { };
     dogfoodFiles = dogfood.config.files or { };
+    dogfoodCodexSkills = dogfood.config.codex.skills or { };
+    dogfoodClaudeSkills = dogfood.config.claude.skills or { };
     authoredSkills = pkgs.lib.filterAttrs (_: kind: kind == "directory") (builtins.readDir (flake.outPath + "/.agents/skills"));
     skillNames = builtins.attrNames authoredSkills;
   in
@@ -140,8 +165,10 @@ nix eval --impure --raw --expr '
     builtins.length skillNames > 0
     && builtins.all (name: ! builtins.hasAttr ".codex/skills/${name}" consumerFiles) skillNames
     && builtins.all (name: ! builtins.hasAttr ".claude/skills/${name}" consumerFiles) skillNames
-    && builtins.all (name: builtins.hasAttr ".codex/skills/${name}" dogfoodFiles) skillNames
-    && builtins.all (name: builtins.hasAttr ".claude/skills/${name}" dogfoodFiles) skillNames
+    && builtins.all (name: ! builtins.hasAttr ".codex/skills/${name}" dogfoodFiles) skillNames
+    && builtins.all (name: ! builtins.hasAttr ".claude/skills/${name}" dogfoodFiles) skillNames
+    && builtins.all (name: (dogfoodCodexSkills.${name}.runtimePath or null) == ".agents/skills/${name}") skillNames
+    && builtins.all (name: (dogfoodClaudeSkills.${name}.runtimePath or null) == ".agents/skills/${name}") skillNames
   then
     "ok"
   else

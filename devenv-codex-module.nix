@@ -8,6 +8,7 @@
 let
   inherit (lib)
     concatStringsSep
+    filterAttrs
     foldl'
     mapAttrsToList
     mkBefore
@@ -21,6 +22,10 @@ let
   claudeCfg = config.claude;
   hasCodexSkills = codexCfg.skills != { };
   hasClaudeSkills = claudeCfg.skills != { };
+  codexPackagedSkills = filterAttrs (_: skill: skill.runtimePath == null) codexCfg.skills;
+  codexRuntimeLinkedSkills = filterAttrs (_: skill: skill.runtimePath != null) codexCfg.skills;
+  claudePackagedSkills = filterAttrs (_: skill: skill.runtimePath == null) claudeCfg.skills;
+  claudeRuntimeLinkedSkills = filterAttrs (_: skill: skill.runtimePath != null) claudeCfg.skills;
   codexSkillEntries = foldl' (acc: attrs: acc // attrs) { } (
     mapAttrsToList (
       name: skill:
@@ -29,7 +34,7 @@ let
         src = skill.source;
         root = codexCfg.installRoot;
       }
-    ) codexCfg.skills
+    ) codexPackagedSkills
   );
   claudeSkillEntries = foldl' (acc: attrs: acc // attrs) { } (
     mapAttrsToList (
@@ -39,7 +44,7 @@ let
         src = skill.source;
         root = claudeCfg.installRoot;
       }
-    ) claudeCfg.skills
+    ) claudePackagedSkills
   );
   mkLegacyProjectionMigration =
     installRoot: skillAttrs:
@@ -55,8 +60,53 @@ let
         ''
       ) skillAttrs
     );
+  mkRuntimeProjectionTask =
+    installRoot: skillAttrs:
+    concatStringsSep "\n\n" (
+      mapAttrsToList (
+        name: skill:
+        let
+          runtimePath = skill.runtimePath;
+        in
+        ''
+          target_root="${config.devenv.root}/${installRoot}"
+          target="$target_root/${name}"
+          source="${config.devenv.root}/${runtimePath}"
+
+          mkdir -p "$target_root"
+
+          if [ -e "$target" ] || [ -L "$target" ]; then
+            if [ -L "$target" ] && [ "$(readlink "$target")" = "$source" ]; then
+              :
+            else
+              rm -rf -- "$target"
+            fi
+          fi
+
+          if [ ! -L "$target" ]; then
+            ln -s "$source" "$target"
+          fi
+
+          if [ -d "$source" ]; then
+            for link_path in "$source"/*; do
+              [ -e "$link_path" ] || continue
+              [ -L "$link_path" ] || continue
+              link_target="$(readlink "$link_path")"
+              case "$link_target" in
+                /nix/store/*-skill|/nix/store/*-openai-skill)
+                  echo "Removing stale skill projection artifact ${name}/$(basename "$link_path")"
+                  rm -f -- "$link_path"
+                  ;;
+              esac
+            done
+          fi
+        ''
+      ) skillAttrs
+    );
   migrateLegacyCodexProjection = mkLegacyProjectionMigration codexCfg.installRoot codexCfg.skills;
   migrateLegacyClaudeProjection = mkLegacyProjectionMigration claudeCfg.installRoot claudeCfg.skills;
+  codexRuntimeProjection = mkRuntimeProjectionTask codexCfg.installRoot codexRuntimeLinkedSkills;
+  claudeRuntimeProjection = mkRuntimeProjectionTask claudeCfg.installRoot claudeRuntimeLinkedSkills;
 in
 {
   options.codex = {
@@ -79,9 +129,17 @@ in
         types.submodule (
           { ... }:
           {
-            options.source = mkOption {
-              type = types.path;
-              description = "Path to the skill directory that contains SKILL.md.";
+            options = {
+              source = mkOption {
+                type = types.path;
+                description = "Path to the skill directory that contains SKILL.md.";
+              };
+
+              runtimePath = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                description = "Optional devenv-root-relative skill root to symlink at runtime instead of projecting a store copy.";
+              };
             };
           }
         )
@@ -103,9 +161,17 @@ in
         types.submodule (
           { ... }:
           {
-            options.source = mkOption {
-              type = types.path;
-              description = "Path to the skill directory that contains SKILL.md.";
+            options = {
+              source = mkOption {
+                type = types.path;
+                description = "Path to the skill directory that contains SKILL.md.";
+              };
+
+              runtimePath = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                description = "Optional devenv-root-relative skill root to symlink at runtime instead of projecting a store copy.";
+              };
             };
           }
         )
@@ -130,6 +196,12 @@ in
         ];
       };
 
+      tasks."devenv:codex-skills:runtime-links" = mkIf (codexRuntimeLinkedSkills != { }) {
+        description = "Project runtime-linked Codex skills into the live checkout";
+        exec = codexRuntimeProjection;
+        before = [ "devenv:enterShell" ];
+      };
+
       files = codexSkillEntries;
     })
     (mkIf hasClaudeSkills {
@@ -140,6 +212,12 @@ in
           "devenv:files"
           "devenv:enterShell"
         ];
+      };
+
+      tasks."devenv:claude-skills:runtime-links" = mkIf (claudeRuntimeLinkedSkills != { }) {
+        description = "Project runtime-linked Claude skills into the live checkout";
+        exec = claudeRuntimeProjection;
+        before = [ "devenv:enterShell" ];
       };
 
       files = claudeSkillEntries;
