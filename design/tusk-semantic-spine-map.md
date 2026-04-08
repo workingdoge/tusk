@@ -285,16 +285,19 @@ Why third:
 
 ### 4. Ship One Local Trace Executor Slice
 
-The fourth slice should add the smallest concrete executor module for dry
+The fourth slice should first pin one concrete self-hosting witness set over
+this repo, then add the smallest concrete executor module for dry
 planning and local inspection.
 
 Practical target:
 
+- one exported repo-local witness graph for `tusk` itself
 - `flakeModules.tusk-trace` or equivalent
 - one trace/null executor
 - one trivial driver or local receipt expectation path
 
 Why fourth:
+- it gives the executor a stable self-hosting witness root to consume
 - it proves the executor/driver/receipt path without jumping straight to a
   remote backend
 
@@ -307,8 +310,10 @@ This map implies the following order:
 2. `tusk-asy.2.2`
    map the pure base, admissible effects, transports, and state boundary on
    top of that spine
-3. later executor / driver slices
-   likely GitHub driver and Hercules executor, plus a trace/null local path
+3. first self-hosting witness slice
+   export one concrete repo-local witness graph for `tusk` itself
+4. later executor / driver slices
+   likely a trace/null local path first, then remote drivers or executors
 
 That keeps composition, isolation, and paid-HTTP work downstream of an explicit
 semantic center instead of rediscovering it ad hoc.

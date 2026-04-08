@@ -855,8 +855,88 @@
             done
           '';
         };
+      repoSelfHostBase = {
+        "self.codex-nix-check" = {
+          systems = [ system ];
+          kind = "repo.check";
+          what = "self-host codex-nix-check";
+          command = "nix run path:.#codex-nix-check";
+          description = "Composite repo-local smoke check for the flake, runtime contract, and projected skills.";
+          witnesses.contract = {
+            kind = "repo.contract";
+            format = "command.success";
+            path = ".#codex-nix-check";
+            description = "The repo-local Nix and runtime contract passes through codex-nix-check.";
+          };
+        };
+        "self.tuskd-core-build" = {
+          systems = [ system ];
+          kind = "package.build";
+          what = "tuskd-core build";
+          installable = ".#tuskd-core";
+          description = "Build the Rust control-plane core that owns coordinator and receipt seams.";
+          witnesses.binary = {
+            kind = "package.build";
+            format = "nix.installable";
+            path = ".#tuskd-core";
+            description = "The tuskd-core package builds for the canonical repo toolchain.";
+          };
+        };
+        "self.tusk-ui-build" = {
+          systems = [ system ];
+          kind = "package.build";
+          what = "tusk-ui build";
+          installable = ".#tusk-ui";
+          description = "Build the operator-facing TUI over the same repo-local control plane.";
+          witnesses.binary = {
+            kind = "package.build";
+            format = "nix.installable";
+            path = ".#tusk-ui";
+            description = "The tusk-ui package builds for the canonical repo toolchain.";
+          };
+        };
+        "self.tuskd-status" = {
+          systems = [ system ];
+          kind = "repo.state";
+          what = "repo-local control-plane status";
+          command = "nix run path:.#tuskd -- status --repo \"$PWD\"";
+          description = "Read the repo-scoped control-plane status without mutating state.";
+          witnesses.service = {
+            kind = "repo.state.service";
+            format = "json.status";
+            path = ".beads/tuskd/service.json";
+            description = "The repo-local tuskd service can publish a healthy status snapshot.";
+          };
+        };
+      };
+      repoSelfHostTusk =
+        (
+          nixpkgs.lib.evalModules {
+            modules = [
+              (
+                { lib, ... }:
+                {
+                  options.flake = lib.mkOption {
+                    type = lib.types.attrsOf lib.types.anything;
+                    default = { };
+                    description = "Plain module-eval hook for exporting flake attributes.";
+                  };
+                }
+              )
+              tuskFlakeModule
+              {
+                tusk = {
+                  enable = true;
+                  base = repoSelfHostBase;
+                };
+              }
+            ];
+          }
+        ).config.flake.tusk;
+      repoSelfHostWitnessCheck = pkgs.writeText "tusk-self-host-witnesses.json" (builtins.toJSON repoSelfHostTusk);
     in
     {
+      tusk = repoSelfHostTusk;
       lib = {
         crane = craneLib;
         tusk = tuskLib;
@@ -881,6 +961,7 @@
       checks.${system} = {
         radicle-flake-wasm-plugin = radicleFlakeWasmPluginPackage;
         radicle-flake-wasm-resolver-wasi = radicleFlakeWasmResolverWasiCheck;
+        tusk-self-host-witnesses = repoSelfHostWitnessCheck;
       };
       packages.${system} = {
         rust-toolchain = rustToolchain;
