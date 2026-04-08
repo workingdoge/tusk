@@ -118,6 +118,29 @@
           '';
         }
       );
+      resolveFlakeInput =
+        name: explicit: flakeInputs:
+        if explicit != null then
+          explicit
+        else if builtins.hasAttr name flakeInputs then
+          builtins.getAttr name flakeInputs
+        else
+          throw "tusk platform builder requires `${name}` in `flakeInputs` or as an explicit argument";
+      mkPlatformPkgs =
+        {
+          system,
+          flakeInputs ? inputs,
+          nixpkgsInput ? null,
+          rustOverlayInput ? null,
+        }:
+        let
+          nixpkgsSource = resolveFlakeInput "nixpkgs" nixpkgsInput flakeInputs;
+          rustOverlaySource = resolveFlakeInput "rust-overlay" rustOverlayInput flakeInputs;
+        in
+        import nixpkgsSource {
+          inherit system;
+          overlays = [ rustOverlaySource.overlays.default ];
+        };
       tuskClean = pkgs.writeShellApplication {
         name = "tusk-clean";
         runtimeInputs = [
@@ -356,6 +379,64 @@
               '';
             })
           ]);
+        };
+      mkRepoShell =
+        {
+          system,
+          flakeInputs ? inputs,
+          pkgs ? mkPlatformPkgs { inherit system flakeInputs; },
+          devenvInput ? null,
+          modules ? [ ],
+        }:
+        let
+          resolvedDevenv = resolveFlakeInput "devenv" devenvInput flakeInputs;
+        in
+        resolvedDevenv.lib.mkShell {
+          inputs = flakeInputs;
+          inherit pkgs;
+          modules = [ consumerCodexModule ] ++ modules;
+        };
+      mkNixosSystem =
+        {
+          system,
+          flakeInputs ? inputs,
+          nixpkgsInput ? null,
+          modules ? [ ],
+          specialArgs ? { },
+        }:
+        let
+          resolvedNixpkgs = resolveFlakeInput "nixpkgs" nixpkgsInput flakeInputs;
+        in
+        resolvedNixpkgs.lib.nixosSystem {
+          inherit system modules specialArgs;
+        };
+      mkDarwinSystem =
+        {
+          system,
+          flakeInputs ? inputs,
+          darwinInput ? null,
+          modules ? [ ],
+          specialArgs ? { },
+        }:
+        let
+          resolvedDarwin = resolveFlakeInput "nix-darwin" darwinInput flakeInputs;
+        in
+        resolvedDarwin.lib.darwinSystem {
+          inherit system modules specialArgs;
+        };
+      mkHomeConfiguration =
+        {
+          flakeInputs ? inputs,
+          homeManagerInput ? null,
+          pkgs,
+          modules ? [ ],
+          extraSpecialArgs ? { },
+        }:
+        let
+          resolvedHomeManager = resolveFlakeInput "home-manager" homeManagerInput flakeInputs;
+        in
+        resolvedHomeManager.lib.homeManagerConfiguration {
+          inherit pkgs modules extraSpecialArgs;
         };
       tuskTrackerPackage = pkgs.writeShellApplication {
         name = "tusk-tracker";
@@ -719,6 +800,10 @@
       lib = {
         crane = craneLib;
         tusk = tuskLib;
+        mkRepoShell = mkRepoShell;
+        mkNixosSystem = mkNixosSystem;
+        mkDarwinSystem = mkDarwinSystem;
+        mkHomeConfiguration = mkHomeConfiguration;
       };
       devenvModules = {
         codex = devenvCodexModule;
