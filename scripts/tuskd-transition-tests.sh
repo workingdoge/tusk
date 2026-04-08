@@ -646,6 +646,69 @@ test_coordinator_repair() {
   note "coordinator-repair: ok"
 }
 
+test_land_main() {
+  local repo_root="$1"
+  local landing_name="land-main-probe"
+  local landing_path="${repo_root}/.jj-workspaces/${landing_name}"
+  local landed_revision=""
+  local plan_json=""
+  local plan_status=0
+  local land_json=""
+  local land_status=0
+  local status_json=""
+  local status_exit=0
+  local git_main_commit=""
+  local land_receipt_count=""
+
+  note "land-main: begin"
+
+  printf '\nland-main probe\n' >> "${repo_root}/AGENTS.md"
+
+  jj --repository "${repo_root}" workspace add "${landing_path}" --name "${landing_name}" -r main >/dev/null
+  printf 'land-main landed probe\n' > "${landing_path}/land-main-probe.txt"
+  jj --repository "${landing_path}" commit -m "land-main landed probe" >/dev/null
+  landed_revision="$(resolve_revision "${landing_path}" "@-")"
+
+  run_cli_json plan_json plan_status \
+    tuskd land-main --repo "${repo_root}" --revision "${landed_revision}" --plan
+  assert_status "${plan_status}" "0" "land-main plan"
+  assert_json_value "${plan_json}" '.payload.status' "plan" "land-main plan status"
+  assert_json_value "${plan_json}" '.payload.target_commit' "${landed_revision}" "land-main plan target"
+  assert_json_value "${plan_json}" '.payload.needs_repair_after_land' "true" "land-main plan repair flag"
+
+  run_cli_json land_json land_status \
+    tuskd land-main --repo "${repo_root}" --revision "${landed_revision}" --note "transition probe"
+  assert_status "${land_status}" "0" "land-main run"
+  assert_json_value "${land_json}" '.payload.status' "landed_repaired" "land-main result"
+  assert_json_value "${land_json}" '.payload.after.coordinator.status' "in_sync" "land-main synced coordinator"
+  assert_json_value "${land_json}" '.payload.after.coordinator.parent_commits[0]' "${landed_revision}" "land-main updated coordinator parent"
+  assert_json_value "${land_json}" '.payload.after.git_main.commit' "${landed_revision}" "land-main exported git main"
+  assert_json_value "${land_json}" '.payload.repair.status' "repaired" "land-main repair result"
+
+  run_cli_json status_json status_exit \
+    tuskd coordinator-status --repo "${repo_root}"
+  assert_status "${status_exit}" "0" "coordinator-status after land-main"
+  assert_json_value "${status_json}" '.status' "in_sync" "coordinator-status after land-main state"
+  assert_json_value "${status_json}" '.parent_commits[0]' "${landed_revision}" "coordinator-status after land-main parent"
+
+  git_main_commit="$(git -C "${repo_root}" rev-parse --verify refs/heads/main)"
+  [ "${git_main_commit}" = "${landed_revision}" ] || fail "land-main left git main at ${git_main_commit}, expected ${landed_revision}"
+
+  land_receipt_count="$(
+    jq -Rsc \
+      '
+        split("\n")
+        | map(select(length > 0) | fromjson?)
+        | map(select(.kind == "land.main"))
+        | length
+      ' <"$(receipts_path "${repo_root}")"
+  )"
+  [ "${land_receipt_count}" = "1" ] || fail "land-main receipt count mismatch: ${land_receipt_count}"
+
+  forget_and_remove_workspace "${repo_root}" "${landing_name}" "${landing_path}"
+  note "land-main: ok"
+}
+
 run_inner_tests() {
   local repo_root="$1"
   local base_rev="$2"
@@ -668,6 +731,7 @@ run_inner_tests() {
   test_compact_lane_remove "${repo_root}" "${base_rev}"
   test_compact_lane_quarantine "${repo_root}" "${base_rev}"
   test_coordinator_repair "${repo_root}" "${base_rev}"
+  test_land_main "${repo_root}"
 
   note "all transition tests passed"
 }

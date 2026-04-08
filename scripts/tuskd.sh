@@ -17,6 +17,7 @@ Usage:
   tuskd board-status [--repo PATH]
   tuskd receipts-status [--repo PATH]
   tuskd self-host-run [--repo PATH] [--checkout PATH] [--realization ID] [--note TEXT] [--plan]
+  tuskd land-main [--repo PATH] --revision REV [--note TEXT] [--plan]
   tuskd repair-coordinator [--repo PATH] [--target-rev REV] [--note TEXT] [--plan]
   tuskd claim-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID
   tuskd close-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON
@@ -37,6 +38,7 @@ Commands:
   board-status  Print the current board projection.
   receipts-status Print the current receipt projection.
   self-host-run Execute the first self-host build/check loop and record receipts.
+  land-main     Land one revision onto exported main, export Git state, and sync the coordinator checkout.
   repair-coordinator Rebase the default coordinator workspace onto current main and record a receipt.
   claim-issue   Claim one issue through the coordinator action surface.
   close-issue   Close one issue through the coordinator action surface.
@@ -89,7 +91,11 @@ summary_next_action() {
       printf 'retry with the lane issue id: tuskd %s --repo <repo> --issue-id <issue>' "${command_name}"
       ;;
     *"requires --revision"*)
-      printf 'retry with the visible revision: tuskd %s --repo <repo> --issue-id <issue> --revision <rev>' "${command_name}"
+      if [ "${command_name}" = "land-main" ]; then
+        printf 'retry with the visible revision: tuskd %s --repo <repo> --revision <rev>' "${command_name}"
+      else
+        printf 'retry with the visible revision: tuskd %s --repo <repo> --issue-id <issue> --revision <rev>' "${command_name}"
+      fi
       ;;
     *"requires --reason"*)
       printf 'retry with a closure reason: tuskd %s --repo <repo> --issue-id <issue> --reason \"completed in visible commit <rev>\"' "${command_name}"
@@ -1231,6 +1237,34 @@ resolve_revision_commit() {
     '{
       ok: $ok,
       revision: $revision,
+      output: (if ($output | length) > 0 then $output else null end),
+      commit: (if ($commit | length) > 0 then $commit else null end)
+    }'
+}
+
+resolve_git_ref_commit() {
+  local repo_root="$1"
+  local ref_name="$2"
+  local lookup_output=""
+  local lookup_exit=0
+  local commit=""
+
+  if lookup_output="$(run_in_repo_capture "${repo_root}" git rev-parse --verify "${ref_name}")"; then
+    lookup_exit=0
+  else
+    lookup_exit=$?
+  fi
+
+  commit="$(printf '%s' "${lookup_output}" | awk 'NF { print; exit }')"
+
+  jq -cn \
+    --arg ref_name "${ref_name}" \
+    --arg output "${lookup_output}" \
+    --arg commit "${commit}" \
+    --argjson ok "$([ "${lookup_exit}" -eq 0 ] && [ -n "${commit}" ] && echo true || echo false)" \
+    '{
+      ok: $ok,
+      ref: $ref_name,
       output: (if ($output | length) > 0 then $output else null end),
       commit: (if ($commit | length) > 0 then $commit else null end)
     }'
@@ -3649,6 +3683,379 @@ cmd_self_host_run() {
   exec "${TUSK_SELF_HOST_BIN}" "${args[@]}"
 }
 
+cmd_land_main() {
+  local repo_root="$1"
+  local revision="$2"
+  local note="${3:-}"
+  local plan_only="${4:-false}"
+  local target_lookup=""
+  local main_lookup=""
+  local git_main_before=""
+  local git_main_after=""
+  local before_coordinator=""
+  local after_coordinator=""
+  local target_commit=""
+  local main_before_commit=""
+  local git_before_commit=""
+  local move_output=""
+  local move_exit=0
+  local export_output=""
+  local export_exit=0
+  local repair_json='{"ok":true,"payload":null}'
+  local repair_status=0
+  local needs_repair_after_land=false
+  local landed_status=""
+  local receipt_payload=""
+  local receipt_json=""
+
+  target_lookup="$(resolve_revision_commit "${repo_root}" "${revision}")"
+  if ! jq -e '.ok == true' >/dev/null <<<"${target_lookup}"; then
+    jq -cn \
+      --arg revision "${revision}" \
+      --argjson target "${target_lookup}" \
+      '{
+        ok: false,
+        error: {
+          message: "land-main requires --revision to resolve to a commit"
+        },
+        payload: {
+          revision: $revision,
+          target: $target
+        }
+      }'
+    return 1
+  fi
+
+  main_lookup="$(resolve_revision_commit "${repo_root}" "main")"
+  git_main_before="$(resolve_git_ref_commit "${repo_root}" "refs/heads/main")"
+  before_coordinator="$(coordinator_status_payload "${repo_root}")"
+  target_commit="$(jq -r '.commit // ""' <<<"${target_lookup}")"
+  main_before_commit="$(jq -r '.commit // ""' <<<"${main_lookup}")"
+  git_before_commit="$(jq -r '.commit // ""' <<<"${git_main_before}")"
+
+  if jq -e --arg commit "${target_commit}" '.parent_commits | index($commit) != null' >/dev/null <<<"${before_coordinator}"; then
+    needs_repair_after_land=false
+  else
+    needs_repair_after_land=true
+  fi
+
+  if [ "${plan_only}" = "true" ]; then
+    jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg revision "${revision}" \
+      --arg target_commit "${target_commit}" \
+      --arg main_before_commit "${main_before_commit}" \
+      --arg note "${note}" \
+      --argjson before_coordinator "${before_coordinator}" \
+      --argjson git_main_before "${git_main_before}" \
+      --argjson needs_repair_after_land "$(json_bool "${needs_repair_after_land}")" \
+      '{
+        ok: true,
+        payload: {
+          repo_root: $repo_root,
+          revision: $revision,
+          target_commit: $target_commit,
+          main_before_commit: (if ($main_before_commit | length) > 0 then $main_before_commit else null end),
+          note: (if ($note | length) > 0 then $note else null end),
+          status: "plan",
+          before: {
+            coordinator: $before_coordinator,
+            git_main: $git_main_before
+          },
+          needs_repair_after_land: $needs_repair_after_land,
+          commands: [
+            ("jj --repository " + $repo_root + " bookmark move main --to " + $revision),
+            ("jj --repository " + $repo_root + " git export")
+          ] + (if $needs_repair_after_land then [
+            ("tuskd repair-coordinator --repo " + $repo_root + " --target-rev main")
+          ] else [] end)
+        }
+      }'
+    return 0
+  fi
+
+  if [ "${target_commit}" = "${main_before_commit}" ] \
+    && [ "${target_commit}" = "${git_before_commit}" ] \
+    && jq -e '.needs_repair != true' >/dev/null <<<"${before_coordinator}"; then
+    jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg revision "${revision}" \
+      --arg target_commit "${target_commit}" \
+      --arg note "${note}" \
+      --argjson before_coordinator "${before_coordinator}" \
+      --argjson git_main_before "${git_main_before}" \
+      '{
+        ok: true,
+        payload: {
+          repo_root: $repo_root,
+          revision: $revision,
+          target_commit: $target_commit,
+          note: (if ($note | length) > 0 then $note else null end),
+          status: "noop",
+          before: {
+            coordinator: $before_coordinator,
+            git_main: $git_main_before
+          },
+          after: {
+            coordinator: $before_coordinator,
+            git_main: $git_main_before
+          },
+          repair: null
+        }
+      }'
+    return 0
+  fi
+
+  if move_output="$(run_in_repo_capture "${repo_root}" jj --repository "${repo_root}" bookmark move main --to "${revision}")"; then
+    move_exit=0
+  else
+    move_exit=$?
+  fi
+  if [ "${move_exit}" -ne 0 ]; then
+    jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg revision "${revision}" \
+      --arg output "${move_output}" \
+      --argjson before_coordinator "${before_coordinator}" \
+      --argjson git_main_before "${git_main_before}" \
+      '{
+        ok: false,
+        error: {
+          message: "land-main failed to move the main bookmark"
+        },
+        payload: {
+          repo_root: $repo_root,
+          revision: $revision,
+          before: {
+            coordinator: $before_coordinator,
+            git_main: $git_main_before
+          },
+          bookmark_move: {
+            exit_code: 1,
+            output: (if ($output | length) > 0 then $output else null end)
+          }
+        }
+      }'
+    return 1
+  fi
+
+  if export_output="$(run_in_repo_capture "${repo_root}" jj --repository "${repo_root}" git export)"; then
+    export_exit=0
+  else
+    export_exit=$?
+  fi
+  git_main_after="$(resolve_git_ref_commit "${repo_root}" "refs/heads/main")"
+
+  if [ "${export_exit}" -ne 0 ] || ! jq -e --arg commit "${target_commit}" '.commit == $commit' >/dev/null <<<"${git_main_after}"; then
+    after_coordinator="$(coordinator_status_payload "${repo_root}")"
+    landed_status="export_failed"
+    receipt_payload="$(jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg revision "${revision}" \
+      --arg target_commit "${target_commit}" \
+      --arg note "${note}" \
+      --arg status "${landed_status}" \
+      --arg move_output "${move_output}" \
+      --arg export_output "${export_output}" \
+      --argjson export_exit "${export_exit}" \
+      --argjson before_coordinator "${before_coordinator}" \
+      --argjson after_coordinator "${after_coordinator}" \
+      --argjson git_main_before "${git_main_before}" \
+      --argjson git_main_after "${git_main_after}" \
+      '{
+        repo_root: $repo_root,
+        revision: $revision,
+        target_commit: $target_commit,
+        note: (if ($note | length) > 0 then $note else null end),
+        status: $status,
+        bookmark_move: {
+          exit_code: 0,
+          output: (if ($move_output | length) > 0 then $move_output else null end)
+        },
+        git_export: {
+          exit_code: $export_exit,
+          output: (if ($export_output | length) > 0 then $export_output else null end)
+        },
+        before: {
+          coordinator: $before_coordinator,
+          git_main: $git_main_before
+        },
+        after: {
+          coordinator: $after_coordinator,
+          git_main: $git_main_after
+        },
+        repair: null
+      }')"
+    receipt_json="$(append_receipt_capture "${repo_root}" "land.main" "${receipt_payload}")" || true
+    jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg revision "${revision}" \
+      --arg status "${landed_status}" \
+      --argjson before_coordinator "${before_coordinator}" \
+      --argjson after_coordinator "${after_coordinator}" \
+      --argjson git_main_before "${git_main_before}" \
+      --argjson git_main_after "${git_main_after}" \
+      --arg move_output "${move_output}" \
+      --arg export_output "${export_output}" \
+      --argjson export_exit "${export_exit}" \
+      --argjson receipt "$(if [ -n "${receipt_json}" ]; then printf '%s' "${receipt_json}"; else printf 'null'; fi)" \
+      '{
+        ok: false,
+        error: {
+          message: "land-main failed to export the colocated Git main ref"
+        },
+        payload: {
+          repo_root: $repo_root,
+          revision: $revision,
+          status: $status,
+          bookmark_move: {
+            exit_code: 0,
+            output: (if ($move_output | length) > 0 then $move_output else null end)
+          },
+          git_export: {
+            exit_code: $export_exit,
+            output: (if ($export_output | length) > 0 then $export_output else null end)
+          },
+          before: {
+            coordinator: $before_coordinator,
+            git_main: $git_main_before
+          },
+          after: {
+            coordinator: $after_coordinator,
+            git_main: $git_main_after
+          },
+          receipt: $receipt
+        }
+      }'
+    return 1
+  fi
+
+  repair_json='{"ok":true,"payload":null}'
+  repair_status=0
+  if [ "${needs_repair_after_land}" = true ]; then
+    if repair_json="$(cmd_repair_coordinator "${repo_root}" "main" "${note}" "false")"; then
+      repair_status=0
+    else
+      repair_status=$?
+    fi
+  fi
+
+  after_coordinator="$(coordinator_status_payload "${repo_root}")"
+  if [ "${repair_status}" -ne 0 ]; then
+    landed_status="landed_repair_failed"
+  elif [ "${needs_repair_after_land}" = true ]; then
+    landed_status="landed_repaired"
+  else
+    landed_status="landed"
+  fi
+
+  receipt_payload="$(jq -cn \
+    --arg repo_root "${repo_root}" \
+    --arg revision "${revision}" \
+    --arg target_commit "${target_commit}" \
+    --arg note "${note}" \
+    --arg status "${landed_status}" \
+    --arg move_output "${move_output}" \
+    --arg export_output "${export_output}" \
+    --argjson before_coordinator "${before_coordinator}" \
+    --argjson after_coordinator "${after_coordinator}" \
+    --argjson git_main_before "${git_main_before}" \
+    --argjson git_main_after "${git_main_after}" \
+    --argjson repair "${repair_json}" \
+    '{
+      repo_root: $repo_root,
+      revision: $revision,
+      target_commit: $target_commit,
+      note: (if ($note | length) > 0 then $note else null end),
+      status: $status,
+      bookmark_move: {
+        exit_code: 0,
+        output: (if ($move_output | length) > 0 then $move_output else null end)
+      },
+      git_export: {
+        exit_code: 0,
+        output: (if ($export_output | length) > 0 then $export_output else null end)
+      },
+      before: {
+        coordinator: $before_coordinator,
+        git_main: $git_main_before
+      },
+      after: {
+        coordinator: $after_coordinator,
+        git_main: $git_main_after
+      },
+      repair: ($repair.payload // null)
+    }')"
+
+  if ! receipt_json="$(append_receipt_capture "${repo_root}" "land.main" "${receipt_payload}")"; then
+    jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg revision "${revision}" \
+      --arg status "${landed_status}" \
+      --argjson before_coordinator "${before_coordinator}" \
+      --argjson after_coordinator "${after_coordinator}" \
+      --argjson git_main_before "${git_main_before}" \
+      --argjson git_main_after "${git_main_after}" \
+      --argjson repair "${repair_json}" \
+      '{
+        ok: false,
+        error: {
+          message: "land-main failed to append land.main receipt"
+        },
+        payload: {
+          repo_root: $repo_root,
+          revision: $revision,
+          status: $status,
+          before: {
+            coordinator: $before_coordinator,
+            git_main: $git_main_before
+          },
+          after: {
+            coordinator: $after_coordinator,
+            git_main: $git_main_after
+          },
+          repair: ($repair.payload // null)
+        }
+      }'
+    return 1
+  fi
+
+  jq -cn \
+    --arg repo_root "${repo_root}" \
+    --arg revision "${revision}" \
+    --arg target_commit "${target_commit}" \
+    --arg note "${note}" \
+    --arg status "${landed_status}" \
+    --argjson before_coordinator "${before_coordinator}" \
+    --argjson after_coordinator "${after_coordinator}" \
+    --argjson git_main_before "${git_main_before}" \
+    --argjson git_main_after "${git_main_after}" \
+    --argjson repair "${repair_json}" \
+    --argjson receipt "${receipt_json}" \
+    '{
+      ok: ($status == "landed" or $status == "landed_repaired"),
+      payload: {
+        repo_root: $repo_root,
+        revision: $revision,
+        target_commit: $target_commit,
+        note: (if ($note | length) > 0 then $note else null end),
+        status: $status,
+        before: {
+          coordinator: $before_coordinator,
+          git_main: $git_main_before
+        },
+        after: {
+          coordinator: $after_coordinator,
+          git_main: $git_main_after
+        },
+        repair: ($repair.payload // null),
+        receipt: $receipt
+      }
+    }'
+
+  [ "${landed_status}" = "landed" ] || [ "${landed_status}" = "landed_repaired" ]
+}
+
 cmd_repair_coordinator() {
   local repo_root="$1"
   local target_rev="${2:-main}"
@@ -4232,6 +4639,10 @@ case "${command}" in
     ;;
   self-host-run)
     cmd_self_host_run "${repo_root}" "${checkout_arg:-}" "${realization_arg:-self.trace-core-health.local}" "${note_arg}" "${plan_arg:-false}"
+    ;;
+  land-main)
+    [ -n "${revision_arg}" ] || fail "land-main requires --revision"
+    cmd_land_main "${repo_root}" "${revision_arg}" "${note_arg}" "${plan_arg:-false}"
     ;;
   repair-coordinator)
     cmd_repair_coordinator "${repo_root}" "${target_rev_arg:-main}" "${note_arg}" "${plan_arg:-false}"

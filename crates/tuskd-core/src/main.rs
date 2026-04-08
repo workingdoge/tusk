@@ -1497,6 +1497,7 @@ fn humanize_kind(kind: &str) -> String {
         "lane.handoff" => "handed off lane".to_owned(),
         "lane.finish" => "finished lane".to_owned(),
         "lane.archive" => "archived lane".to_owned(),
+        "land.main" => "landed main".to_owned(),
         "coordinator.sync" => "rebased coordinator".to_owned(),
         "self_host.run" => "ran self-host automation".to_owned(),
         "effect.trace" => "recorded effect trace".to_owned(),
