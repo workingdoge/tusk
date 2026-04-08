@@ -76,14 +76,14 @@ check_skill_source() {
   grep -Eq '^  default_prompt: .+\$'"${skill_name}"'.*$' "$openai_yaml"
 }
 
-for skill_name in tusk ops nix; do
+for skill_name in tusk ops nix skill-dev; do
   check_skill_source "$skill_name"
 done
 
 check_cmd="$(cat <<'EOF'
 cd "$DEVENV_ROOT"
 test "$CODEX_HOME" = "$DEVENV_ROOT/.codex"
-for skill_name in tusk ops nix; do
+for skill_name in tusk ops nix skill-dev; do
   test -L ".codex/skills/$skill_name"
   test "$(readlink ".codex/skills/$skill_name")" = "$DEVENV_ROOT/.agents/skills/$skill_name"
   test -f ".codex/skills/$skill_name/SKILL.md"
@@ -125,9 +125,11 @@ nix eval --impure --raw --expr '
     (! builtins.hasAttr ".codex/skills/tusk" consumerFiles)
     && (! builtins.hasAttr ".codex/skills/ops" consumerFiles)
     && (! builtins.hasAttr ".codex/skills/nix" consumerFiles)
+    && (! builtins.hasAttr ".codex/skills/skill-dev" consumerFiles)
     && builtins.hasAttr ".codex/skills/tusk" dogfoodFiles
     && builtins.hasAttr ".codex/skills/ops" dogfoodFiles
     && builtins.hasAttr ".codex/skills/nix" dogfoodFiles
+    && builtins.hasAttr ".codex/skills/skill-dev" dogfoodFiles
   then
     "ok"
   else

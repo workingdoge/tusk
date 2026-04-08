@@ -71,6 +71,7 @@ nix run .#tusk-ui -- --help
 - `devenv-scratch-module.nix` owns the shared per-repo scratch relocation policy for common build tools in consumer shells.
 - `devenvModules.consumer` is the reusable downstream shell surface: repo-local `CODEX_HOME`, explicit skill opt-in, scratch relocation, and the conservative `tusk-clean` helper.
 - `devenvModules.dogfood` is the repo's own downstream composition of `codex` plus explicit `tusk`/`ops`/`nix` skill packs.
+- `devenvModules.dogfood` is the repo's own downstream composition of `codex` plus explicit `tusk`/`ops`/`nix`/`skill-dev` skill packs.
 - `scripts/codex-home-bootstrap.sh` copies auth/config/rules from `~/.codex` only as a first-use migration into the repo-local `.codex` home.
 - `scripts/tusk-codex.sh` launches Codex against an explicit checkout while preserving canonical tracker-root wiring.
 - `scripts/tusk-skill-loop.sh` watches `.agents/skills/**`, reruns `tusk-skill-contract-check`, and relaunches `tusk-codex` only after validation passes.
@@ -82,6 +83,7 @@ nix run .#tusk-ui -- --help
 - `.agents/skills/tusk/` contains the repo-local source of truth for the `tusk` workflow skill.
 - `.agents/skills/ops/` contains the repo-local source of truth for the shared `ops` skill.
 - `.agents/skills/nix/` contains the repo-local source of truth for the shared `nix` skill.
+- `.agents/skills/skill-dev/` contains the repo-local source of truth for the shared skill-authoring meta-skill.
 - `scripts/tusk-tracker.sh` contains the flake-owned tracker boundary; the current implementation is a `bd` adapter so `tuskd` no longer shells out to raw `bd` commands directly.
 - `scripts/tuskd.sh` contains the local control-plane service skeleton, Unix-socket protocol handler, and repo-scoped Dolt backend registry/coordination logic.
 - `scripts/tuskd-transition-tests.sh` clones an isolated colocated temp repo, replays the current lane diff onto it, and runs automated lifecycle, concurrency, and rollback checks against that repo's own flake-owned `bd`/`tuskd` surface.

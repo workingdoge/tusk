@@ -49,6 +49,7 @@
         tusk = ./.agents/skills/tusk;
         ops = ./.agents/skills/ops;
         nix = ./.agents/skills/nix;
+        skill-dev = ./.agents/skills/skill-dev;
       };
       mkSkillModule = name: {
         codex.skills.${name}.source = codexSkillSources.${name};
@@ -56,6 +57,7 @@
       devenvTuskSkillModule = mkSkillModule "tusk";
       devenvOpsSkillModule = mkSkillModule "ops";
       devenvNixSkillModule = mkSkillModule "nix";
+      devenvSkillDevSkillModule = mkSkillModule "skill-dev";
       tuskSkillBundle = tuskLib.mkCodexSkillPackage {
         inherit pkgs;
         name = "tusk";
@@ -569,6 +571,7 @@
             devenvTuskSkillModule
             devenvOpsSkillModule
             devenvNixSkillModule
+            devenvSkillDevSkillModule
           ];
 
           packages = [
@@ -679,6 +682,7 @@
         tusk-skill = devenvTuskSkillModule;
         ops-skill = devenvOpsSkillModule;
         nix-skill = devenvNixSkillModule;
+        skill-dev-skill = devenvSkillDevSkillModule;
       };
       flakeModules.tusk = tuskFlakeModule;
       flakeModules.default = tuskFlakeModule;
