@@ -172,6 +172,18 @@ now_iso8601() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
+port_is_valid() {
+  local port="${1:-}"
+
+  case "${port}" in
+    ''|*[!0-9]*)
+      return 1
+      ;;
+  esac
+
+  [ "${port}" -ge 1 ] && [ "${port}" -le 65535 ]
+}
+
 resolve_repo_root() {
   local repo_arg="${1:-}"
   tusk_resolve_tracker_root "${repo_arg}"
@@ -351,16 +363,70 @@ port_matches_pid() {
   [ -n "${owner}" ] && [ "${owner}" = "${pid}" ]
 }
 
+parse_dolt_sql_server_port() {
+  local command="${1:-}"
+  local port=""
+
+  case "${command}" in
+    *dolt*sql-server*)
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  port="$(
+    awk '
+      {
+        for (i = 1; i <= NF; i++) {
+          if ($i == "-P" && i < NF) {
+            print $(i + 1)
+            exit
+          }
+          if ($i ~ /^-P[0-9]+$/) {
+            print substr($i, 3)
+            exit
+          }
+        }
+      }
+    ' <<<"${command}"
+  )"
+
+  if port_is_valid "${port}"; then
+    printf '%s\n' "${port}"
+  fi
+}
+
+live_server_port_for_pid() {
+  local pid="$1"
+  local command=""
+  local port=""
+
+  if ! is_live_pid "${pid}"; then
+    return 0
+  fi
+
+  command="$(ps -p "${pid}" -o command= 2>/dev/null || true)"
+  port="$(parse_dolt_sql_server_port "${command}")"
+  if [ -n "${port}" ] && port_matches_pid "${port}" "${pid}"; then
+    printf '%s\n' "${port}"
+  fi
+}
+
 recorded_backend_port() {
   local repo_root="$1"
   local record_json
+  local port=""
 
   record_json="$(host_service_record "${repo_root}")"
   if [ "${record_json}" = "null" ]; then
     return 0
   fi
 
-  jq -r '.backend_endpoint.port // empty' <<<"${record_json}" 2>/dev/null || true
+  port="$(jq -r '.backend_endpoint.port // empty' <<<"${record_json}" 2>/dev/null || true)"
+  if port_is_valid "${port}"; then
+    printf '%s\n' "${port}"
+  fi
 }
 
 recorded_backend_pid() {
@@ -378,10 +444,14 @@ recorded_backend_pid() {
 local_backend_port() {
   local repo_root="$1"
   local path
+  local port=""
 
   path="$(local_backend_port_path "${repo_root}")"
   if [ -f "${path}" ]; then
-    tr -d '[:space:]' <"${path}"
+    port="$(tr -d '[:space:]' <"${path}")"
+    if port_is_valid "${port}"; then
+      printf '%s\n' "${port}"
+    fi
   fi
 }
 
@@ -400,8 +470,17 @@ reusable_recorded_port() {
   local port=""
   local pid=""
 
-  port="$(recorded_backend_port "${repo_root}")"
   pid="$(recorded_backend_pid "${repo_root}")"
+
+  if [ -n "${pid}" ]; then
+    port="$(live_server_port_for_pid "${pid}")"
+  fi
+  if [ -n "${port}" ]; then
+    printf '%s\n' "${port}"
+    return
+  fi
+
+  port="$(recorded_backend_port "${repo_root}")"
 
   if [ -n "${port}" ] && [ -n "${pid}" ] && is_live_pid "${pid}" && port_matches_pid "${port}" "${pid}"; then
     printf '%s\n' "${port}"
@@ -418,8 +497,16 @@ reusable_local_backend_port() {
   local port=""
   local pid=""
 
-  port="$(local_backend_port "${repo_root}")"
   pid="$(local_backend_pid "${repo_root}")"
+  if [ -n "${pid}" ]; then
+    port="$(live_server_port_for_pid "${pid}")"
+  fi
+  if [ -n "${port}" ]; then
+    printf '%s\n' "${port}"
+    return
+  fi
+
+  port="$(local_backend_port "${repo_root}")"
 
   if [ -n "${port}" ] && [ -n "${pid}" ] && is_live_pid "${pid}" && port_matches_pid "${port}" "${pid}"; then
     printf '%s\n' "${port}"
@@ -558,7 +645,7 @@ configured_backend_port() {
   fi
 
   port="$(jq -r '.output.port // empty' <<<"${show_json}" 2>/dev/null || true)"
-  if [ -n "${port}" ]; then
+  if port_is_valid "${port}"; then
     printf '%s\n' "${port}"
   fi
 }
@@ -567,19 +654,19 @@ effective_backend_port() {
   local repo_root="$1"
   local port=""
 
+  port="$(reusable_local_backend_port "${repo_root}")"
+  if [ -n "${port}" ]; then
+    printf '%s\n' "${port}"
+    return
+  fi
+
+  port="$(reusable_recorded_port "${repo_root}")"
+  if [ -n "${port}" ]; then
+    printf '%s\n' "${port}"
+    return
+  fi
+
   port="$(configured_backend_port "${repo_root}")"
-  if [ -n "${port}" ]; then
-    printf '%s\n' "${port}"
-    return
-  fi
-
-  port="$(recorded_backend_port "${repo_root}")"
-  if [ -n "${port}" ]; then
-    printf '%s\n' "${port}"
-    return
-  fi
-
-  port="$(local_backend_port "${repo_root}")"
   if [ -n "${port}" ]; then
     printf '%s\n' "${port}"
     return

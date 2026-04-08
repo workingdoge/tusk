@@ -119,6 +119,10 @@ fn current_pid() -> i32 {
     std::process::id() as i32
 }
 
+fn normalize_backend_port(port: Option<u16>) -> Option<u16> {
+    port.filter(|port| *port > 0)
+}
+
 fn is_live_pid(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
@@ -318,7 +322,9 @@ impl Drop for DirLock {
 }
 
 fn local_backend_port(repo_root: &Path) -> Option<u16> {
-    read_trimmed(&local_backend_port_path(repo_root)).and_then(|value| value.parse().ok())
+    normalize_backend_port(
+        read_trimmed(&local_backend_port_path(repo_root)).and_then(|value| value.parse().ok()),
+    )
 }
 
 fn local_backend_pid(repo_root: &Path) -> Option<i32> {
@@ -330,11 +336,13 @@ fn host_service_record(repo_root: &Path) -> Value {
 }
 
 fn recorded_backend_port(repo_root: &Path) -> Option<u16> {
-    host_service_record(repo_root)
-        .get("backend_endpoint")
-        .and_then(|value| value.get("port"))
-        .and_then(Value::as_u64)
-        .and_then(|value| value.try_into().ok())
+    normalize_backend_port(
+        host_service_record(repo_root)
+            .get("backend_endpoint")
+            .and_then(|value| value.get("port"))
+            .and_then(Value::as_u64)
+            .and_then(|value| value.try_into().ok()),
+    )
 }
 
 fn recorded_backend_pid(repo_root: &Path) -> Option<i32> {
@@ -365,9 +373,57 @@ fn port_matches_pid(port: u16, pid: i32) -> bool {
     port_owner_pid(port).is_some_and(|owner| owner == pid)
 }
 
+fn parse_dolt_sql_server_port(command: &str) -> Option<u16> {
+    if !(command.contains("dolt") && command.contains("sql-server")) {
+        return None;
+    }
+
+    let mut tokens = command.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token == "-P" {
+            return normalize_backend_port(tokens.next().and_then(|value| value.parse().ok()));
+        }
+
+        if let Some(value) = token.strip_prefix("-P") {
+            return normalize_backend_port(value.parse().ok());
+        }
+    }
+
+    None
+}
+
+fn live_server_port_for_pid(pid: i32) -> Option<u16> {
+    if !is_live_pid(pid) {
+        return None;
+    }
+
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let command = String::from_utf8_lossy(&output.stdout);
+    let port = parse_dolt_sql_server_port(command.trim())?;
+    if port_matches_pid(port, pid) {
+        Some(port)
+    } else {
+        None
+    }
+}
+
 fn reusable_recorded_port(repo_root: &Path) -> Option<u16> {
-    let port = recorded_backend_port(repo_root)?;
     let pid = recorded_backend_pid(repo_root);
+
+    if let Some(pid) = pid
+        && let Some(port) = live_server_port_for_pid(pid)
+    {
+        return Some(port);
+    }
+
+    let port = recorded_backend_port(repo_root)?;
 
     if let Some(pid) = pid
         && is_live_pid(pid)
@@ -384,8 +440,13 @@ fn reusable_recorded_port(repo_root: &Path) -> Option<u16> {
 }
 
 fn reusable_local_backend_port(repo_root: &Path) -> Option<u16> {
-    let port = local_backend_port(repo_root)?;
     let pid = local_backend_pid(repo_root)?;
+
+    if let Some(port) = live_server_port_for_pid(pid) {
+        return Some(port);
+    }
+
+    let port = local_backend_port(repo_root)?;
 
     if is_live_pid(pid) && port_matches_pid(port, pid) {
         Some(port)
@@ -596,16 +657,19 @@ fn scrub_deprecated_backend_config(repo_root: &Path) -> Result<(), String> {
 }
 
 fn configured_backend_port(repo_root: &Path) -> Option<u16> {
-    run_tracker_json_command_in_repo(repo_root, "tracker_backend_show", ["backend", "show"])
-        .ok()
-        .and_then(|value| value.get("output").cloned())
-        .and_then(|value| value.get("port").cloned())
-        .and_then(|value| value.as_u64())
-        .and_then(|value| value.try_into().ok())
+    normalize_backend_port(
+        run_tracker_json_command_in_repo(repo_root, "tracker_backend_show", ["backend", "show"])
+            .ok()
+            .and_then(|value| value.get("output").cloned())
+            .and_then(|value| value.get("port").cloned())
+            .and_then(|value| value.as_u64())
+            .and_then(|value| value.try_into().ok()),
+    )
 }
 
 fn effective_backend_port(repo_root: &Path) -> Option<u16> {
     reusable_local_backend_port(repo_root)
+        .or_else(|| reusable_recorded_port(repo_root))
         .or_else(|| {
             let port = configured_backend_port(repo_root)?;
             if port_owner_pid(port).is_some() {
@@ -5002,5 +5066,33 @@ fn main() -> ExitCode {
         Some("query") => run_query(&args[1..]),
         Some("respond") => run_respond(&args[1..]),
         Some(command) => fail(&format!("unknown command: {command}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_dolt_sql_server_port;
+
+    #[test]
+    fn parses_split_dolt_server_port_flag() {
+        assert_eq!(
+            parse_dolt_sql_server_port(
+                "/nix/store/example/bin/dolt sql-server -H 127.0.0.1 -P 32642"
+            ),
+            Some(32642)
+        );
+    }
+
+    #[test]
+    fn rejects_zero_dolt_server_port() {
+        assert_eq!(
+            parse_dolt_sql_server_port("/nix/store/example/bin/dolt sql-server -P 0"),
+            None
+        );
+    }
+
+    #[test]
+    fn ignores_non_dolt_commands() {
+        assert_eq!(parse_dolt_sql_server_port("python -P 32642"), None);
     }
 }
