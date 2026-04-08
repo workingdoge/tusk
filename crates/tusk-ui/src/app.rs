@@ -1119,6 +1119,8 @@ impl OverlayState {
             "  p              ping the service".to_owned(),
             "  q              quit tusk-ui".to_owned(),
             "  Esc            dismiss this overlay".to_owned(),
+            "  Issue work     claim an issue, then launch a lane from main instead of editing default".to_owned(),
+            "  tuskd launch-lane --repo <tracker-root> --issue-id <id> --base-rev main".to_owned(),
             "".to_owned(),
         ];
 

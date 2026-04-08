@@ -93,6 +93,10 @@ Keys:
   f            finish the selected active lane as completed
   Enter / y    confirm an overlay action
   n / Esc      dismiss an overlay, or clear the active filter
+
+Lane Discipline:
+  From the canonical root/default checkout, claim an issue and launch a lane from main.
+  tuskd launch-lane --repo PATH --issue-id <id> --base-rev main
 "
     );
 }

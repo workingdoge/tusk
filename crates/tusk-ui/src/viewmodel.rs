@@ -101,6 +101,10 @@ pub(crate) struct WorkspaceItem {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ContextAnomaly {
     RootMismatch { checkout: String, tracker: String },
+    AmbientRootCheckout {
+        tracker: String,
+        lane_workspaces: Vec<String>,
+    },
     BackendUnhealthy { message: String },
     StaleWorkspaces { count: u64 },
 }
@@ -616,6 +620,20 @@ fn context_summary(context: &OperatorContext) -> ContextSummary {
             checkout: context.checkout_root.clone(),
             tracker: context.tracker_root.clone(),
         });
+    } else {
+        let lane_workspaces = context
+            .workspaces
+            .iter()
+            .filter(|workspace| workspace.name != "default")
+            .map(|workspace| workspace.name.clone())
+            .take(3)
+            .collect::<Vec<_>>();
+        if !lane_workspaces.is_empty() {
+            anomalies.push(ContextAnomaly::AmbientRootCheckout {
+                tracker: context.tracker_root.clone(),
+                lane_workspaces,
+            });
+        }
     }
 
     ContextSummary {
@@ -859,6 +877,54 @@ mod tests {
             Some(1)
         );
         assert_eq!(model.context.repo_name, "repo");
+    }
+
+    #[test]
+    fn home_viewmodel_flags_ambient_root_checkout_when_lane_workspaces_exist() {
+        let mut snapshot = golden_operator_snapshot();
+        snapshot.context.workspaces.push(crate::types::WorkspaceEntry {
+            name: "tusk-asy.11.1-ui-recovery".to_owned(),
+            change_id: Some("lane123".to_owned()),
+            commit_id: Some("lane456".to_owned()),
+            empty: false,
+            description: Some("tusk-asy.11.1: wip".to_owned()),
+            raw: "tusk-asy.11.1-ui-recovery: lane123 lane456 tusk-asy.11.1: wip".to_owned(),
+        });
+
+        let model = home_viewmodel(&snapshot);
+
+        assert!(model.context.anomalies.iter().any(|anomaly| matches!(
+            anomaly,
+            super::ContextAnomaly::AmbientRootCheckout { tracker, lane_workspaces }
+                if tracker == "/tmp/repo"
+                    && lane_workspaces
+                        == &vec!["tusk-asy.11.1-ui-recovery".to_owned()]
+        )));
+    }
+
+    #[test]
+    fn home_viewmodel_keeps_lane_checkout_quiet_when_roots_differ() {
+        let mut snapshot = golden_operator_snapshot();
+        snapshot.context.checkout_root = "/tmp/repo/.jj-workspaces/tusk-asy.11.2-guardrail".to_owned();
+        snapshot.context.workspaces.push(crate::types::WorkspaceEntry {
+            name: "tusk-asy.11.2-guardrail".to_owned(),
+            change_id: Some("lane123".to_owned()),
+            commit_id: Some("lane456".to_owned()),
+            empty: false,
+            description: Some("tusk-asy.11.2: wip".to_owned()),
+            raw: "tusk-asy.11.2-guardrail: lane123 lane456 tusk-asy.11.2: wip".to_owned(),
+        });
+
+        let model = home_viewmodel(&snapshot);
+
+        assert!(!model.context.anomalies.iter().any(|anomaly| matches!(
+            anomaly,
+            super::ContextAnomaly::AmbientRootCheckout { .. }
+        )));
+        assert!(model.context.anomalies.iter().any(|anomaly| matches!(
+            anomaly,
+            super::ContextAnomaly::RootMismatch { .. }
+        )));
     }
 
     #[test]

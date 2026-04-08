@@ -322,6 +322,25 @@ pub(crate) fn home_context_lines(snapshot: &HomeViewModel) -> Vec<Line<'static>>
                         warning_style(),
                     )));
                 }
+                ContextAnomaly::AmbientRootCheckout {
+                    tracker,
+                    lane_workspaces,
+                } => {
+                    lines.push(Line::from(ratatui::text::Span::styled(
+                        format!(
+                            "ambient root checkout; continue code work from a lane, not default ({})",
+                            lane_workspaces.join(", ")
+                        ),
+                        warning_style(),
+                    )));
+                    lines.push(Line::from(ratatui::text::Span::styled(
+                        format!(
+                            "relocate with: tuskd launch-lane --repo {} --issue-id <id> --base-rev main",
+                            tracker
+                        ),
+                        warning_style(),
+                    )));
+                }
                 ContextAnomaly::BackendUnhealthy { message } => {
                     lines.push(Line::from(ratatui::text::Span::styled(
                         message.clone(),
@@ -389,7 +408,7 @@ fn issue_ref_label(issue: &IssueRef) -> String {
 #[cfg(test)]
 mod tests {
     use super::{home_context_lines, home_history_lines, home_next_lines, home_now_lines};
-    use crate::types::sample_operator_snapshot;
+    use crate::types::{WorkspaceEntry, sample_operator_snapshot};
     use crate::viewmodel::home_viewmodel;
 
     #[test]
@@ -418,6 +437,32 @@ mod tests {
         assert!(rendered.contains("127.0.0.1:32642"));
         assert!(rendered.contains("default"));
         assert!(rendered.contains("abc123"));
+    }
+
+    #[test]
+    fn home_context_lines_warn_about_ambient_root_checkout() {
+        let mut snapshot = sample_operator_snapshot();
+        snapshot.context.workspaces.push(WorkspaceEntry {
+            name: "tusk-asy.11.1-ui-recovery".to_owned(),
+            change_id: Some("lane123".to_owned()),
+            commit_id: Some("lane456".to_owned()),
+            empty: false,
+            description: Some("tusk-asy.11.1: wip".to_owned()),
+            raw: "tusk-asy.11.1-ui-recovery: lane123 lane456 tusk-asy.11.1: wip".to_owned(),
+        });
+
+        let rendered = home_context_lines(&home_viewmodel(&snapshot))
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("ambient root checkout"));
+        assert!(
+            rendered.contains(
+                "tuskd launch-lane --repo /tmp/repo --issue-id <id> --base-rev main"
+            )
+        );
     }
 
     #[test]
