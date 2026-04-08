@@ -83,6 +83,29 @@ verification fails.
 Successful runs append `lane.autonomous` in addition to the underlying
 `lane.dispatch` and `lane.complete` receipts.
 
+## Dogfood Example
+
+For the first bounded dogfood pass, use a low-risk docs-only `place:tusk`
+task such as `tusk-asy.2.11`, which only updates this design note:
+
+```bash
+# Plan: confirm admission and inspect the verification commands first.
+nix run .#tuskd -- autonomous-lane --repo "$PWD" --issue-id tusk-asy.2.11 --base-rev main --plan
+
+# Run: let tuskd claim, launch, dispatch, verify, and close out the lane.
+nix run .#tuskd -- autonomous-lane --repo "$PWD" --issue-id tusk-asy.2.11 --base-rev main --note "dogfood docs-only autonomous lane"
+
+# Read back: receipts show completion; board status shows whether a live lane remains.
+nix run .#tuskd -- receipts-status --repo "$PWD"
+nix run .#tuskd -- board-status --repo "$PWD"
+```
+
+On success, `receipts-status` should show a new `lane.autonomous` receipt
+alongside the matching `lane.dispatch` and `lane.complete` receipts. If the
+worker fails verification or does not cut one clean visible revision,
+`autonomous-lane` exits non-zero and leaves the lane inspectable in
+`board-status` instead of auto-cleaning the workspace away.
+
 `board-status` now carries the latest `self_host.run` summary so operators do
 not need a separate tool to see whether the fixed-point run last passed or
 failed.
