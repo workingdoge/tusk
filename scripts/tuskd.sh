@@ -140,6 +140,13 @@ summary_next_action() {
         printf 'restore or relaunch the lane workspace before dispatching the worker'
       fi
       ;;
+    "dispatch_lane worker timed out")
+      if [ -n "${workspace_path}" ]; then
+        printf 'inspect %s for dirty files or a visible revision, then retry dispatch-lane or finish the lane manually' "${workspace_path}"
+      else
+        printf 'inspect the live lane workspace for dirty files or a visible revision before retrying dispatch-lane'
+      fi
+      ;;
     "autonomous_lane requires an open issue")
       printf 'pick an open autonomy:v1-safe task issue before retrying autonomous-lane'
       ;;
@@ -1383,6 +1390,14 @@ dispatch_worker_launcher() {
   printf '%s\n' "${TUSKD_CODEX_LAUNCHER:-${TUSK_CODEX_LAUNCHER:-tusk-codex}}"
 }
 
+dispatch_timeout_seconds() {
+  printf '%s\n' "${TUSKD_DISPATCH_TIMEOUT_SECONDS:-300}"
+}
+
+dispatch_kill_after_seconds() {
+  printf '%s\n' "${TUSKD_DISPATCH_KILL_AFTER_SECONDS:-10}"
+}
+
 dispatch_command_args_json() {
   local launcher="$1"
   local workspace_path="$2"
@@ -1585,22 +1600,116 @@ write_dispatch_artifacts() {
   printf '%s\n' "${prompt_text}" >"${prompt_path}"
 }
 
+dispatch_output_path_probe() {
+  local output_path="$1"
+  local exists=false
+  local size_bytes=0
+
+  if [ -f "${output_path}" ]; then
+    exists=true
+    size_bytes="$(wc -c < "${output_path}" | tr -d '[:space:]')"
+    if [ -z "${size_bytes}" ]; then
+      size_bytes=0
+    fi
+  fi
+
+  jq -cn \
+    --arg path "${output_path}" \
+    --argjson exists "$(json_bool "${exists}")" \
+    --argjson size_bytes "${size_bytes}" \
+    '{
+      path: $path,
+      exists: $exists,
+      size_bytes: $size_bytes
+    }'
+}
+
+dispatch_workspace_probe() {
+  local workspace_path="$1"
+  local tracker_root="$2"
+  local base_commit="$3"
+  local parent_output=""
+  local parent_exit=0
+  local parent_commit=""
+  local diff_output=""
+  local diff_exit=0
+  local working_copy_clean=false
+  local visible_revision=false
+
+  if parent_output="$(run_in_checkout_capture "${workspace_path}" "${tracker_root}" jj --repository "${workspace_path}" log -r '@-' --no-graph -T 'commit_id ++ "\n"')"; then
+    parent_exit=0
+  else
+    parent_exit=$?
+  fi
+  parent_commit="$(printf '%s' "${parent_output}" | awk 'NF { print; exit }')"
+
+  if diff_output="$(run_in_checkout_capture "${workspace_path}" "${tracker_root}" jj --repository "${workspace_path}" diff --summary -r @)"; then
+    diff_exit=0
+  else
+    diff_exit=$?
+  fi
+
+  if [ "${diff_exit}" -eq 0 ] && [ -z "${diff_output}" ]; then
+    working_copy_clean=true
+  fi
+  if [ "${parent_exit}" -eq 0 ] && [ -n "${parent_commit}" ] && [ -n "${base_commit}" ] && [ "${parent_commit}" != "${base_commit}" ]; then
+    visible_revision=true
+  fi
+
+  jq -cn \
+    --arg workspace_path "${workspace_path}" \
+    --arg base_commit "${base_commit}" \
+    --arg parent_commit "${parent_commit}" \
+    --arg parent_output "${parent_output}" \
+    --arg diff_output "${diff_output}" \
+    --argjson parent_exit "${parent_exit}" \
+    --argjson diff_exit "${diff_exit}" \
+    --argjson working_copy_clean "$(json_bool "${working_copy_clean}")" \
+    --argjson visible_revision "$(json_bool "${visible_revision}")" \
+    '{
+      workspace_path: $workspace_path,
+      base_commit: (if ($base_commit | length) > 0 then $base_commit else null end),
+      parent_commit: (if ($parent_commit | length) > 0 then $parent_commit else null end),
+      visible_revision: $visible_revision,
+      working_copy_clean: $working_copy_clean,
+      parent_lookup: {
+        exit_code: $parent_exit,
+        output_text: (if ($parent_output | length) > 0 then $parent_output else null end)
+      },
+      diff_summary: {
+        exit_code: $diff_exit,
+        output_text: (if ($diff_output | length) > 0 then $diff_output else null end)
+      }
+    }'
+}
+
 run_dispatch_worker() {
   local launcher="$1"
   local workspace_path="$2"
   local repo_root="$3"
   local prompt_path="$4"
   local output_path="$5"
+  local base_commit="${6:-}"
   local output=""
   local exit_code=0
+  local timeout_seconds=0
+  local kill_after_seconds=0
+  local timed_out=false
+  local classification="completed"
+  local output_probe="null"
+  local workspace_probe="null"
 
   mkdir -p "$(dirname "${output_path}")"
+  rm -f -- "${output_path}" "${output_path}.prompt"
+  timeout_seconds="$(dispatch_timeout_seconds)"
+  kill_after_seconds="$(dispatch_kill_after_seconds)"
 
   set +e
   output="$(
     cd "${repo_root}"
     tusk_export_runtime_roots "${workspace_path}" "${repo_root}"
-    "${launcher}" \
+    timeout --foreground --signal=TERM --kill-after="${kill_after_seconds}s" "${timeout_seconds}s" \
+      "${launcher}" \
       --checkout "${workspace_path}" \
       --tracker-root "${repo_root}" \
       -- \
@@ -1613,12 +1722,43 @@ run_dispatch_worker() {
   exit_code=$?
   set -e
 
+  case "${exit_code}" in
+    0)
+      classification="completed"
+      ;;
+    124|137)
+      timed_out=true
+      classification="timed_out"
+      ;;
+    126|127)
+      classification="launcher_failure"
+      ;;
+    *)
+      classification="worker_failure"
+      ;;
+  esac
+
+  output_probe="$(dispatch_output_path_probe "${output_path}")"
+  workspace_probe="$(dispatch_workspace_probe "${workspace_path}" "${repo_root}" "${base_commit}")"
+
   jq -cn \
     --argjson exit_code "${exit_code}" \
     --arg output "${output}" \
+    --arg classification "${classification}" \
+    --argjson timed_out "$(json_bool "${timed_out}")" \
+    --argjson timeout_seconds "${timeout_seconds}" \
+    --argjson kill_after_seconds "${kill_after_seconds}" \
+    --argjson output_path "${output_probe}" \
+    --argjson workspace_probe "${workspace_probe}" \
     '{
       exit_code: $exit_code,
       ok: ($exit_code == 0),
+      timed_out: $timed_out,
+      classification: $classification,
+      timeout_seconds: $timeout_seconds,
+      kill_after_seconds: $kill_after_seconds,
+      output_path: $output_path,
+      workspace_probe: $workspace_probe,
       output: (if ($output | length) > 0 then $output else null end)
     }'
 }
@@ -4900,9 +5040,11 @@ dispatch_lane_action() {
   write_dispatch_artifacts "${repo_root}" "${issue_id}" "${brief_json}"
 
   if [ "${mode}" = "exec" ]; then
-    exec_result="$(run_dispatch_worker "${launcher}" "${workspace_path}" "${repo_root}" "${prompt_path}" "${output_path}")"
+    exec_result="$(run_dispatch_worker "${launcher}" "${workspace_path}" "${repo_root}" "${prompt_path}" "${output_path}" "$(jq -r '.base_commit // ""' <<<"${lane_json}")")"
     if jq -e '.ok == true' >/dev/null <<<"${exec_result}"; then
       dispatch_status="executed"
+    elif jq -e '.timed_out == true' >/dev/null <<<"${exec_result}"; then
+      dispatch_status="timed_out"
     else
       dispatch_status="failed"
     fi
@@ -5020,6 +5162,14 @@ dispatch_lane_action() {
         board_summary: $board_summary
       }'
   )"
+
+  if [ "${dispatch_status}" = "timed_out" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson details "${payload_json}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"dispatch_lane worker timed out", details:$details}}'
+    return 0
+  fi
 
   if [ "${dispatch_status}" = "failed" ]; then
     jq -cn \

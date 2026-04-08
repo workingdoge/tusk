@@ -189,7 +189,15 @@ while [ "$#" -gt 0 ]; do
 done
 
 prompt="$(cat)"
-if [ -n "${output_path}" ]; then
+if [ "${TUSKD_TEST_STUB_TOUCH_FILE:-0}" = "1" ] && [ -n "${checkout_path}" ]; then
+  printf 'stub timeout change\n' > "${checkout_path}/dispatch-timeout-stub.txt"
+fi
+
+if [ "${TUSKD_TEST_STUB_SLEEP_SECONDS:-0}" != "0" ]; then
+  sleep "${TUSKD_TEST_STUB_SLEEP_SECONDS}"
+fi
+
+if [ "${TUSKD_TEST_STUB_SKIP_OUTPUT:-0}" != "1" ] && [ -n "${output_path}" ]; then
   mkdir -p "$(dirname "${output_path}")"
   printf 'stub worker completed\n' > "${output_path}"
   printf '%s\n' "${prompt}" > "${output_path}.prompt"
@@ -747,6 +755,66 @@ test_dispatch_lane() {
   note "dispatch-lane: ok"
 }
 
+test_dispatch_lane_timeout() {
+  local repo_root="$1"
+  local base_rev="$2"
+  local issue_id=""
+  local issue_description=""
+  local claim_json=""
+  local claim_status=0
+  local launch_json=""
+  local launch_status=0
+  local dispatch_json=""
+  local dispatch_status=0
+  local board_json=""
+  local show_json=""
+  local show_status=0
+  local stub_path=""
+
+  note "dispatch-lane timeout: begin"
+  issue_description=$'Goal:\nExercise bounded dispatch timeout handling.\n\nVerification:\n- bash -n scripts/tuskd.sh'
+  issue_id="$(create_labeled_issue "${repo_root}" "transition dispatch lane timeout probe" "${issue_description}" "place:tusk,track:core,surface:self-hosting")"
+  stub_path="$(create_codex_stub_launcher "${repo_root}")"
+
+  run_cli_json claim_json claim_status \
+    tuskd claim-issue --repo "${repo_root}" --issue-id "${issue_id}"
+  assert_status "${claim_status}" "0" "claim dispatch timeout issue"
+
+  run_cli_json launch_json launch_status \
+    tuskd launch-lane --repo "${repo_root}" --issue-id "${issue_id}" --base-rev "${base_rev}" --slug dispatch-timeout-probe
+  assert_status "${launch_status}" "0" "launch dispatch timeout lane"
+
+  run_cli_json dispatch_json dispatch_status \
+    env \
+      TUSKD_CODEX_LAUNCHER="${stub_path}" \
+      TUSKD_DISPATCH_TIMEOUT_SECONDS=1 \
+      TUSKD_DISPATCH_KILL_AFTER_SECONDS=1 \
+      TUSKD_TEST_STUB_TOUCH_FILE=1 \
+      TUSKD_TEST_STUB_SKIP_OUTPUT=1 \
+      TUSKD_TEST_STUB_SLEEP_SECONDS=5 \
+      tuskd dispatch-lane --repo "${repo_root}" --issue-id "${issue_id}" --mode exec --note "dispatch timeout probe"
+  assert_status "${dispatch_status}" "1" "dispatch-lane timeout exit"
+  assert_json_value "${dispatch_json}" '.error.message' "dispatch_lane worker timed out" "dispatch-lane timeout message"
+  assert_json_value "${dispatch_json}" '.error.details.dispatch.status' "timed_out" "dispatch-lane timeout status"
+  assert_json_value "${dispatch_json}" '.error.details.dispatch.runner_result.timed_out' "true" "dispatch-lane timeout timed_out"
+  assert_json_value "${dispatch_json}" '.error.details.dispatch.runner_result.classification' "timed_out" "dispatch-lane timeout classification"
+  assert_json_value "${dispatch_json}" '.error.details.dispatch.runner_result.output_path.exists' "false" "dispatch-lane timeout output missing"
+  assert_json_value "${dispatch_json}" '.error.details.dispatch.runner_result.workspace_probe.working_copy_clean' "false" "dispatch-lane timeout workspace dirty"
+  assert_json_value "${dispatch_json}" '.error.details.dispatch.runner_result.workspace_probe.visible_revision' "false" "dispatch-lane timeout no visible revision"
+
+  board_json="$(tuskd board-status --repo "${repo_root}")"
+  assert_json_jq "${board_json}" "board did not keep timed-out lane inspectable" --arg issue_id "${issue_id}" '
+    [.lanes[] | select(.issue_id == $issue_id and .status == "launched" and .dispatch.status == "timed_out")] | length == 1
+  '
+
+  run_cli_json show_json show_status bd show "${issue_id}" --json
+  assert_status "${show_status}" "0" "dispatch-lane timeout issue show"
+  assert_json_value "${show_json}" '.[0].status' "in_progress" "dispatch-lane timeout issue status"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.dispatch")" = "1" ] || fail "dispatch-lane timeout lane.dispatch receipt count mismatch for ${issue_id}"
+
+  note "dispatch-lane timeout: ok"
+}
+
 test_autonomous_lane_success() {
   local repo_root="$1"
   local base_rev="$2"
@@ -886,6 +954,51 @@ test_autonomous_lane_verification_failure() {
   [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.autonomous")" = "0" ] || fail "autonomous-lane verification failure lane.autonomous receipt count mismatch for ${issue_id}"
 
   note "autonomous-lane verification failure: ok"
+}
+
+test_autonomous_lane_dispatch_timeout() {
+  local repo_root="$1"
+  local base_rev="$2"
+  local issue_id=""
+  local issue_description=""
+  local autonomous_json=""
+  local autonomous_status=0
+  local board_json=""
+  local show_json=""
+  local show_status=0
+  local stub_path=""
+
+  note "autonomous-lane dispatch timeout: begin"
+  issue_description=$'Goal:\nExercise autonomous failure when dispatch times out.\n\nVerification:\n- bash -n scripts/tuskd.sh'
+  issue_id="$(create_labeled_issue "${repo_root}" "transition autonomous lane dispatch timeout probe" "${issue_description}" "place:tusk,track:core,surface:self-hosting,autonomy:v1-safe")"
+  stub_path="$(create_codex_stub_launcher "${repo_root}")"
+
+  run_cli_json autonomous_json autonomous_status \
+    env \
+      TUSKD_CODEX_LAUNCHER="${stub_path}" \
+      TUSKD_DISPATCH_TIMEOUT_SECONDS=1 \
+      TUSKD_DISPATCH_KILL_AFTER_SECONDS=1 \
+      TUSKD_TEST_STUB_TOUCH_FILE=1 \
+      TUSKD_TEST_STUB_SKIP_OUTPUT=1 \
+      TUSKD_TEST_STUB_SLEEP_SECONDS=5 \
+      tuskd autonomous-lane --repo "${repo_root}" --issue-id "${issue_id}" --base-rev "${base_rev}" --slug autonomous-dispatch-timeout-probe
+  assert_status "${autonomous_status}" "1" "autonomous-lane dispatch timeout exit"
+  assert_json_value "${autonomous_json}" '.error.message' "autonomous_lane failed during dispatch_lane" "autonomous-lane dispatch timeout message"
+  assert_json_value "${autonomous_json}" '.error.details.error.message' "dispatch_lane worker timed out" "autonomous-lane dispatch timeout nested message"
+  assert_json_value "${autonomous_json}" '.payload.phase' "dispatch" "autonomous-lane dispatch timeout phase"
+
+  board_json="$(tuskd board-status --repo "${repo_root}")"
+  assert_json_jq "${board_json}" "autonomous dispatch timeout lane did not stay inspectable" --arg issue_id "${issue_id}" '
+    [.lanes[] | select(.issue_id == $issue_id and .status == "launched" and .dispatch.status == "timed_out")] | length == 1
+  '
+
+  run_cli_json show_json show_status bd show "${issue_id}" --json
+  assert_status "${show_status}" "0" "autonomous-lane dispatch timeout issue show"
+  assert_json_value "${show_json}" '.[0].status' "in_progress" "autonomous-lane dispatch timeout issue status"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.dispatch")" = "1" ] || fail "autonomous-lane dispatch timeout lane.dispatch receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.autonomous")" = "0" ] || fail "autonomous-lane dispatch timeout lane.autonomous receipt count mismatch for ${issue_id}"
+
+  note "autonomous-lane dispatch timeout: ok"
 }
 
 test_complete_lane() {
@@ -1123,8 +1236,10 @@ run_inner_tests() {
   test_concurrent_claims "${repo_root}"
   test_launch_rollback "${repo_root}" "${base_rev}"
   test_dispatch_lane "${repo_root}" "${base_rev}"
+  test_dispatch_lane_timeout "${repo_root}" "${base_rev}"
   test_autonomous_lane_missing_revision "${repo_root}" "${base_rev}"
   test_autonomous_lane_verification_failure "${repo_root}" "${base_rev}"
+  test_autonomous_lane_dispatch_timeout "${repo_root}" "${base_rev}"
   test_autonomous_lane_success "${repo_root}" "${base_rev}"
   test_compact_lane_remove "${repo_root}" "${base_rev}"
   test_compact_lane_quarantine "${repo_root}" "${base_rev}"
