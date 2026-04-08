@@ -394,6 +394,10 @@ Why this is still the right first remote effect:
 
 These should stay explicit for now:
 
+See also [`design/tusk-semantic-spine-map.md`](./tusk-semantic-spine-map.md)
+for the current-tree map of what is already implemented structurally versus
+what remains conceptual.
+
 1. Admission policy
    We can model structural readiness now, but the exact runtime or policy
    admission interface still needs tightening.
