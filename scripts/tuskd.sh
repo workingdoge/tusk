@@ -15,6 +15,7 @@ Usage:
   tuskd operator-snapshot [--repo PATH] [--socket PATH]
   tuskd board-status [--repo PATH]
   tuskd receipts-status [--repo PATH]
+  tuskd self-host-run [--repo PATH] [--checkout PATH] [--realization ID] [--note TEXT] [--plan]
   tuskd claim-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID
   tuskd close-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON
   tuskd launch-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --base-rev REV [--slug SLUG]
@@ -32,6 +33,7 @@ Commands:
   operator-snapshot Print the compact operator-facing home projection.
   board-status  Print the current board projection.
   receipts-status Print the current receipt projection.
+  self-host-run Execute the first self-host build/check loop and record receipts.
   claim-issue   Claim one issue through the coordinator action surface.
   close-issue   Close one issue through the coordinator action surface.
   launch-lane   Create one dedicated issue workspace through the coordinator action surface.
@@ -47,6 +49,7 @@ Protocol request kinds:
   operator_snapshot
   board_status
   receipts_status
+  self_host_status
   claim_issue
   close_issue
   launch_lane
@@ -3598,6 +3601,31 @@ cmd_receipts_status() {
   exec_tuskd_core receipts-status --repo "${repo_root}" --socket "${socket_path}"
 }
 
+cmd_self_host_run() {
+  local repo_root="$1"
+  local checkout_root="${2:-}"
+  local realization_id="${3:-self.trace-core-health.local}"
+  local note="${4:-}"
+  local plan_only="${5:-false}"
+  local -a args=()
+
+  args+=(--repo "${repo_root}")
+  if [ -n "${checkout_root}" ]; then
+    args+=(--checkout "${checkout_root}")
+  fi
+  if [ -n "${realization_id}" ]; then
+    args+=(--realization "${realization_id}")
+  fi
+  if [ -n "${note}" ]; then
+    args+=(--note "${note}")
+  fi
+  if [ "${plan_only}" = "true" ]; then
+    args+=(--plan)
+  fi
+
+  exec "${TUSK_SELF_HOST_BIN}" "${args[@]}"
+}
+
 cmd_claim_issue() {
   local repo_root="$1"
   local socket_path="$2"
@@ -3871,7 +3899,7 @@ cmd_query() {
   fi
 
   case "${kind}" in
-    tracker_status|operator_snapshot|board_status|receipts_status|issue_inspect|ping)
+    tracker_status|operator_snapshot|board_status|receipts_status|self_host_status|issue_inspect|ping)
       exec_tuskd_core query --repo "${repo_root}" --socket "${socket_path}" --kind "${kind}" --request-id "${request_id}" --payload "${payload_json}"
       ;;
   esac
@@ -3975,6 +4003,20 @@ while [ $# -gt 0 ]; do
       payload_arg="$2"
       shift 2
       ;;
+    --checkout)
+      [ $# -ge 2 ] || fail "--checkout requires a value"
+      checkout_arg="$2"
+      shift 2
+      ;;
+    --realization)
+      [ $# -ge 2 ] || fail "--realization requires a value"
+      realization_arg="$2"
+      shift 2
+      ;;
+    --plan)
+      plan_arg=true
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -4003,6 +4045,9 @@ case "${command}" in
     ;;
   receipts-status)
     cmd_receipts_status "${repo_root}" "${socket_path}"
+    ;;
+  self-host-run)
+    cmd_self_host_run "${repo_root}" "${checkout_arg:-}" "${realization_arg:-self.trace-core-health.local}" "${note_arg}" "${plan_arg:-false}"
     ;;
   claim-issue)
     [ -n "${issue_id_arg}" ] || fail "claim-issue requires --issue-id"

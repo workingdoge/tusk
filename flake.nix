@@ -493,6 +493,23 @@
           exec bash ${./scripts/tusk-trace-executor.sh} "$@"
         '';
       };
+      tuskSelfHostPackage = pkgs.writeShellApplication {
+        name = "tusk-self-host";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.jq
+          pkgs.nix
+          tuskTraceExecutorPackage
+        ];
+        text = ''
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+          export TUSKD_CORE_BIN=${tuskdCorePackage}/bin/tuskd-core
+          export TUSK_TRACE_EXECUTOR_BIN=${tuskTraceExecutorPackage}/bin/tusk-trace-executor
+          export JQ_BIN=${pkgs.jq}/bin/jq
+          export NIX_BIN=${pkgs.nix}/bin/nix
+          exec bash ${./scripts/tusk-self-host.sh} "$@"
+        '';
+      };
       tuskdPackage = pkgs.writeShellApplication {
         name = "tuskd";
         runtimeInputs = [
@@ -502,11 +519,13 @@
           pkgs.jujutsu
           pkgs.lsof
           pkgs.socat
+          tuskSelfHostPackage
           tuskdCorePackage
           tuskTrackerPackage
         ];
         text = ''
           export TUSKD_CORE_BIN=${tuskdCorePackage}/bin/tuskd-core
+          export TUSK_SELF_HOST_BIN=${tuskSelfHostPackage}/bin/tusk-self-host
           export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
           exec bash ${./scripts/tuskd.sh} "$@"
         '';
@@ -1037,6 +1056,7 @@
         radicle-flake-wasm-resolver = radicleFlakeWasmResolverPackage;
         tusk-clean = tuskClean;
         tusk-flake-ref = tuskFlakeRefPackage;
+        tusk-self-host = tuskSelfHostPackage;
         tusk-trace-executor = tuskTraceExecutorPackage;
         tusk-tracker = tuskTrackerPackage;
         tuskd-core = tuskdCorePackage;
@@ -1093,6 +1113,10 @@
         tusk-flake-ref = {
           type = "app";
           program = "${tuskFlakeRefPackage}/bin/tusk-flake-ref";
+        };
+        tusk-self-host = {
+          type = "app";
+          program = "${tuskSelfHostPackage}/bin/tusk-self-host";
         };
         tusk-trace-executor = {
           type = "app";

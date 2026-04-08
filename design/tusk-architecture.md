@@ -445,6 +445,11 @@ The first part of step 2 now exists as the repo-local `local-trace` executor
 and `tusk-trace-executor` runtime entrypoint described in
 [`design/tusk-local-trace-executor.md`](./tusk-local-trace-executor.md).
 
+The first part of the fixed-point loop now exists as
+[`design/tusk-self-host-automation.md`](./tusk-self-host-automation.md):
+`tuskd self-host-run` uses the declared witness graph to run the real repo
+checks/builds, then records both `effect.trace` and `self_host.run` receipts.
+
 ## Recommendation
 
 Proceed as if:

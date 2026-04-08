@@ -1282,6 +1282,12 @@ fn compact_receipt_projection(receipt: &Value) -> Value {
         ("outcome", payload.get("outcome")),
         ("mode", payload.get("mode")),
         ("status", payload.get("status")),
+        (
+            "realization",
+            payload
+                .get("realization_id")
+                .or_else(|| payload.get("realization").and_then(|value| value.get("id"))),
+        ),
     ] {
         if let Some(value) = value.filter(|value| !value.is_null()) {
             details.insert(key.to_string(), value.clone());
@@ -1489,6 +1495,8 @@ fn humanize_kind(kind: &str) -> String {
         "lane.handoff" => "handed off lane".to_owned(),
         "lane.finish" => "finished lane".to_owned(),
         "lane.archive" => "archived lane".to_owned(),
+        "self_host.run" => "ran self-host automation".to_owned(),
+        "effect.trace" => "recorded effect trace".to_owned(),
         other => format!("recorded {other}"),
     }
 }
@@ -2202,6 +2210,7 @@ fn board_status_projection(repo_root: &Path, socket_path: &Path) -> Result<Value
         .filter(|value| value.is_array())
         .cloned()
         .unwrap_or_else(|| json!([]));
+    let latest_self_host_run = latest_receipt_by_kind(repo_root, "self_host.run");
 
     Ok(json!({
         "repo_root": repo_root.to_string_lossy().into_owned(),
@@ -2213,6 +2222,13 @@ fn board_status_projection(repo_root: &Path, socket_path: &Path) -> Result<Value
         "deferred_issues": deferred_issues,
         "lanes": lanes,
         "workspaces": workspaces,
+        "automation": {
+            "latest_self_host_run": if latest_self_host_run.is_null() {
+                Value::Null
+            } else {
+                compact_self_host_run_projection(&latest_self_host_run)
+            },
+        },
         "checks": {
             "tracker_status": status_result,
             "tracker_ready": ready_result,
@@ -2252,6 +2268,70 @@ fn receipts_status_projection(repo_root: &Path) -> Result<Value, String> {
         "receipts_path": path.to_string_lossy().into_owned(),
         "receipts": receipts,
     }))
+}
+
+fn latest_receipt_by_kind(repo_root: &Path, kind: &str) -> Value {
+    if kind.is_empty() {
+        return Value::Null;
+    }
+
+    let path = receipts_path(repo_root);
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Value::Null;
+    };
+
+    contents
+        .lines()
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|value| value.get("kind").and_then(Value::as_str) == Some(kind))
+        .last()
+        .unwrap_or(Value::Null)
+}
+
+fn compact_self_host_run_projection(receipt: &Value) -> Value {
+    let payload = receipt.get("payload").cloned().unwrap_or_else(|| json!({}));
+    let base_results = payload
+        .get("base_results")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let passed_steps = base_results
+        .iter()
+        .filter(|value| value.get("status").and_then(Value::as_str) == Some("passed"))
+        .count();
+    let failed_step = base_results.iter().find_map(|value| {
+        if value.get("status").and_then(Value::as_str) == Some("failed") {
+            value.get("base_id").cloned()
+        } else {
+            None
+        }
+    });
+
+    json!({
+        "timestamp": receipt.get("timestamp").cloned().unwrap_or(Value::Null),
+        "status": payload.get("status").cloned().unwrap_or(Value::Null),
+        "mode": payload.get("mode").cloned().unwrap_or(Value::Null),
+        "note": payload.get("note").cloned().unwrap_or(Value::Null),
+        "realization_id": payload.get("realization_id").cloned().unwrap_or(Value::Null),
+        "checkout_root": payload.get("checkout_root").cloned().unwrap_or(Value::Null),
+        "tracker_root": payload.get("tracker_root").cloned().unwrap_or(Value::Null),
+        "passed_steps": passed_steps,
+        "total_steps": base_results.len(),
+        "failed_step": failed_step.unwrap_or(Value::Null),
+        "trace_receipt": payload.get("trace_receipt").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn self_host_status_projection(repo_root: &Path) -> Value {
+    let receipt = latest_receipt_by_kind(repo_root, "self_host.run");
+    json!({
+        "latest_run": if receipt.is_null() {
+            Value::Null
+        } else {
+            compact_self_host_run_projection(&receipt)
+        },
+    })
 }
 
 fn ping_payload(repo_root: &Path) -> Value {
@@ -2330,6 +2410,7 @@ fn read_payload_for_kind(
         "operator_snapshot" => Ok(Some(operator_snapshot_projection(repo_root, socket_path)?)),
         "board_status" => Ok(Some(board_status_projection(repo_root, socket_path)?)),
         "receipts_status" => Ok(Some(receipts_status_projection(repo_root)?)),
+        "self_host_status" => Ok(Some(self_host_status_projection(repo_root))),
         "issue_inspect" => Ok(Some(issue_inspect_projection(
             repo_root,
             payload

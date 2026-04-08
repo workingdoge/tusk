@@ -245,7 +245,7 @@ let
   };
 
   normalizeRealizationAdmission =
-    effects: executors: effectAdmission: realization:
+    executors: effectAdmission: realization:
     let
       effectState =
         if hasAttr realization.effect effectAdmission then
@@ -410,7 +410,7 @@ let
         mapAttrsToList (
           _: realization:
           nameValuePair realization.id (
-            normalizeRealizationAdmission effects executors admission realization
+            normalizeRealizationAdmission executors admission realization
           )
         ) realizations
       );
