@@ -140,11 +140,21 @@ current_revision() {
   local repo_root="$1"
   local revision=""
 
+  revision="$(resolve_revision "${repo_root}" "@")"
+  [ -n "${revision}" ] || fail "failed to resolve current revision"
+  printf '%s\n' "${revision}"
+}
+
+resolve_revision() {
+  local repo_root="$1"
+  local revset="$2"
+  local revision=""
+
   revision="$(
-    jj --repository "${repo_root}" log -r @ --no-graph -T 'commit_id ++ "\n"' \
+    jj --repository "${repo_root}" log -r "${revset}" --no-graph -T 'commit_id ++ "\n"' \
       | awk 'NF { print; exit }'
   )"
-  [ -n "${revision}" ] || fail "failed to resolve current revision"
+  [ -n "${revision}" ] || fail "failed to resolve revision ${revset} in ${repo_root}"
   printf '%s\n' "${revision}"
 }
 
@@ -585,6 +595,57 @@ test_compact_lane_quarantine() {
   note "compact-quarantine: ok"
 }
 
+test_coordinator_repair() {
+  local repo_root="$1"
+  local base_rev="$2"
+  local landing_name="coordinator-repair-land"
+  local landing_path="${repo_root}/.jj-workspaces/${landing_name}"
+  local landed_revision=""
+  local status_json=""
+  local status_exit=0
+  local repair_plan_json=""
+  local repair_plan_status=0
+  local repair_json=""
+  local repair_status=0
+
+  note "coordinator-repair: begin"
+
+  printf '\ncoordinator repair probe\n' >> "${repo_root}/AGENTS.md"
+
+  jj --repository "${repo_root}" workspace add "${landing_path}" --name "${landing_name}" -r "${base_rev}" >/dev/null
+  printf 'coordinator repair landed probe\n' > "${landing_path}/coordinator-repair-probe.txt"
+  jj --repository "${landing_path}" commit -m "coordinator repair landed probe" >/dev/null
+  landed_revision="$(resolve_revision "${landing_path}" "@-")"
+  jj --repository "${repo_root}" bookmark move main --to "${landed_revision}" >/dev/null
+
+  run_cli_json status_json status_exit \
+    tuskd coordinator-status --repo "${repo_root}"
+  assert_status "${status_exit}" "1" "coordinator-status should detect drift"
+  assert_json_value "${status_json}" '.drifted' "true" "coordinator-status drifted"
+  assert_json_value "${status_json}" '.needs_repair' "true" "coordinator-status needs repair"
+
+  run_cli_json repair_plan_json repair_plan_status \
+    tuskd repair-coordinator --repo "${repo_root}" --target-rev main --plan
+  assert_status "${repair_plan_status}" "0" "repair-coordinator plan"
+  assert_json_value "${repair_plan_json}" '.payload.status' "plan" "repair-coordinator plan status"
+
+  run_cli_json repair_json repair_status \
+    tuskd repair-coordinator --repo "${repo_root}" --target-rev main --note "transition probe"
+  assert_status "${repair_status}" "0" "repair-coordinator run"
+  assert_json_value "${repair_json}" '.payload.status' "repaired" "repair-coordinator result"
+  assert_json_value "${repair_json}" '.payload.after.drifted' "false" "repair-coordinator cleared drift"
+  assert_json_value "${repair_json}" '.payload.after.conflicted' "false" "repair-coordinator avoided conflicts"
+  assert_json_value "${repair_json}" '.payload.after.parent_commits[0]' "${landed_revision}" "repair-coordinator updated parent"
+
+  run_cli_json status_json status_exit \
+    tuskd coordinator-status --repo "${repo_root}"
+  assert_status "${status_exit}" "0" "coordinator-status after repair"
+  assert_json_value "${status_json}" '.status' "in_sync" "coordinator-status after repair state"
+
+  forget_and_remove_workspace "${repo_root}" "${landing_name}" "${landing_path}"
+  note "coordinator-repair: ok"
+}
+
 run_inner_tests() {
   local repo_root="$1"
   local base_rev="$2"
@@ -606,6 +667,7 @@ run_inner_tests() {
   test_launch_rollback "${repo_root}" "${base_rev}"
   test_compact_lane_remove "${repo_root}" "${base_rev}"
   test_compact_lane_quarantine "${repo_root}" "${base_rev}"
+  test_coordinator_repair "${repo_root}" "${base_rev}"
 
   note "all transition tests passed"
 }

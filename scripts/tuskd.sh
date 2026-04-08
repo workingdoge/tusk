@@ -12,10 +12,12 @@ Usage:
   tuskd core-seam [--json]
   tuskd ensure [--repo PATH] [--socket PATH]
   tuskd status [--repo PATH] [--socket PATH]
+  tuskd coordinator-status [--repo PATH]
   tuskd operator-snapshot [--repo PATH] [--socket PATH]
   tuskd board-status [--repo PATH]
   tuskd receipts-status [--repo PATH]
   tuskd self-host-run [--repo PATH] [--checkout PATH] [--realization ID] [--note TEXT] [--plan]
+  tuskd repair-coordinator [--repo PATH] [--target-rev REV] [--note TEXT] [--plan]
   tuskd claim-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID
   tuskd close-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON
   tuskd launch-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --base-rev REV [--slug SLUG]
@@ -30,10 +32,12 @@ Commands:
   core-seam     Print the first Rust-owned backend/service seam contract.
   ensure        Ensure repo-local state exists and tracker health is recorded.
   status        Print the current tracker service projection.
+  coordinator-status Print the default-workspace drift projection.
   operator-snapshot Print the compact operator-facing home projection.
   board-status  Print the current board projection.
   receipts-status Print the current receipt projection.
   self-host-run Execute the first self-host build/check loop and record receipts.
+  repair-coordinator Rebase the default coordinator workspace onto current main and record a receipt.
   claim-issue   Claim one issue through the coordinator action surface.
   close-issue   Close one issue through the coordinator action surface.
   launch-lane   Create one dedicated issue workspace through the coordinator action surface.
@@ -46,6 +50,7 @@ Commands:
 
 Protocol request kinds:
   tracker_status
+  coordinator_status
   operator_snapshot
   board_status
   receipts_status
@@ -3580,6 +3585,24 @@ cmd_status() {
   exec_tuskd_core status --repo "${repo_root}" --socket "${socket_path}"
 }
 
+coordinator_status_payload() {
+  local repo_root="$1"
+  local output=""
+
+  if output="$(run_tuskd_core coordinator-status --repo "${repo_root}" 2>/dev/null)"; then
+    printf '%s\n' "${output}"
+    return 0
+  fi
+
+  printf '%s\n' "${output}"
+}
+
+cmd_coordinator_status() {
+  local repo_root="$1"
+
+  exec_tuskd_core coordinator-status --repo "${repo_root}"
+}
+
 cmd_operator_snapshot() {
   local repo_root="$1"
   local socket_path="$2"
@@ -3624,6 +3647,158 @@ cmd_self_host_run() {
   fi
 
   exec "${TUSK_SELF_HOST_BIN}" "${args[@]}"
+}
+
+cmd_repair_coordinator() {
+  local repo_root="$1"
+  local target_rev="${2:-main}"
+  local note="${3:-}"
+  local plan_only="${4:-false}"
+  local before_json
+  local after_json
+  local rebase_output=""
+  local rebase_exit=0
+  local status=""
+  local receipt_payload=""
+  local receipt_json=""
+
+  before_json="$(coordinator_status_payload "${repo_root}")"
+  if [ "${plan_only}" = "true" ]; then
+    jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg target_rev "${target_rev}" \
+      --arg note "${note}" \
+      --argjson before "${before_json}" \
+      '{
+        ok: true,
+        payload: {
+          repo_root: $repo_root,
+          target_rev: $target_rev,
+          note: (if ($note | length) > 0 then $note else null end),
+          status: "plan",
+          before: $before,
+          command: ("jj --repository " + $repo_root + " rebase -s @ -d " + $target_rev)
+        }
+      }'
+    return 0
+  fi
+
+  if ! jq -e '.needs_repair == true' >/dev/null <<<"${before_json}"; then
+    jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg target_rev "${target_rev}" \
+      --arg note "${note}" \
+      --argjson before "${before_json}" \
+      '{
+        ok: true,
+        payload: {
+          repo_root: $repo_root,
+          target_rev: $target_rev,
+          note: (if ($note | length) > 0 then $note else null end),
+          status: "noop",
+          before: $before,
+          after: $before
+        }
+      }'
+    return 0
+  fi
+
+  if rebase_output="$(run_in_repo_capture "${repo_root}" jj --repository "${repo_root}" rebase -s @ -d "${target_rev}")"; then
+    rebase_exit=0
+  else
+    rebase_exit=$?
+  fi
+
+  after_json="$(coordinator_status_payload "${repo_root}")"
+  if [ "${rebase_exit}" -ne 0 ]; then
+    status="rebase_failed"
+  elif jq -e '.conflicted == true' >/dev/null <<<"${after_json}"; then
+    status="conflicted"
+  elif jq -e '.drifted == true' >/dev/null <<<"${after_json}"; then
+    status="still_drifted"
+  else
+    status="repaired"
+  fi
+
+  receipt_payload="$(jq -cn \
+    --arg repo_root "${repo_root}" \
+    --arg target_rev "${target_rev}" \
+    --arg note "${note}" \
+    --arg status "${status}" \
+    --arg rebase_output "${rebase_output}" \
+    --argjson rebase_exit "${rebase_exit}" \
+    --argjson before "${before_json}" \
+    --argjson after "${after_json}" \
+    '{
+      repo_root: $repo_root,
+      target_rev: $target_rev,
+      note: (if ($note | length) > 0 then $note else null end),
+      status: $status,
+      rebase: {
+        exit_code: $rebase_exit,
+        output: (if ($rebase_output | length) > 0 then $rebase_output else null end)
+      },
+      before: $before,
+      after: $after
+    }')"
+
+  if ! receipt_json="$(append_receipt_capture "${repo_root}" "coordinator.sync" "${receipt_payload}")"; then
+    jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg target_rev "${target_rev}" \
+      --arg status "${status}" \
+      --argjson before "${before_json}" \
+      --argjson after "${after_json}" \
+      --argjson rebase_exit "${rebase_exit}" \
+      --arg rebase_output "${rebase_output}" \
+      '{
+        ok: false,
+        error: {
+          message: "repair-coordinator failed to append coordinator.sync receipt"
+        },
+        payload: {
+          repo_root: $repo_root,
+          target_rev: $target_rev,
+          status: $status,
+          before: $before,
+          after: $after,
+          rebase: {
+            exit_code: $rebase_exit,
+            output: (if ($rebase_output | length) > 0 then $rebase_output else null end)
+          }
+        }
+      }'
+    return 1
+  fi
+
+  jq -cn \
+    --arg repo_root "${repo_root}" \
+    --arg target_rev "${target_rev}" \
+    --arg note "${note}" \
+    --arg status "${status}" \
+    --argjson before "${before_json}" \
+    --argjson after "${after_json}" \
+    --argjson rebase_exit "${rebase_exit}" \
+    --arg rebase_output "${rebase_output}" \
+    --argjson receipt "${receipt_json}" \
+    '{
+      ok: ($status == "repaired"),
+      payload: {
+        repo_root: $repo_root,
+        target_rev: $target_rev,
+        note: (if ($note | length) > 0 then $note else null end),
+        status: $status,
+        before: $before,
+        after: $after,
+        rebase: {
+          exit_code: $rebase_exit,
+          output: (if ($rebase_output | length) > 0 then $rebase_output else null end)
+        },
+        receipt: $receipt
+      }
+    }'
+
+  [ "${status}" = "repaired" ]
 }
 
 cmd_claim_issue() {
@@ -3899,7 +4074,7 @@ cmd_query() {
   fi
 
   case "${kind}" in
-    tracker_status|operator_snapshot|board_status|receipts_status|self_host_status|issue_inspect|ping)
+    tracker_status|coordinator_status|operator_snapshot|board_status|receipts_status|self_host_status|issue_inspect|ping)
       exec_tuskd_core query --repo "${repo_root}" --socket "${socket_path}" --kind "${kind}" --request-id "${request_id}" --payload "${payload_json}"
       ;;
   esac
@@ -3930,6 +4105,7 @@ request_id_arg=""
 issue_id_arg=""
 reason_arg=""
 base_rev_arg=""
+target_rev_arg=""
 slug_arg=""
 revision_arg=""
 outcome_arg=""
@@ -3972,6 +4148,11 @@ while [ $# -gt 0 ]; do
     --base-rev)
       [ $# -ge 2 ] || fail "--base-rev requires a value"
       base_rev_arg="$2"
+      shift 2
+      ;;
+    --target-rev)
+      [ $# -ge 2 ] || fail "--target-rev requires a value"
+      target_rev_arg="$2"
       shift 2
       ;;
     --slug)
@@ -4037,6 +4218,9 @@ case "${command}" in
   status)
     cmd_status "${repo_root}" "${socket_path}"
     ;;
+  coordinator-status)
+    cmd_coordinator_status "${repo_root}"
+    ;;
   operator-snapshot)
     cmd_operator_snapshot "${repo_root}" "${socket_path}"
     ;;
@@ -4048,6 +4232,9 @@ case "${command}" in
     ;;
   self-host-run)
     cmd_self_host_run "${repo_root}" "${checkout_arg:-}" "${realization_arg:-self.trace-core-health.local}" "${note_arg}" "${plan_arg:-false}"
+    ;;
+  repair-coordinator)
+    cmd_repair_coordinator "${repo_root}" "${target_rev_arg:-main}" "${note_arg}" "${plan_arg:-false}"
     ;;
   claim-issue)
     [ -n "${issue_id_arg}" ] || fail "claim-issue requires --issue-id"

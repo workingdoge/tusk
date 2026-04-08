@@ -17,6 +17,7 @@ Usage:
   tuskd-core seam [--json]
   tuskd-core ensure --repo PATH [--socket PATH]
   tuskd-core status --repo PATH [--socket PATH]
+  tuskd-core coordinator-status --repo PATH
   tuskd-core operator-snapshot --repo PATH [--socket PATH]
   tuskd-core board-status --repo PATH
   tuskd-core receipts-status --repo PATH
@@ -32,6 +33,7 @@ Commands:
   seam            Print the first Rust-owned backend/service seam contract.
   ensure          Run the Rust-owned backend ensure and service publication path.
   status          Publish the current backend/service projection without repair.
+  coordinator-status Publish the default-workspace drift projection.
   operator-snapshot Publish the compact operator-facing home projection.
   board-status    Publish the current board projection.
   receipts-status Publish the current receipt projection.
@@ -1495,6 +1497,7 @@ fn humanize_kind(kind: &str) -> String {
         "lane.handoff" => "handed off lane".to_owned(),
         "lane.finish" => "finished lane".to_owned(),
         "lane.archive" => "archived lane".to_owned(),
+        "coordinator.sync" => "rebased coordinator".to_owned(),
         "self_host.run" => "ran self-host automation".to_owned(),
         "effect.trace" => "recorded effect trace".to_owned(),
         other => format!("recorded {other}"),
@@ -1615,6 +1618,152 @@ fn dirty_tree_projection(checkout_root: &Path) -> Value {
     }
 }
 
+fn lines_output(result: &Value) -> Vec<String> {
+    result
+        .get("output")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn first_output_line(result: &Value) -> Option<String> {
+    lines_output(result).into_iter().next()
+}
+
+fn coordinator_status_projection(repo_root: &Path) -> Result<Value, String> {
+    let repo_root_str = repo_root.to_string_lossy().into_owned();
+    let current_commit_result = run_lines_command_in_repo(
+        repo_root,
+        "jj_current_commit",
+        "jj",
+        [
+            "--repository",
+            repo_root_str.as_str(),
+            "log",
+            "-r",
+            "@",
+            "--no-graph",
+            "-T",
+            "commit_id ++ \"\\n\"",
+        ],
+    )?;
+    let parent_commits_result = run_lines_command_in_repo(
+        repo_root,
+        "jj_parent_commits",
+        "jj",
+        [
+            "--repository",
+            repo_root_str.as_str(),
+            "log",
+            "-r",
+            "@",
+            "--no-graph",
+            "-T",
+            "parents.map(|c| c.commit_id()).join(\"\\n\") ++ \"\\n\"",
+        ],
+    )?;
+    let main_commit_result = run_lines_command_in_repo(
+        repo_root,
+        "jj_main_commit",
+        "jj",
+        [
+            "--repository",
+            repo_root_str.as_str(),
+            "log",
+            "-r",
+            "main",
+            "--no-graph",
+            "-T",
+            "commit_id ++ \"\\n\"",
+        ],
+    )?;
+    let conflict_flag_result = run_lines_command_in_repo(
+        repo_root,
+        "jj_conflict_flag",
+        "jj",
+        [
+            "--repository",
+            repo_root_str.as_str(),
+            "log",
+            "-r",
+            "@",
+            "--no-graph",
+            "-T",
+            "conflict ++ \"\\n\"",
+        ],
+    )?;
+
+    let current_commit = first_output_line(&current_commit_result);
+    let parent_commits = lines_output(&parent_commits_result);
+    let main_commit = first_output_line(&main_commit_result);
+    let conflicted = first_output_line(&conflict_flag_result).as_deref() == Some("true");
+    let conflict_paths_result = if conflicted {
+        run_lines_command_in_repo(
+            repo_root,
+            "jj_conflict_paths",
+            "jj",
+            [
+                "--repository",
+                repo_root_str.as_str(),
+                "resolve",
+                "--list",
+                "-r",
+                "@",
+            ],
+        )?
+    } else {
+        render_lines_result("jj_conflict_paths", 0, "")
+    };
+    let conflict_paths = lines_output(&conflict_paths_result);
+    let dirty_tree = dirty_tree_projection(repo_root);
+    let drifted = match main_commit.as_ref() {
+        Some(main_commit) if !main_commit.is_empty() => {
+            !parent_commits.iter().any(|parent| parent == main_commit)
+        }
+        _ => false,
+    };
+    let status = if conflicted && drifted {
+        "drifted_conflicted"
+    } else if conflicted {
+        "conflicted"
+    } else if drifted {
+        "drifted"
+    } else {
+        "in_sync"
+    };
+
+    Ok(json!({
+        "workspace_name": "default",
+        "workspace_path": repo_root.to_string_lossy().into_owned(),
+        "current_commit": current_commit,
+        "parent_commits": parent_commits,
+        "main_commit": main_commit,
+        "dirty_tree": dirty_tree,
+        "conflicted": conflicted,
+        "conflict_paths": conflict_paths,
+        "drifted": drifted,
+        "needs_repair": conflicted || drifted,
+        "status": status,
+        "repair_command": format!(
+            "tuskd repair-coordinator --repo {} --target-rev main",
+            repo_root.to_string_lossy()
+        ),
+        "checks": {
+            "current_commit": current_commit_result,
+            "parent_commits": parent_commits_result,
+            "main_commit": main_commit_result,
+            "conflict_flag": conflict_flag_result,
+            "conflict_paths": conflict_paths_result,
+        },
+    }))
+}
+
 fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<Value, String> {
     let status = status_projection(repo_root, socket_path)?;
     let board = board_status_projection(repo_root, socket_path)?;
@@ -1653,6 +1802,7 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let coordinator = board.get("coordinator").cloned().unwrap_or(Value::Null);
     let receipt_rows = receipts
         .get("receipts")
         .and_then(Value::as_array)
@@ -1791,10 +1941,30 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
             "message": "lane workspace is missing from disk",
         }));
     }
+    if coordinator.get("drifted").and_then(Value::as_bool) == Some(true) {
+        obstructions.push(json!({
+            "kind": "coordinator_drift",
+            "workspace_path": coordinator.get("workspace_path").cloned().unwrap_or(Value::Null),
+            "main_commit": coordinator.get("main_commit").cloned().unwrap_or(Value::Null),
+            "message": "the default coordinator workspace is still based on an older main",
+            "command": coordinator.get("repair_command").cloned().unwrap_or(Value::Null),
+        }));
+    }
+    if coordinator.get("conflicted").and_then(Value::as_bool) == Some(true) {
+        obstructions.push(json!({
+            "kind": "coordinator_conflict",
+            "workspace_path": coordinator.get("workspace_path").cloned().unwrap_or(Value::Null),
+            "conflict_paths": coordinator.get("conflict_paths").cloned().unwrap_or_else(|| json!([])),
+            "message": "the default coordinator workspace has unresolved conflicts",
+            "command": coordinator.get("repair_command").cloned().unwrap_or(Value::Null),
+        }));
+    }
 
     let runtime_unhealthy = obstructions
         .iter()
         .any(|value| value.get("kind").and_then(Value::as_str) == Some("runtime_unhealthy"));
+    let coordinator_needs_repair =
+        coordinator.get("needs_repair").and_then(Value::as_bool) == Some(true);
 
     let actionable_claimed = claimed_details
         .iter()
@@ -1818,6 +1988,18 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
             "rationale": [
                 "Tracker or backend health is not currently healthy.",
                 "Repairing runtime health restores accurate board and lane state."
+            ],
+            "dependencies": [],
+            "dependents": [],
+        }))
+    } else if coordinator_needs_repair {
+        Some(json!({
+            "kind": "repair_coordinator",
+            "message": "Rebase the default coordinator workspace onto current main before moving other work.",
+            "command": coordinator.get("repair_command").cloned().unwrap_or(Value::Null),
+            "rationale": [
+                "The exported main line moved, but the default working-copy change is still based on an older parent.",
+                "Repairing coordinator drift keeps the local checkout aligned with the landed line without discarding local edits."
             ],
             "dependencies": [],
             "dependents": [],
@@ -1993,6 +2175,9 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
 
     let summary = if runtime_unhealthy {
         "Runtime is unhealthy. Repair the service before trusting queue state.".to_owned()
+    } else if coordinator_needs_repair {
+        "Coordinator checkout drifted from landed main. Repair it before trusting local repo state."
+            .to_owned()
     } else {
         format!(
             "Runtime is {}. {} active lane(s), {} claimed issue(s), {} ready issue(s), {} blocked issue(s).",
@@ -2035,6 +2220,12 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
         briefing_narrative.insert(
             0,
             "The runtime must be healthy before the operator view can be trusted.".to_owned(),
+        );
+    } else if coordinator_needs_repair {
+        briefing_narrative.insert(
+            0,
+            "The default coordinator checkout must be rebased onto landed main before local state is trustworthy."
+                .to_owned(),
         );
     } else if active_lanes.is_empty() && !claimed_issues.is_empty() {
         briefing_narrative.insert(
@@ -2122,6 +2313,7 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
             "service": status.get("tuskd").cloned().unwrap_or(Value::Null),
             "backend_endpoint": status.get("backend_endpoint").cloned().unwrap_or(Value::Null),
             "dirty_tree": dirty_tree,
+            "coordinator": coordinator,
             "summary": status.get("summary").cloned().unwrap_or(Value::Null),
             "workspaces": workspace_rows,
             "counts": {
@@ -2210,6 +2402,7 @@ fn board_status_projection(repo_root: &Path, socket_path: &Path) -> Result<Value
         .filter(|value| value.is_array())
         .cloned()
         .unwrap_or_else(|| json!([]));
+    let coordinator = coordinator_status_projection(repo_root)?;
     let latest_self_host_run = latest_receipt_by_kind(repo_root, "self_host.run");
 
     Ok(json!({
@@ -2221,6 +2414,7 @@ fn board_status_projection(repo_root: &Path, socket_path: &Path) -> Result<Value
         "blocked_issues": blocked_issues,
         "deferred_issues": deferred_issues,
         "lanes": lanes,
+        "coordinator": coordinator,
         "workspaces": workspaces,
         "automation": {
             "latest_self_host_run": if latest_self_host_run.is_null() {
@@ -2407,6 +2601,7 @@ fn read_payload_for_kind(
 ) -> Result<Option<Value>, String> {
     match kind {
         "tracker_status" => Ok(Some(status_projection(repo_root, socket_path)?)),
+        "coordinator_status" => Ok(Some(coordinator_status_projection(repo_root)?)),
         "operator_snapshot" => Ok(Some(operator_snapshot_projection(repo_root, socket_path)?)),
         "board_status" => Ok(Some(board_status_projection(repo_root, socket_path)?)),
         "receipts_status" => Ok(Some(receipts_status_projection(repo_root)?)),
@@ -4538,6 +4733,39 @@ fn run_status(args: &[String]) -> ExitCode {
     }
 }
 
+fn print_coordinator_status_help() {
+    println!("Usage:\n  tuskd-core coordinator-status --repo PATH");
+}
+
+fn run_coordinator_status(args: &[String]) -> ExitCode {
+    let parsed = match parse_projection_args(args, "coordinator-status") {
+        Ok(parsed) => parsed,
+        Err(message) if message == "USAGE" => {
+            print_coordinator_status_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => return fail(&message),
+    };
+
+    match coordinator_status_projection(&parsed.repo_root) {
+        Ok(record) => {
+            match serde_json::to_string(&record) {
+                Ok(text) => println!("{text}"),
+                Err(err) => {
+                    return fail(&format!("failed to encode coordinator projection: {err}"));
+                }
+            }
+
+            if record.get("needs_repair").and_then(Value::as_bool) == Some(true) {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(message) => fail(&message),
+    }
+}
+
 fn print_board_status_help() {
     println!("Usage:\n  tuskd-core board-status --repo PATH [--socket PATH]");
 }
@@ -5137,6 +5365,7 @@ fn main() -> ExitCode {
         },
         Some("ensure") => run_ensure(&args[1..]),
         Some("status") => run_status(&args[1..]),
+        Some("coordinator-status") => run_coordinator_status(&args[1..]),
         Some("operator-snapshot") => run_operator_snapshot(&args[1..]),
         Some("board-status") => run_board_status(&args[1..]),
         Some("receipts-status") => run_receipts_status(&args[1..]),
