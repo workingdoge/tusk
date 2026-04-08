@@ -1,0 +1,18 @@
+[package]
+name = "radicle-flake-wasm-resolver"
+description = "Prototype resolver from rad: ids to lockable git fetch metadata"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "radicle-flake-wasm-resolver"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

@@ -70,6 +70,54 @@
         extensions = [ "rust-src" ];
       };
       craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+      radicleWasmToolchain = pkgs.rust-bin.stable.latest.default.override {
+        extensions = [ "rust-src" ];
+        targets = [ "wasm32-wasip1" ];
+      };
+      radicleWasmCraneLib = (crane.mkLib pkgs).overrideToolchain radicleWasmToolchain;
+      radicleFlakeWasmSrc = radicleWasmCraneLib.cleanCargoSource ./tools/radicle-flake-wasm;
+      radicleFlakeWasmCommonArgs = {
+        pname = "radicle-flake-wasm-resolver";
+        src = radicleFlakeWasmSrc;
+        strictDeps = true;
+        version = "0.1.0";
+        cargoExtraArgs = "-p radicle-flake-wasm-resolver";
+      };
+      radicleFlakeWasmCargoArtifacts = radicleWasmCraneLib.buildDepsOnly radicleFlakeWasmCommonArgs;
+      radicleFlakeWasmResolverRawPackage = radicleWasmCraneLib.buildPackage (
+        radicleFlakeWasmCommonArgs
+        // {
+          cargoArtifacts = radicleFlakeWasmCargoArtifacts;
+        }
+      );
+      radicleFlakeWasmResolverPackage = pkgs.symlinkJoin {
+        name = "radicle-flake-wasm-resolver";
+        paths = [ radicleFlakeWasmResolverRawPackage ];
+        nativeBuildInputs = [ pkgs.makeWrapper ];
+        postBuild = ''
+          wrapProgram "$out/bin/radicle-flake-wasm-resolver" \
+            --prefix PATH : ${nixpkgs.lib.makeBinPath [ pkgs.git ]}
+        '';
+      };
+      radicleFlakeWasmWasiArgs = radicleFlakeWasmCommonArgs // {
+        cargoExtraArgs = "-p radicle-flake-wasm-resolver --target wasm32-wasip1";
+      };
+      radicleFlakeWasmWasiCargoArtifacts = radicleWasmCraneLib.buildDepsOnly radicleFlakeWasmWasiArgs;
+      radicleFlakeWasmResolverWasiCheck = radicleWasmCraneLib.buildPackage (
+        radicleFlakeWasmWasiArgs
+        // {
+          cargoArtifacts = radicleFlakeWasmWasiCargoArtifacts;
+          doCheck = false;
+          nativeBuildInputs = [ pkgs.wasm-tools ];
+          installPhase = ''
+            wasm_path="target/wasm32-wasip1/release/radicle-flake-wasm-resolver.wasm"
+            test -f "$wasm_path"
+            wasm-tools validate "$wasm_path"
+            mkdir -p "$out/share/wasm"
+            cp "$wasm_path" "$out/share/wasm/"
+          '';
+        }
+      );
       tuskClean = pkgs.writeShellApplication {
         name = "tusk-clean";
         runtimeInputs = [
@@ -241,27 +289,26 @@
             {
               tusk.scratch.enable = mkDefault true;
 
-              packages =
-                [
-                  consumerBeads
-                  pkgs.deadnix
-                  pkgs.direnv
-                  pkgs.dolt
-                  pkgs.git
-                  pkgs.jujutsu
-                  pkgs.jq
-                  pkgs.nil
-                  pkgs.nix-output-monitor
-                  pkgs.nix-tree
-                  pkgs.nixd
-                  pkgs.nixfmt
-                  pkgs.ripgrep
-                  pkgs.statix
-                  repoCodex
-                  tuskClean
-                ]
-                ++ optional cfg.smokeCheck.enable codexNixCheck
-                ++ cfg.extraPackages;
+              packages = [
+                consumerBeads
+                pkgs.deadnix
+                pkgs.direnv
+                pkgs.dolt
+                pkgs.git
+                pkgs.jujutsu
+                pkgs.jq
+                pkgs.nil
+                pkgs.nix-output-monitor
+                pkgs.nix-tree
+                pkgs.nixd
+                pkgs.nixfmt
+                pkgs.ripgrep
+                pkgs.statix
+                repoCodex
+                tuskClean
+              ]
+              ++ optional cfg.smokeCheck.enable codexNixCheck
+              ++ cfg.extraPackages;
 
               enterShell = ''
                 source ${./scripts/tusk-paths.sh}
@@ -425,17 +472,6 @@
           exec bash ${./scripts/tusk-flake-ref.sh} "$@"
         '';
       };
-      tuskRadiclePackage = pkgs.writeShellApplication {
-        name = "tusk-radicle";
-        runtimeInputs = [
-          pkgs.git
-          pkgs.radicle-node
-        ];
-        text = ''
-          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
-          exec bash ${./scripts/tusk-radicle.sh} "$@"
-        '';
-      };
       tuskUiSrc = craneLib.cleanCargoSource ./crates/tusk-ui;
       tuskUiCommonArgs = {
         src = tuskUiSrc;
@@ -511,7 +547,6 @@
           pkgs.rust-analyzer
           tuskClean
           tuskFlakeRefPackage
-          tuskRadiclePackage
           tuskSkillContractCheck
           tuskTrackerPackage
           tuskdTransitionTestsPackage
@@ -698,6 +733,9 @@
       };
       flakeModules.tusk = tuskFlakeModule;
       flakeModules.default = tuskFlakeModule;
+      checks.${system} = {
+        radicle-flake-wasm-resolver-wasi = radicleFlakeWasmResolverWasiCheck;
+      };
       packages.${system} = {
         rust-toolchain = rustToolchain;
         bd = repoBeads;
@@ -705,9 +743,9 @@
         tusk-codex = repoTuskCodex;
         tusk-skill-contract-check = tuskSkillContractCheck;
         tusk-skill-loop = tuskSkillLoopPackage;
+        radicle-flake-wasm-resolver = radicleFlakeWasmResolverPackage;
         tusk-clean = tuskClean;
         tusk-flake-ref = tuskFlakeRefPackage;
-        tusk-radicle = tuskRadiclePackage;
         tusk-tracker = tuskTrackerPackage;
         tuskd-core = tuskdCorePackage;
         tuskd-transition-tests = tuskdTransitionTestsPackage;
@@ -744,6 +782,10 @@
           type = "app";
           program = "${tuskSkillLoopPackage}/bin/tusk-skill-loop";
         };
+        radicle-flake-wasm-resolver = {
+          type = "app";
+          program = "${radicleFlakeWasmResolverPackage}/bin/radicle-flake-wasm-resolver";
+        };
         install-tusk-openai-skill = {
           type = "app";
           program = "${installTuskOpenaiSkill}/bin/install-tusk-openai-skill";
@@ -755,10 +797,6 @@
         tusk-flake-ref = {
           type = "app";
           program = "${tuskFlakeRefPackage}/bin/tusk-flake-ref";
-        };
-        tusk-radicle = {
-          type = "app";
-          program = "${tuskRadiclePackage}/bin/tusk-radicle";
         };
         tuskd = {
           type = "app";
