@@ -595,6 +595,95 @@ test_compact_lane_quarantine() {
   note "compact-quarantine: ok"
 }
 
+test_complete_lane() {
+  local repo_root="$1"
+  local base_rev="$2"
+  local issue_id=""
+  local claim_json=""
+  local claim_status=0
+  local launch_json=""
+  local launch_status=0
+  local workspace_path=""
+  local landed_revision=""
+  local plan_json=""
+  local plan_status=0
+  local complete_json=""
+  local complete_status=0
+  local status_json=""
+  local status_exit=0
+  local show_json=""
+  local show_status=0
+  local git_main_commit=""
+
+  note "complete-lane: begin"
+  issue_id="$(create_issue "${repo_root}" "transition complete lane probe")"
+
+  run_cli_json claim_json claim_status \
+    tuskd claim-issue --repo "${repo_root}" --issue-id "${issue_id}"
+  assert_status "${claim_status}" "0" "claim complete lane issue"
+
+  run_cli_json launch_json launch_status \
+    tuskd launch-lane --repo "${repo_root}" --issue-id "${issue_id}" --base-rev "${base_rev}" --slug complete-lane-probe
+  assert_status "${launch_status}" "0" "launch complete lane"
+
+  workspace_path="$(jq -r '.workspace_path // ""' <<<"${launch_json}")"
+  [ -n "${workspace_path}" ] || fail "complete lane output missing workspace_path"$'\n'"${launch_json}"
+
+  printf 'complete lane landed probe\n' > "${workspace_path}/complete-lane-probe.txt"
+  jj --repository "${workspace_path}" commit -m "complete lane landed probe" >/dev/null
+  landed_revision="$(resolve_revision "${workspace_path}" "@-")"
+
+  run_cli_json plan_json plan_status \
+    tuskd complete-lane \
+      --repo "${repo_root}" \
+      --issue-id "${issue_id}" \
+      --revision "${landed_revision}" \
+      --reason "complete lane test completed" \
+      --note "complete lane probe" \
+      --plan
+  assert_status "${plan_status}" "0" "complete-lane plan"
+  assert_json_value "${plan_json}" '.status' "plan" "complete-lane plan status"
+  assert_json_value "${plan_json}" '.revision' "${landed_revision}" "complete-lane plan revision"
+
+  run_cli_json complete_json complete_status \
+    tuskd complete-lane \
+      --repo "${repo_root}" \
+      --issue-id "${issue_id}" \
+      --revision "${landed_revision}" \
+      --reason "complete lane test completed" \
+      --note "complete lane probe"
+  assert_status "${complete_status}" "0" "complete-lane run"
+  assert_json_value "${complete_json}" '.status' "completed" "complete-lane result"
+  assert_json_value "${complete_json}" '.land.status' "landed_repaired" "complete-lane landing result"
+  assert_json_value "${complete_json}" '.land.receipt.kind' "land.main" "complete-lane landing receipt"
+  assert_json_value "${complete_json}" '.cleanup.effective_mode' "remove" "complete-lane cleanup mode"
+  assert_json_value "${complete_json}" '.close.issue.status' "closed" "complete-lane closed issue"
+
+  assert_file_missing "${workspace_path}" "complete-lane removed workspace"
+  [ "$(lane_count "${repo_root}" "${issue_id}")" = "0" ] || fail "complete-lane left lane state behind for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.handoff")" = "1" ] || fail "complete-lane lane.handoff receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.finish")" = "1" ] || fail "complete-lane lane.finish receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.complete")" = "1" ] || fail "complete-lane lane.complete receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.archive")" = "1" ] || fail "complete-lane lane.archive receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "issue.close")" = "1" ] || fail "complete-lane issue.close receipt count mismatch for ${issue_id}"
+
+  run_cli_json status_json status_exit \
+    tuskd coordinator-status --repo "${repo_root}"
+  assert_status "${status_exit}" "0" "coordinator-status after complete-lane"
+  assert_json_value "${status_json}" '.status' "in_sync" "coordinator-status after complete-lane state"
+  assert_json_value "${status_json}" '.parent_commits[0]' "${landed_revision}" "coordinator-status after complete-lane parent"
+
+  git_main_commit="$(git -C "${repo_root}" rev-parse --verify refs/heads/main)"
+  [ "${git_main_commit}" = "${landed_revision}" ] || fail "complete-lane left git main at ${git_main_commit}, expected ${landed_revision}"
+
+  run_cli_json show_json show_status \
+    bd show "${issue_id}" --json
+  assert_status "${show_status}" "0" "bd show after complete-lane"
+  assert_json_value "${show_json}" '.[0].status' "closed" "complete-lane issue status"
+
+  note "complete-lane: ok"
+}
+
 test_coordinator_repair() {
   local repo_root="$1"
   local base_rev="$2"
@@ -732,6 +821,7 @@ run_inner_tests() {
   test_compact_lane_quarantine "${repo_root}" "${base_rev}"
   test_coordinator_repair "${repo_root}" "${base_rev}"
   test_land_main "${repo_root}"
+  test_complete_lane "${repo_root}" "${base_rev}"
 
   note "all transition tests passed"
 }

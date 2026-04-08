@@ -25,6 +25,7 @@ Usage:
   tuskd handoff-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --revision REV [--note TEXT]
   tuskd finish-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --outcome OUTCOME [--note TEXT]
   tuskd archive-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID [--note TEXT]
+  tuskd complete-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON [--revision REV] [--outcome OUTCOME] [--note TEXT] [--quarantine] [--plan]
   tuskd compact-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON [--revision REV] [--outcome OUTCOME] [--note TEXT] [--quarantine]
   tuskd serve [--repo PATH] [--socket PATH]
   tuskd query [--repo PATH] [--socket PATH] --kind KIND [--request-id ID] [--payload JSON]
@@ -46,6 +47,7 @@ Commands:
   handoff-lane  Record a lane handoff with an explicit revision.
   finish-lane   Record a terminal lane outcome without collapsing into issue closure.
   archive-lane  Remove one finished lane from live state once its workspace is gone.
+  complete-lane Complete one live lane through handoff, finish, landing, cleanup, archive, and close.
   compact-lane  Compact one live lane through handoff, finish, workspace cleanup, archive, and close.
   serve         Serve the local JSON protocol over a Unix socket.
   query         Query one tuskd protocol request; read kinds are handled locally, actions still require a live socket.
@@ -4258,6 +4260,320 @@ cmd_archive_lane() {
   cmd_transition_action "${repo_root}" "${socket_path}" "archive_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg note "${note}" '{issue_id:$issue_id, note:$note}')"
 }
 
+complete_lane_action() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local revision="$4"
+  local reason="$5"
+  local outcome="${6:-completed}"
+  local note="${7:-}"
+  local quarantine_requested="${8:-false}"
+  local plan_only="${9:-false}"
+  local lane_json="null"
+  local lane_status=""
+  local workspace_name=""
+  local workspace_path=""
+  local resolved_revision=""
+  local cleanup_mode="remove"
+  local cleanup_command=""
+  local handoff_result='{"ok":true,"payload":null}'
+  local finish_result='{"ok":true,"payload":null}'
+  local land_result='{"ok":true,"payload":null}'
+  local cleanup_result='{"ok":true,"payload":null}'
+  local archive_result='{"ok":true,"payload":null}'
+  local close_result='{"ok":true,"payload":null}'
+  local receipt_payload=""
+  local receipt_json=""
+
+  if [ -z "${issue_id}" ]; then
+    jq -cn '{ok:false, error:{message:"complete_lane requires issue_id"}}'
+    return 0
+  fi
+
+  if [ -z "${reason}" ]; then
+    jq -cn --arg issue_id "${issue_id}" '{ok:false, error:{message:"complete_lane requires reason"}, issue_id:$issue_id}'
+    return 0
+  fi
+
+  ensure_state_files "${repo_root}"
+  lane_json="$(current_lane_for_issue "${repo_root}" "${issue_id}")"
+  if [ "${lane_json}" = "null" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"complete_lane requires an existing lane record"}}'
+    return 0
+  fi
+
+  lane_status="$(jq -r '.status // ""' <<<"${lane_json}")"
+  workspace_name="$(jq -r '.workspace_name // ""' <<<"${lane_json}")"
+  workspace_path="$(jq -r '.workspace_path // ""' <<<"${lane_json}")"
+  resolved_revision="${revision}"
+  if [ -z "${resolved_revision}" ]; then
+    resolved_revision="$(jq -r '.handoff_revision // ""' <<<"${lane_json}")"
+  fi
+  if [ "${quarantine_requested}" = "true" ]; then
+    cleanup_mode="quarantine"
+  fi
+  if [ "${cleanup_mode}" = "quarantine" ]; then
+    cleanup_command="forget lane workspace registration and quarantine the workspace directory"
+  else
+    cleanup_command="forget lane workspace registration and remove the workspace directory"
+  fi
+
+  case "${lane_status}" in
+    launched)
+      if [ -z "${resolved_revision}" ]; then
+        jq -cn \
+          --arg issue_id "${issue_id}" \
+          --arg status "${lane_status}" \
+          '{ok:false, issue_id:$issue_id, status:$status, error:{message:"complete_lane requires --revision before a launched lane can be completed"}}'
+        return 0
+      fi
+      ;;
+    handed_off|finished)
+      if [ -z "${resolved_revision}" ]; then
+        jq -cn \
+          --arg issue_id "${issue_id}" \
+          --arg status "${lane_status}" \
+          '{ok:false, issue_id:$issue_id, status:$status, error:{message:"complete_lane requires a resolved revision from --revision or prior handoff"}}'
+        return 0
+      fi
+      ;;
+    *)
+      jq -cn \
+        --arg issue_id "${issue_id}" \
+        --arg status "${lane_status}" \
+        '{ok:false, issue_id:$issue_id, status:$status, error:{message:"complete_lane requires a launched, handed_off, or finished lane"}}'
+      return 0
+      ;;
+  esac
+
+  if [ "${plan_only}" = "true" ]; then
+    jq -cn \
+      --arg repo_root "${repo_root}" \
+      --arg issue_id "${issue_id}" \
+      --arg from_status "${lane_status}" \
+      --arg revision "${resolved_revision}" \
+      --arg reason "${reason}" \
+      --arg outcome "${outcome}" \
+      --arg note "${note}" \
+      --arg workspace_name "${workspace_name}" \
+      --arg workspace_path "${workspace_path}" \
+      --arg cleanup_mode "${cleanup_mode}" \
+      --arg cleanup_command "${cleanup_command}" \
+      --argjson lane "${lane_json}" \
+      --argjson quarantine_requested "$(json_bool "${quarantine_requested}")" \
+      '{
+        ok: true,
+        payload: {
+          repo_root: $repo_root,
+          issue_id: $issue_id,
+          from_status: $from_status,
+          revision: $revision,
+          reason: $reason,
+          outcome: $outcome,
+          note: (if ($note | length) > 0 then $note else null end),
+          status: "plan",
+          lane: $lane,
+          workspace: {
+            name: $workspace_name,
+            path: $workspace_path
+          },
+          cleanup: {
+            mode: $cleanup_mode,
+            quarantine_requested: $quarantine_requested,
+            command: $cleanup_command
+          },
+          commands: (
+            (if $from_status == "launched" then [
+              ("tuskd handoff-lane --repo " + $repo_root + " --issue-id " + $issue_id + " --revision " + $revision),
+              ("tuskd finish-lane --repo " + $repo_root + " --issue-id " + $issue_id + " --outcome " + $outcome)
+            ] elif $from_status == "handed_off" then [
+              ("tuskd finish-lane --repo " + $repo_root + " --issue-id " + $issue_id + " --outcome " + $outcome)
+            ] else [] end)
+            + [
+              ("tuskd land-main --repo " + $repo_root + " --revision " + $revision),
+              $cleanup_command,
+              ("tuskd archive-lane --repo " + $repo_root + " --issue-id " + $issue_id),
+              ("tuskd close-issue --repo " + $repo_root + " --issue-id " + $issue_id + " --reason " + $reason)
+            ]
+          )
+        }
+      }'
+    return 0
+  fi
+
+  case "${lane_status}" in
+    launched)
+      handoff_result="$(run_transition_action "${repo_root}" "${socket_path}" "handoff_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg revision "${resolved_revision}" --arg note "${note}" '{issue_id:$issue_id, revision:$revision, note:$note}')")"
+      if ! jq -e '.ok == true' >/dev/null <<<"${handoff_result}"; then
+        jq -cn \
+          --arg issue_id "${issue_id}" \
+          --arg status "${lane_status}" \
+          --argjson details "${handoff_result}" \
+          '{ok:false, issue_id:$issue_id, status:$status, error:{message:"complete_lane failed during handoff_lane", details:$details}}'
+        return 0
+      fi
+      finish_result="$(run_transition_action "${repo_root}" "${socket_path}" "finish_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg outcome "${outcome}" --arg note "${note}" '{issue_id:$issue_id, outcome:$outcome, note:$note}')")"
+      if ! jq -e '.ok == true' >/dev/null <<<"${finish_result}"; then
+        jq -cn \
+          --arg issue_id "${issue_id}" \
+          --arg status "${lane_status}" \
+          --argjson details "${finish_result}" \
+          '{ok:false, issue_id:$issue_id, status:$status, error:{message:"complete_lane failed during finish_lane", details:$details}}'
+        return 0
+      fi
+      ;;
+    handed_off)
+      finish_result="$(run_transition_action "${repo_root}" "${socket_path}" "finish_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg outcome "${outcome}" --arg note "${note}" '{issue_id:$issue_id, outcome:$outcome, note:$note}')")"
+      if ! jq -e '.ok == true' >/dev/null <<<"${finish_result}"; then
+        jq -cn \
+          --arg issue_id "${issue_id}" \
+          --arg status "${lane_status}" \
+          --argjson details "${finish_result}" \
+          '{ok:false, issue_id:$issue_id, status:$status, error:{message:"complete_lane failed during finish_lane", details:$details}}'
+        return 0
+      fi
+      ;;
+    finished)
+      ;;
+  esac
+
+  if ! land_result="$(cmd_land_main "${repo_root}" "${resolved_revision}" "${note}" "false")"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg status "${lane_status}" \
+      --argjson details "${land_result}" \
+      '{ok:false, issue_id:$issue_id, status:$status, error:{message:"complete_lane failed during land-main", details:$details}}'
+    return 1
+  fi
+
+  cleanup_result="$(compact_lane_workspace "${repo_root}" "${issue_id}" "${workspace_name}" "${workspace_path}" "${quarantine_requested}")"
+  if ! jq -e '.ok == true' >/dev/null <<<"${cleanup_result}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg status "${lane_status}" \
+      --argjson details "${cleanup_result}" \
+      '{ok:false, issue_id:$issue_id, status:$status, error:{message:"complete_lane failed during workspace cleanup", details:$details}}'
+    return 0
+  fi
+
+  archive_result="$(run_transition_action "${repo_root}" "${socket_path}" "archive_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg note "${note}" '{issue_id:$issue_id, note:$note}')")"
+  if ! jq -e '.ok == true' >/dev/null <<<"${archive_result}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg status "${lane_status}" \
+      --argjson details "${archive_result}" \
+      '{ok:false, issue_id:$issue_id, status:$status, error:{message:"complete_lane failed during archive_lane", details:$details}}'
+    return 0
+  fi
+
+  close_result="$(run_transition_action "${repo_root}" "${socket_path}" "close_issue" "$(jq -cn --arg issue_id "${issue_id}" --arg reason "${reason}" '{issue_id:$issue_id, reason:$reason}')")"
+  if ! jq -e '.ok == true' >/dev/null <<<"${close_result}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg status "${lane_status}" \
+      --argjson details "${close_result}" \
+      '{ok:false, issue_id:$issue_id, status:$status, error:{message:"complete_lane failed during close_issue", details:$details}}'
+    return 0
+  fi
+
+  receipt_payload="$(jq -cn \
+    --arg issue_id "${issue_id}" \
+    --arg from_status "${lane_status}" \
+    --arg reason "${reason}" \
+    --arg outcome "${outcome}" \
+    --arg revision "${resolved_revision}" \
+    --arg note "${note}" \
+    --argjson handoff "$(jq -c '.payload' <<<"${handoff_result}")" \
+    --argjson finish "$(jq -c '.payload' <<<"${finish_result}")" \
+    --argjson land "$(jq -c '.payload' <<<"${land_result}")" \
+    --argjson cleanup "${cleanup_result}" \
+    --argjson archive "$(jq -c '.payload' <<<"${archive_result}")" \
+    --argjson close "$(jq -c '.payload' <<<"${close_result}")" \
+    '{
+      issue_id: $issue_id,
+      from_status: $from_status,
+      reason: $reason,
+      outcome: $outcome,
+      revision: $revision,
+      note: (if ($note | length) > 0 then $note else null end),
+      handoff: $handoff,
+      finish: $finish,
+      land: $land,
+      cleanup: $cleanup,
+      archive: $archive,
+      close: $close
+    }')"
+  if ! receipt_json="$(append_receipt_capture "${repo_root}" "lane.complete" "${receipt_payload}")"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg status "${lane_status}" \
+      --arg revision "${resolved_revision}" \
+      --arg reason "${reason}" \
+      --arg outcome "${outcome}" \
+      --arg note "${note}" \
+      --argjson land "$(jq -c '.payload' <<<"${land_result}")" \
+      --argjson cleanup "${cleanup_result}" \
+      --argjson archive "$(jq -c '.payload' <<<"${archive_result}")" \
+      --argjson close "$(jq -c '.payload' <<<"${close_result}")" \
+      '{
+        ok: false,
+        error: {
+          message: "complete_lane failed to append lane.complete receipt"
+        },
+        payload: {
+          issue_id: $issue_id,
+          status: $status,
+          revision: $revision,
+          reason: $reason,
+          outcome: $outcome,
+          note: (if ($note | length) > 0 then $note else null end),
+          land: $land,
+          cleanup: $cleanup,
+          archive: $archive,
+          close: $close
+        }
+      }'
+    return 1
+  fi
+
+  jq -cn \
+    --arg issue_id "${issue_id}" \
+    --arg from_status "${lane_status}" \
+    --arg reason "${reason}" \
+    --arg outcome "${outcome}" \
+    --arg revision "${resolved_revision}" \
+    --arg note "${note}" \
+    --argjson handoff "$(jq -c '.payload' <<<"${handoff_result}")" \
+    --argjson finish "$(jq -c '.payload' <<<"${finish_result}")" \
+    --argjson land "$(jq -c '.payload' <<<"${land_result}")" \
+    --argjson cleanup "${cleanup_result}" \
+    --argjson archive "$(jq -c '.payload' <<<"${archive_result}")" \
+    --argjson close "$(jq -c '.payload' <<<"${close_result}")" \
+    --argjson receipt "${receipt_json}" \
+    '{
+      ok: true,
+      payload: {
+        issue_id: $issue_id,
+        from_status: $from_status,
+        reason: $reason,
+        outcome: $outcome,
+        revision: $revision,
+        note: (if ($note | length) > 0 then $note else null end),
+        status: "completed",
+        handoff: $handoff,
+        finish: $finish,
+        land: $land,
+        cleanup: $cleanup,
+        archive: $archive,
+        close: $close,
+        receipt: $receipt
+      }
+    }'
+}
+
 compact_lane_action() {
   local repo_root="$1"
   local socket_path="$2"
@@ -4428,6 +4744,28 @@ cmd_compact_lane() {
   fi
 
   jq -c '.' <<<"${compact_result}"
+  return 1
+}
+
+cmd_complete_lane() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local revision="$4"
+  local reason="$5"
+  local outcome="${6:-completed}"
+  local note="${7:-}"
+  local quarantine_requested="${8:-false}"
+  local plan_only="${9:-false}"
+  local complete_result=""
+
+  complete_result="$(complete_lane_action "${repo_root}" "${socket_path}" "${issue_id}" "${revision}" "${reason}" "${outcome}" "${note}" "${quarantine_requested}" "${plan_only}")"
+  if jq -e '.ok == true' >/dev/null <<<"${complete_result}"; then
+    jq -c '.payload' <<<"${complete_result}"
+    return 0
+  fi
+
+  jq -c '.' <<<"${complete_result}"
   return 1
 }
 
@@ -4674,6 +5012,11 @@ case "${command}" in
   archive-lane)
     [ -n "${issue_id_arg}" ] || fail "archive-lane requires --issue-id"
     cmd_archive_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${note_arg}"
+    ;;
+  complete-lane)
+    [ -n "${issue_id_arg}" ] || fail "complete-lane requires --issue-id"
+    [ -n "${reason_arg}" ] || fail "complete-lane requires --reason"
+    cmd_complete_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${revision_arg}" "${reason_arg}" "${outcome_arg:-completed}" "${note_arg}" "${quarantine_arg}" "${plan_arg:-false}"
     ;;
   compact-lane)
     [ -n "${issue_id_arg}" ] || fail "compact-lane requires --issue-id"
