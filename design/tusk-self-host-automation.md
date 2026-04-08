@@ -55,6 +55,18 @@ The latest self-host run is visible through:
 - `tuskd receipts-status`
 - `tuskd board-status`
 
+The first worker-dispatch seam is now:
+
+- command: `tuskd dispatch-lane`
+- public control-plane owner: `tuskd`
+- repo/runtime adapter: `tusk-codex`
+- first worker engine: `codex exec`
+
+The operator should not treat raw `codex exec` as the public automation API.
+`tuskd dispatch-lane` owns the bounded lane contract, structured brief, prompt
+materialization, and the `lane.dispatch` receipt, while `tusk-codex` only
+adapts the active checkout and tracker roots for the worker process.
+
 `board-status` now carries the latest `self_host.run` summary so operators do
 not need a separate tool to see whether the fixed-point run last passed or
 failed.

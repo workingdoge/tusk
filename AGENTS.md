@@ -55,6 +55,7 @@ nix run .#tuskd-transition-tests -- --source-repo "$PWD"
 nix run .#tuskd -- claim-issue --repo "$PWD" --issue-id tusk-123
 nix run .#tuskd -- close-issue --repo "$PWD" --issue-id tusk-123 --reason "completed in visible commit"
 nix run .#tuskd -- launch-lane --repo "$PWD" --issue-id tusk-123 --base-rev main
+nix run .#tuskd -- dispatch-lane --repo "$PWD" --issue-id tusk-123 --plan
 nix run .#tuskd -- handoff-lane --repo "$PWD" --revision <rev> --note "ready for landing"
 nix run .#tuskd -- finish-lane --repo "$PWD" --issue-id tusk-123 --outcome completed --note "workspace cleaned after handoff"
 nix run .#tuskd -- archive-lane --repo "$PWD" --issue-id tusk-123 --note "lane compacted into receipts"

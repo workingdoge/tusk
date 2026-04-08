@@ -22,6 +22,7 @@ Usage:
   tuskd claim-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID
   tuskd close-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON
   tuskd launch-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --base-rev REV [--slug SLUG]
+  tuskd dispatch-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID [--worker WORKER] [--mode MODE] [--note TEXT] [--plan]
   tuskd handoff-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --revision REV [--note TEXT]
   tuskd finish-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --outcome OUTCOME [--note TEXT]
   tuskd archive-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID [--note TEXT]
@@ -44,6 +45,7 @@ Commands:
   claim-issue   Claim one issue through the coordinator action surface.
   close-issue   Close one issue through the coordinator action surface.
   launch-lane   Create one dedicated issue workspace through the coordinator action surface.
+  dispatch-lane Prepare or execute one bounded worker dispatch through the repo-aware codex adapter.
   handoff-lane  Record a lane handoff with an explicit revision.
   finish-lane   Record a terminal lane outcome without collapsing into issue closure.
   archive-lane  Remove one finished lane from live state once its workspace is gone.
@@ -122,6 +124,22 @@ summary_next_action() {
       ;;
     "launch_lane requires no existing live lane")
       printf 'finish or archive the existing live lane before launching another one for this issue'
+      ;;
+    "dispatch_lane requires an existing lane record")
+      printf 'launch a lane for %s before dispatching it' "${issue_id:-<issue>}"
+      ;;
+    "dispatch_lane requires a launched lane")
+      printf 'dispatch is only admitted before handoff or finish; pick a launched lane for %s' "${issue_id:-<issue>}"
+      ;;
+    "dispatch_lane requires a live workspace")
+      if [ -n "${workspace_path}" ]; then
+        printf 'restore or relaunch %s before dispatching the worker' "${workspace_path}"
+      else
+        printf 'restore or relaunch the lane workspace before dispatching the worker'
+      fi
+      ;;
+    "dispatch_lane only admits place:tusk task issues")
+      printf 'use the v1 autonomous dispatch class only for task issues labeled place:tusk'
       ;;
     "handoff_lane requires an existing lane record")
       printf 'launch a lane for %s before handing it off' "${issue_id:-<issue>}"
@@ -208,6 +226,28 @@ resolve_repo_root() {
 state_root() {
   local repo_root="$1"
   printf '%s/.beads/tuskd\n' "${repo_root}"
+}
+
+dispatch_state_root() {
+  local repo_root="$1"
+  printf '%s/dispatch\n' "$(state_root "${repo_root}")"
+}
+
+dispatch_prompt_path() {
+  local repo_root="$1"
+  local issue_id="$2"
+  printf '%s/%s.prompt.md\n' "$(dispatch_state_root "${repo_root}")" "${issue_id}"
+}
+
+dispatch_brief_path() {
+  local repo_root="$1"
+  local issue_id="$2"
+  printf '%s/%s.brief.json\n' "$(dispatch_state_root "${repo_root}")" "${issue_id}"
+}
+
+dispatch_last_message_path() {
+  local workspace_path="$1"
+  printf '%s/.codex-last.txt\n' "${workspace_path}"
 }
 
 service_path() {
@@ -864,6 +904,7 @@ ensure_state_files() {
 
   root="$(state_root "${repo_root}")"
   mkdir -p "${root}"
+  mkdir -p "$(dispatch_state_root "${repo_root}")"
 
   if [ ! -f "$(leases_path "${repo_root}")" ]; then
     printf '[]\n' >"$(leases_path "${repo_root}")"
@@ -1240,6 +1281,283 @@ issue_snapshot_from_result() {
     else null
     end
   ' <<<"${result_json}"
+}
+
+issue_has_label() {
+  local issue_json="$1"
+  local label="$2"
+
+  jq -e --arg label "${label}" '
+    (.labels // []) | index($label) != null
+  ' >/dev/null <<<"${issue_json}"
+}
+
+issue_verification_lines() {
+  local description="$1"
+  local lines=""
+
+  lines="$(
+    printf '%s\n' "${description}" | awk '
+      BEGIN { capture = 0 }
+      capture && /^[[:alpha:]][^:]*:$/ { exit }
+      capture && NF { print }
+      $0 == "Verification:" { capture = 1 }
+    '
+  )"
+
+  if [ -n "${lines}" ]; then
+    printf '%s\n' "${lines}" | jq -Rsc 'split("\n") | map(select(length > 0))'
+  else
+    printf '[]\n'
+  fi
+}
+
+dispatch_policy_class_id() {
+  printf 'tusk.low-risk.v1\n'
+}
+
+dispatch_worker_launcher() {
+  printf '%s\n' "${TUSKD_CODEX_LAUNCHER:-tusk-codex}"
+}
+
+dispatch_command_args_json() {
+  local launcher="$1"
+  local workspace_path="$2"
+  local repo_root="$3"
+  local output_path="$4"
+
+  jq -cn \
+    --arg launcher "${launcher}" \
+    --arg workspace_path "${workspace_path}" \
+    --arg repo_root "${repo_root}" \
+    --arg output_path "${output_path}" \
+    '[
+      $launcher,
+      "--checkout", $workspace_path,
+      "--tracker-root", $repo_root,
+      "--",
+      "exec",
+      "--full-auto",
+      "--add-dir", $repo_root,
+      "--output-last-message", $output_path,
+      "-"
+    ]'
+}
+
+dispatch_command_string() {
+  local args_json="$1"
+  local prompt_path="$2"
+
+  jq -r --arg prompt_path "${prompt_path}" '
+    (map(@sh) | join(" ")) + " < " + ($prompt_path | @sh)
+  ' <<<"${args_json}"
+}
+
+build_dispatch_brief() {
+  local repo_root="$1"
+  local issue_json="$2"
+  local lane_json="$3"
+  local worker="$4"
+  local mode="$5"
+  local note="${6:-}"
+  local prompt_path="$7"
+  local brief_path="$8"
+  local output_path="$9"
+  local launcher="${10}"
+  local verification_json=""
+  local command_args_json=""
+  local command_string=""
+
+  verification_json="$(issue_verification_lines "$(jq -r '.description // ""' <<<"${issue_json}")")"
+  command_args_json="$(dispatch_command_args_json "${launcher}" "$(jq -r '.workspace_path // ""' <<<"${lane_json}")" "${repo_root}" "${output_path}")"
+  command_string="$(dispatch_command_string "${command_args_json}" "${prompt_path}")"
+
+  jq -cn \
+    --arg repo_root "${repo_root}" \
+    --arg class_id "$(dispatch_policy_class_id)" \
+    --arg worker "${worker}" \
+    --arg mode "${mode}" \
+    --arg note "${note}" \
+    --arg prompt_path "${prompt_path}" \
+    --arg brief_path "${brief_path}" \
+    --arg output_path "${output_path}" \
+    --arg launcher "${launcher}" \
+    --argjson issue "${issue_json}" \
+    --argjson lane "${lane_json}" \
+    --argjson verification "${verification_json}" \
+    --argjson command_args "${command_args_json}" \
+    --arg command_string "${command_string}" \
+    '{
+      class_id: $class_id,
+      repo_root: $repo_root,
+      worker: $worker,
+      mode: $mode,
+      note: (if $note == "" then null else $note end),
+      tracker_mutations_in_scope: false,
+      landing_owner: "coordinator",
+      landing_target: "main",
+      runner: {
+        kind: "codex",
+        launcher: $launcher,
+        command_args: $command_args,
+        command: $command_string
+      },
+      issue: {
+        id: ($issue.id // null),
+        title: ($issue.title // null),
+        description: ($issue.description // null),
+        status: ($issue.status // null),
+        issue_type: ($issue.issue_type // null),
+        labels: ($issue.labels // [])
+      },
+      lane: {
+        issue_id: ($lane.issue_id // null),
+        workspace_name: ($lane.workspace_name // null),
+        workspace_path: ($lane.workspace_path // null),
+        base_rev: ($lane.base_rev // null),
+        base_commit: ($lane.base_commit // null),
+        status: ($lane.status // null)
+      },
+      prompt: {
+        path: $prompt_path,
+        brief_path: $brief_path,
+        output_path: $output_path
+      },
+      verification: $verification
+    }'
+}
+
+render_dispatch_prompt() {
+  local brief_json="$1"
+
+  jq -r '
+    def bullets($items):
+      if ($items | length) == 0 then
+        "- Use the issue Verification section when present and run targeted checks for changed surfaces."
+      else
+        ($items | map("- " + .) | join("\n"))
+      end;
+
+    [
+      "Complete issue \(.issue.id) in this workspace.",
+      "",
+      "Identity",
+      "- Active checkout root: \(.lane.workspace_path)",
+      "- Workspace path: \(.lane.workspace_path)",
+      "- Workspace name: \(.lane.workspace_name)",
+      "- Only active issue for this lane: \(.issue.id)",
+      "- Base revision: \(.lane.base_rev)",
+      "",
+      "Tracker",
+      "- Canonical tracker root: \(.repo_root)",
+      "- Tracker preflight: ready",
+      "- Shared backend owner: coordinator",
+      "- Tracker mutations in scope: no",
+      "",
+      "Environment",
+      "- Enter runtime with: nix develop --no-pure-eval path:.",
+      "- Shared supervisor: coordinator-owned repo-local tuskd/backend state",
+      "- Assumed tools: bd, jj, tuskd, nix, codex",
+      "- Runtime changes in scope: no",
+      "",
+      "Publish and landing",
+      "- Publish in scope: no",
+      "- Landing owner: \(.landing_owner)",
+      "- Landing target: \(.landing_target)",
+      "- Rewrite after publish allowed: no",
+      "",
+      "Objective",
+      "- Goal: \(.issue.title)",
+      "- Done when: leave the lane with a visible commit ready for governed closeout.",
+      "- Non-goals: do not widen scope beyond the tracked issue description or change the runtime contract.",
+      "- Primary files or areas: derive from the issue description and the smallest affected surface.",
+      "",
+      "Issue Source",
+      (.issue.description // ""),
+      "",
+      "Operational rules",
+      "- Run bd only from the canonical tracker root.",
+      "- Do not initialize another tracker in the workspace.",
+      "- Do not close, land, or compact the lane; the coordinator owns tuskd complete-lane.",
+      "- Keep retries bounded. If the worker runtime is unhealthy, report the exact command and failure.",
+      "",
+      "Verification",
+      bullets(.verification),
+      "",
+      "Stop conditions",
+      "- tracker backend unhealthy",
+      "- ambiguous scope or conflicting repo state",
+      "- verification fails in a way you cannot repair safely",
+      "",
+      "Output contract",
+      "- State whether the goal was completed.",
+      "- List the material file changes.",
+      "- Report verification results command by command.",
+      "- Report whether the lane is ready for coordinator closeout or remains blocked.",
+      "",
+      "Dispatch metadata",
+      "- Policy class: \(.class_id)",
+      "- Worker: \(.worker)",
+      "- Mode: \(.mode)",
+      "- Prompt path: \(.prompt.path)",
+      "- Output path: \(.prompt.output_path)"
+    ] | join("\n")
+  ' <<<"${brief_json}"
+}
+
+write_dispatch_artifacts() {
+  local repo_root="$1"
+  local issue_id="$2"
+  local brief_json="$3"
+  local prompt_path
+  local brief_path
+  local prompt_text
+
+  ensure_state_files "${repo_root}"
+  prompt_path="$(dispatch_prompt_path "${repo_root}" "${issue_id}")"
+  brief_path="$(dispatch_brief_path "${repo_root}" "${issue_id}")"
+  prompt_text="$(render_dispatch_prompt "${brief_json}")"
+
+  printf '%s\n' "${brief_json}" >"${brief_path}"
+  printf '%s\n' "${prompt_text}" >"${prompt_path}"
+}
+
+run_dispatch_worker() {
+  local launcher="$1"
+  local workspace_path="$2"
+  local repo_root="$3"
+  local prompt_path="$4"
+  local output_path="$5"
+  local output=""
+  local exit_code=0
+
+  mkdir -p "$(dirname "${output_path}")"
+
+  set +e
+  output="$(
+    cd "${repo_root}"
+    tusk_export_runtime_roots "${workspace_path}" "${repo_root}"
+    "${launcher}" \
+      --checkout "${workspace_path}" \
+      --tracker-root "${repo_root}" \
+      -- \
+      exec \
+      --full-auto \
+      --add-dir "${repo_root}" \
+      --output-last-message "${output_path}" \
+      - < "${prompt_path}" 2>&1
+  )"
+  exit_code=$?
+  set -e
+
+  jq -cn \
+    --argjson exit_code "${exit_code}" \
+    --arg output "${output}" \
+    '{
+      exit_code: $exit_code,
+      ok: ($exit_code == 0),
+      output: (if ($output | length) > 0 then $output else null end)
+    }'
 }
 
 resolve_revision_commit() {
@@ -4260,6 +4578,304 @@ cmd_launch_lane() {
   cmd_transition_action "${repo_root}" "${socket_path}" "launch_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg base_rev "${base_rev}" --arg slug "${slug}" '{issue_id:$issue_id, base_rev:$base_rev, slug:$slug}')"
 }
 
+dispatch_lane_action() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local worker="${4:-codex}"
+  local mode="${5:-handoff}"
+  local note="${6:-}"
+  local plan_only="${7:-false}"
+  local lane_json="null"
+  local lane_status=""
+  local workspace_path=""
+  local issue_result="null"
+  local issue_json="null"
+  local prompt_path=""
+  local brief_path=""
+  local output_path=""
+  local launcher=""
+  local brief_json="null"
+  local dispatch_status="handed_off"
+  local dispatch_requested_at=""
+  local previous_lane_json="null"
+  local updated_lane_json="null"
+  local exec_result='null'
+  local board_json="null"
+  local board_summary="null"
+  local lanes_json="[]"
+  local receipt_payload=""
+  local receipt_json=""
+  local payload_json=""
+
+  if [ -z "${issue_id}" ]; then
+    jq -cn '{ok:false, error:{message:"dispatch_lane requires issue_id"}}'
+    return 0
+  fi
+
+  case "${worker}" in
+    codex)
+      ;;
+    *)
+      jq -cn \
+        --arg issue_id "${issue_id}" \
+        --arg worker "${worker}" \
+        '{ok:false, issue_id:$issue_id, worker:$worker, error:{message:"dispatch_lane only supports worker codex"}}'
+      return 0
+      ;;
+  esac
+
+  case "${mode}" in
+    handoff|exec)
+      ;;
+    *)
+      jq -cn \
+        --arg issue_id "${issue_id}" \
+        --arg mode "${mode}" \
+        '{ok:false, issue_id:$issue_id, mode:$mode, error:{message:"dispatch_lane only supports mode handoff or exec"}}'
+      return 0
+      ;;
+  esac
+
+  ensure_state_files "${repo_root}"
+  lane_json="$(current_lane_for_issue "${repo_root}" "${issue_id}")"
+  if [ "${lane_json}" = "null" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"dispatch_lane requires an existing lane record"}}'
+    return 0
+  fi
+
+  lane_status="$(jq -r '.status // ""' <<<"${lane_json}")"
+  if [ "${lane_status}" != "launched" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg status "${lane_status}" \
+      '{ok:false, issue_id:$issue_id, status:$status, error:{message:"dispatch_lane requires a launched lane"}}'
+    return 0
+  fi
+
+  workspace_path="$(jq -r '.workspace_path // ""' <<<"${lane_json}")"
+  if [ -z "${workspace_path}" ] || [ ! -d "${workspace_path}" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg workspace_path "${workspace_path}" \
+      '{ok:false, issue_id:$issue_id, workspace_path:$workspace_path, error:{message:"dispatch_lane requires a live workspace"}}'
+    return 0
+  fi
+
+  issue_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_issue_show" issue show "${issue_id}")"
+  issue_json="$(issue_snapshot_from_result "${issue_result}")"
+  if [ "${issue_json}" = "null" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson tracker "${issue_result}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"dispatch_lane requires an existing issue", details:{tracker:$tracker}}}'
+    return 0
+  fi
+
+  if [ "$(jq -r '.issue_type // ""' <<<"${issue_json}")" != "task" ] || ! issue_has_label "${issue_json}" "place:tusk"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson issue "${issue_json}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"dispatch_lane only admits place:tusk task issues", details:{issue:$issue}}}'
+    return 0
+  fi
+
+  prompt_path="$(dispatch_prompt_path "${repo_root}" "${issue_id}")"
+  brief_path="$(dispatch_brief_path "${repo_root}" "${issue_id}")"
+  output_path="$(dispatch_last_message_path "${workspace_path}")"
+  launcher="$(dispatch_worker_launcher)"
+  brief_json="$(build_dispatch_brief "${repo_root}" "${issue_json}" "${lane_json}" "${worker}" "${mode}" "${note}" "${prompt_path}" "${brief_path}" "${output_path}" "${launcher}")"
+
+  if [ "${plan_only}" = "true" ]; then
+    payload_json="$(
+      jq -cn \
+        --arg status "plan" \
+        --arg repo_root "${repo_root}" \
+        --arg issue_id "${issue_id}" \
+        --arg worker "${worker}" \
+        --arg mode "${mode}" \
+        --arg prompt_path "${prompt_path}" \
+        --arg brief_path "${brief_path}" \
+        --arg output_path "${output_path}" \
+        --arg policy_class "$(dispatch_policy_class_id)" \
+        --argjson lane "${lane_json}" \
+        --argjson brief "${brief_json}" \
+        '{
+          status: $status,
+          repo_root: $repo_root,
+          issue_id: $issue_id,
+          worker: $worker,
+          mode: $mode,
+          policy_class: $policy_class,
+          prompt_path: $prompt_path,
+          brief_path: $brief_path,
+          output_path: $output_path,
+          launch_command: ($brief.runner.command // null),
+          lane: $lane,
+          brief: $brief
+        }'
+    )"
+    jq -cn --argjson payload "${payload_json}" '{ok:true, payload:$payload}'
+    return 0
+  fi
+
+  write_dispatch_artifacts "${repo_root}" "${issue_id}" "${brief_json}"
+
+  if [ "${mode}" = "exec" ]; then
+    exec_result="$(run_dispatch_worker "${launcher}" "${workspace_path}" "${repo_root}" "${prompt_path}" "${output_path}")"
+    if jq -e '.ok == true' >/dev/null <<<"${exec_result}"; then
+      dispatch_status="executed"
+    else
+      dispatch_status="failed"
+    fi
+  fi
+
+  dispatch_requested_at="$(now_iso8601)"
+  previous_lane_json="${lane_json}"
+  updated_lane_json="$(
+    jq -c \
+      --arg status "${dispatch_status}" \
+      --arg worker "${worker}" \
+      --arg mode "${mode}" \
+      --arg note "${note}" \
+      --arg launcher "${launcher}" \
+      --arg prompt_path "${prompt_path}" \
+      --arg brief_path "${brief_path}" \
+      --arg output_path "${output_path}" \
+      --arg command "$(jq -r '.runner.command // ""' <<<"${brief_json}")" \
+      --arg class_id "$(dispatch_policy_class_id)" \
+      --arg requested_at "${dispatch_requested_at}" \
+      --argjson runner_result "${exec_result}" \
+      '
+        . + {
+          dispatch: {
+            class_id: $class_id,
+            worker: $worker,
+            mode: $mode,
+            status: $status,
+            launcher: $launcher,
+            prompt_path: $prompt_path,
+            brief_path: $brief_path,
+            output_path: $output_path,
+            command: $command,
+            requested_at: $requested_at,
+            note: (if ($note | length) > 0 then $note else null end),
+            runner_result: (if $runner_result == null then null else $runner_result end)
+          }
+        }
+      ' <<<"${lane_json}"
+  )"
+
+  if ! upsert_lane_state "${repo_root}" "${updated_lane_json}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson lane "${updated_lane_json}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"failed to persist dispatched lane state", details:{lane:$lane}}}'
+    return 0
+  fi
+
+  board_json="$(refresh_transition_board "${repo_root}" "${socket_path}")"
+  board_summary="$(jq -c '.summary // null' <<<"${board_json}")"
+  lanes_json="$(jq -c '.lanes // []' <<<"${board_json}")"
+  receipt_payload="$(
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg worker "${worker}" \
+      --arg mode "${mode}" \
+      --arg note "${note}" \
+      --argjson lane "${updated_lane_json}" \
+      --argjson dispatch "$(jq -c '.dispatch // null' <<<"${updated_lane_json}")" \
+      --argjson board_summary "${board_summary}" \
+      '{
+        issue_id: $issue_id,
+        worker: $worker,
+        mode: $mode,
+        note: $note,
+        lane: $lane,
+        dispatch: $dispatch,
+        board_summary: $board_summary
+      }'
+  )"
+
+  if ! receipt_json="$(append_receipt_capture "${repo_root}" "lane.dispatch" "${receipt_payload}")"; then
+    restore_lane_state_snapshot "${repo_root}" "${previous_lane_json}" >/dev/null 2>&1 || true
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson restored_lane "${previous_lane_json}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"failed to append lane.dispatch receipt", details:{restored_lane:$restored_lane}}}'
+    return 0
+  fi
+
+  payload_json="$(
+    jq -cn \
+      --arg status "${dispatch_status}" \
+      --arg repo_root "${repo_root}" \
+      --arg issue_id "${issue_id}" \
+      --arg worker "${worker}" \
+      --arg mode "${mode}" \
+      --arg prompt_path "${prompt_path}" \
+      --arg brief_path "${brief_path}" \
+      --arg output_path "${output_path}" \
+      --arg policy_class "$(dispatch_policy_class_id)" \
+      --argjson lane "${updated_lane_json}" \
+      --argjson dispatch "$(jq -c '.dispatch // null' <<<"${updated_lane_json}")" \
+      --argjson brief "${brief_json}" \
+      --argjson receipt "${receipt_json}" \
+      --argjson lanes "${lanes_json}" \
+      --argjson board_summary "${board_summary}" \
+      '{
+        status: $status,
+        repo_root: $repo_root,
+        issue_id: $issue_id,
+        worker: $worker,
+        mode: $mode,
+        policy_class: $policy_class,
+        prompt_path: $prompt_path,
+        brief_path: $brief_path,
+        output_path: $output_path,
+        launch_command: ($brief.runner.command // null),
+        lane: $lane,
+        dispatch: $dispatch,
+        brief: $brief,
+        receipt: $receipt,
+        lanes: $lanes,
+        board_summary: $board_summary
+      }'
+  )"
+
+  if [ "${dispatch_status}" = "failed" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --argjson details "${payload_json}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"dispatch_lane worker execution failed", details:$details}}'
+    return 0
+  fi
+
+  jq -cn --argjson payload "${payload_json}" '{ok:true, payload:$payload}'
+}
+
+cmd_dispatch_lane() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local worker="${4:-codex}"
+  local mode="${5:-handoff}"
+  local note="${6:-}"
+  local plan_only="${7:-false}"
+  local dispatch_result=""
+
+  dispatch_result="$(dispatch_lane_action "${repo_root}" "${socket_path}" "${issue_id}" "${worker}" "${mode}" "${note}" "${plan_only}")"
+  if jq -e '.ok == true' >/dev/null <<<"${dispatch_result}"; then
+    jq -c '.payload' <<<"${dispatch_result}"
+    return 0
+  fi
+
+  jq -c '.' <<<"${dispatch_result}"
+  return 1
+}
+
 cmd_handoff_lane() {
   local repo_root="$1"
   local socket_path="$2"
@@ -4874,6 +5490,8 @@ socket_arg=""
 kind_arg=""
 request_id_arg=""
 issue_id_arg=""
+worker_arg=""
+mode_arg=""
 reason_arg=""
 base_rev_arg=""
 target_rev_arg=""
@@ -4909,6 +5527,16 @@ while [ $# -gt 0 ]; do
     --issue-id)
       [ $# -ge 2 ] || fail "--issue-id requires a value"
       issue_id_arg="$2"
+      shift 2
+      ;;
+    --worker)
+      [ $# -ge 2 ] || fail "--worker requires a value"
+      worker_arg="$2"
+      shift 2
+      ;;
+    --mode)
+      [ $# -ge 2 ] || fail "--mode requires a value"
+      mode_arg="$2"
       shift 2
       ;;
     --reason)
@@ -5024,6 +5652,10 @@ case "${command}" in
     [ -n "${issue_id_arg}" ] || fail "launch-lane requires --issue-id"
     [ -n "${base_rev_arg}" ] || fail "launch-lane requires --base-rev"
     cmd_launch_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${base_rev_arg}" "${slug_arg}"
+    ;;
+  dispatch-lane)
+    [ -n "${issue_id_arg}" ] || fail "dispatch-lane requires --issue-id"
+    cmd_dispatch_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${worker_arg:-codex}" "${mode_arg:-handoff}" "${note_arg}" "${plan_arg:-false}"
     ;;
   handoff-lane)
     [ -n "${issue_id_arg}" ] || fail "handoff-lane requires --issue-id"

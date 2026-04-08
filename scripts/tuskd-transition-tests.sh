@@ -136,6 +136,66 @@ create_issue() {
   printf '%s\n' "${issue_id}"
 }
 
+create_labeled_issue() {
+  local repo_root="$1"
+  local title="$2"
+  local description="$3"
+  local labels="$4"
+  local create_json=""
+  local create_status=0
+  local issue_id=""
+
+  run_cli_json create_json create_status \
+    bd create \
+      --title "${title}" \
+      --description "${description}" \
+      --type task \
+      --priority 2 \
+      --labels "${labels}" \
+      --json
+  assert_status "${create_status}" "0" "bd create labeled issue"
+
+  issue_id="$(jq -r 'if type == "array" then .[0].id // "" else .id // "" end' <<<"${create_json}")"
+  [ -n "${issue_id}" ] || fail "failed to extract labeled issue id"$'\n'"${create_json}"
+  printf '%s\n' "${issue_id}"
+}
+
+create_codex_stub_launcher() {
+  local repo_root="$1"
+  local stub_path="${repo_root}/.beads/tuskd/test-codex-runner.sh"
+
+  mkdir -p "$(dirname "${stub_path}")"
+  cat >"${stub_path}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+output_path=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output-last-message)
+      output_path="${2:?--output-last-message requires a path}"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+prompt="$(cat)"
+if [ -n "${output_path}" ]; then
+  mkdir -p "$(dirname "${output_path}")"
+  printf 'stub worker completed\n' > "${output_path}"
+  printf '%s\n' "${prompt}" > "${output_path}.prompt"
+fi
+
+printf '{"ok":true,"runner":"stub-codex"}\n'
+EOF
+  chmod +x "${stub_path}"
+  printf '%s\n' "${stub_path}"
+}
+
 current_revision() {
   local repo_root="$1"
   local revision=""
@@ -171,6 +231,19 @@ resolve_existing_base_rev() {
   done
 
   fail "Revision \`${base_rev}\` doesn't exist in ${repo_root}"
+}
+
+ensure_local_main_bookmark() {
+  local repo_root="$1"
+  local base_rev="$2"
+  local target_revision=""
+
+  if jj --repository "${repo_root}" log -r main --no-graph -T 'commit_id ++ "\n"' >/dev/null 2>&1; then
+    return 0
+  fi
+
+  target_revision="$(resolve_revision "${repo_root}" "${base_rev}")"
+  jj --repository "${repo_root}" bookmark set main -r "${target_revision}" >/dev/null
 }
 
 receipts_path() {
@@ -595,6 +668,75 @@ test_compact_lane_quarantine() {
   note "compact-quarantine: ok"
 }
 
+test_dispatch_lane() {
+  local repo_root="$1"
+  local base_rev="$2"
+  local issue_id=""
+  local issue_description=""
+  local claim_json=""
+  local claim_status=0
+  local launch_json=""
+  local launch_status=0
+  local plan_json=""
+  local plan_status=0
+  local dispatch_json=""
+  local dispatch_status=0
+  local board_json=""
+  local prompt_path=""
+  local brief_path=""
+  local output_path=""
+  local stub_path=""
+
+  note "dispatch-lane: begin"
+  issue_description=$'Goal:\nExercise the autonomous dispatch path.\n\nVerification:\n- bash -n scripts/tuskd.sh\n- bash -n scripts/tuskd-transition-tests.sh'
+  issue_id="$(create_labeled_issue "${repo_root}" "transition dispatch lane probe" "${issue_description}" "place:tusk,track:core,surface:self-hosting")"
+  stub_path="$(create_codex_stub_launcher "${repo_root}")"
+
+  run_cli_json claim_json claim_status \
+    tuskd claim-issue --repo "${repo_root}" --issue-id "${issue_id}"
+  assert_status "${claim_status}" "0" "claim dispatch issue"
+
+  run_cli_json launch_json launch_status \
+    tuskd launch-lane --repo "${repo_root}" --issue-id "${issue_id}" --base-rev "${base_rev}" --slug dispatch-lane-probe
+  assert_status "${launch_status}" "0" "launch dispatch lane"
+
+  run_cli_json plan_json plan_status \
+    env TUSKD_CODEX_LAUNCHER="${stub_path}" \
+      tuskd dispatch-lane --repo "${repo_root}" --issue-id "${issue_id}" --plan
+  assert_status "${plan_status}" "0" "dispatch-lane plan"
+  assert_json_value "${plan_json}" '.status' "plan" "dispatch-lane plan status"
+  assert_json_value "${plan_json}" '.worker' "codex" "dispatch-lane plan worker"
+  assert_json_value "${plan_json}" '.mode' "handoff" "dispatch-lane plan mode"
+  assert_json_value "${plan_json}" '.policy_class' "tusk.low-risk.v1" "dispatch-lane plan policy"
+
+  run_cli_json dispatch_json dispatch_status \
+    env TUSKD_CODEX_LAUNCHER="${stub_path}" \
+      tuskd dispatch-lane --repo "${repo_root}" --issue-id "${issue_id}" --mode exec --note "dispatch probe"
+  assert_status "${dispatch_status}" "0" "dispatch-lane exec"
+  assert_json_value "${dispatch_json}" '.status' "executed" "dispatch-lane exec status"
+  assert_json_value "${dispatch_json}" '.worker' "codex" "dispatch-lane exec worker"
+  assert_json_value "${dispatch_json}" '.mode' "exec" "dispatch-lane exec mode"
+  assert_json_value "${dispatch_json}" '.dispatch.status' "executed" "dispatch-lane dispatch status"
+  assert_json_value "${dispatch_json}" '.dispatch.runner_result.exit_code' "0" "dispatch-lane runner exit"
+
+  prompt_path="$(jq -r '.prompt_path // ""' <<<"${dispatch_json}")"
+  brief_path="$(jq -r '.brief_path // ""' <<<"${dispatch_json}")"
+  output_path="$(jq -r '.output_path // ""' <<<"${dispatch_json}")"
+  assert_file_present "${prompt_path}" "dispatch-lane prompt file"
+  assert_file_present "${brief_path}" "dispatch-lane brief file"
+  assert_file_present "${output_path}" "dispatch-lane output file"
+  assert_file_present "${output_path}.prompt" "dispatch-lane stub prompt capture"
+  grep -F "${issue_id}" "${prompt_path}" >/dev/null 2>&1 || fail "dispatch prompt missing issue id"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.dispatch")" = "1" ] || fail "lane.dispatch receipt count mismatch for ${issue_id}"
+
+  board_json="$(tuskd board-status --repo "${repo_root}")"
+  assert_json_jq "${board_json}" "board did not show dispatched lane" --arg issue_id "${issue_id}" '
+    [.lanes[] | select(.issue_id == $issue_id and .status == "launched" and .dispatch.status == "executed")] | length == 1
+  '
+
+  note "dispatch-lane: ok"
+}
+
 test_complete_lane() {
   local repo_root="$1"
   local base_rev="$2"
@@ -623,7 +765,7 @@ test_complete_lane() {
   assert_status "${claim_status}" "0" "claim complete lane issue"
 
   run_cli_json launch_json launch_status \
-    tuskd launch-lane --repo "${repo_root}" --issue-id "${issue_id}" --base-rev "${base_rev}" --slug complete-lane-probe
+    tuskd launch-lane --repo "${repo_root}" --issue-id "${issue_id}" --base-rev main --slug complete-lane-probe
   assert_status "${launch_status}" "0" "launch complete lane"
 
   workspace_path="$(jq -r '.workspace_path // ""' <<<"${launch_json}")"
@@ -813,10 +955,12 @@ run_inner_tests() {
 
   bd init -p tusk --server >/dev/null
   tuskd ensure --repo "${repo_root}" >/dev/null
+  ensure_local_main_bookmark "${repo_root}" "${base_rev}"
 
   test_lifecycle_guards "${repo_root}" "${base_rev}"
   test_concurrent_claims "${repo_root}"
   test_launch_rollback "${repo_root}" "${base_rev}"
+  test_dispatch_lane "${repo_root}" "${base_rev}"
   test_compact_lane_remove "${repo_root}" "${base_rev}"
   test_compact_lane_quarantine "${repo_root}" "${base_rev}"
   test_coordinator_repair "${repo_root}" "${base_rev}"
