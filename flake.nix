@@ -45,15 +45,13 @@
       tuskFlakeModule = import ./flake-module.nix { inherit tuskLib; };
       devenvCodexModule = import ./devenv-codex-module.nix { inherit tuskLib; };
       devenvScratchModule = import ./devenv-scratch-module.nix;
-      codexSkillSources = {
-        tusk = ./.agents/skills/tusk;
-        ops = ./.agents/skills/ops;
-        nix = ./.agents/skills/nix;
-        skill-dev = ./.agents/skills/skill-dev;
-      };
+      codexSkillRoots = nixpkgs.lib.filterAttrs (_: kind: kind == "directory") (builtins.readDir ./.agents/skills);
+      codexSkillNames = builtins.attrNames codexSkillRoots;
+      codexSkillSources = nixpkgs.lib.mapAttrs (name: _: ./.agents/skills + "/${name}") codexSkillRoots;
       mkSkillModule = name: {
         codex.skills.${name}.source = codexSkillSources.${name};
       };
+      dogfoodSkillModules = builtins.map mkSkillModule codexSkillNames;
       devenvTuskSkillModule = mkSkillModule "tusk";
       devenvOpsSkillModule = mkSkillModule "ops";
       devenvNixSkillModule = mkSkillModule "nix";
@@ -566,13 +564,7 @@
       dogfoodModule =
         { ... }:
         {
-          imports = [
-            devenvCodexModule
-            devenvTuskSkillModule
-            devenvOpsSkillModule
-            devenvNixSkillModule
-            devenvSkillDevSkillModule
-          ];
+          imports = [ devenvCodexModule ] ++ dogfoodSkillModules;
 
           packages = [
             codexNixCheck

@@ -70,8 +70,7 @@ nix run .#tusk-ui -- --help
 - Repo-local skill projection under `.codex/skills/` is one managed symlink per skill root; the runtime should not materialize fragile per-file link trees there.
 - `devenv-scratch-module.nix` owns the shared per-repo scratch relocation policy for common build tools in consumer shells.
 - `devenvModules.consumer` is the reusable downstream shell surface: repo-local `CODEX_HOME`, explicit skill opt-in, scratch relocation, and the conservative `tusk-clean` helper.
-- `devenvModules.dogfood` is the repo's own downstream composition of `codex` plus explicit `tusk`/`ops`/`nix` skill packs.
-- `devenvModules.dogfood` is the repo's own downstream composition of `codex` plus explicit `tusk`/`ops`/`nix`/`skill-dev` skill packs.
+- `devenvModules.dogfood` is the repo's own downstream composition of `codex` plus all repo-authored shared skills from `.agents/skills/`.
 - `scripts/codex-home-bootstrap.sh` copies auth/config/rules from `~/.codex` only as a first-use migration into the repo-local `.codex` home.
 - `scripts/tusk-codex.sh` launches Codex against an explicit checkout while preserving canonical tracker-root wiring.
 - `scripts/tusk-skill-loop.sh` watches `.agents/skills/**`, reruns `tusk-skill-contract-check`, and relaunches `tusk-codex` only after validation passes.

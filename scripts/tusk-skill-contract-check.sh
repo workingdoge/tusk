@@ -76,14 +76,24 @@ check_skill_source() {
   grep -Eq '^  default_prompt: .+\$'"${skill_name}"'.*$' "$openai_yaml"
 }
 
-for skill_name in tusk ops nix skill-dev; do
+skill_names=()
+for skill_root in .agents/skills/*; do
+  [ -d "$skill_root" ] || continue
+  skill_names+=("$(basename "$skill_root")")
+done
+
+test "${#skill_names[@]}" -gt 0
+
+for skill_name in "${skill_names[@]}"; do
   check_skill_source "$skill_name"
 done
 
 check_cmd="$(cat <<'EOF'
 cd "$DEVENV_ROOT"
 test "$CODEX_HOME" = "$DEVENV_ROOT/.codex"
-for skill_name in tusk ops nix skill-dev; do
+for skill_root in .agents/skills/*; do
+  [ -d "$skill_root" ] || continue
+  skill_name="$(basename "$skill_root")"
   test -L ".codex/skills/$skill_name"
   test "$(readlink ".codex/skills/$skill_name")" = "$DEVENV_ROOT/.agents/skills/$skill_name"
   test -f ".codex/skills/$skill_name/SKILL.md"
@@ -120,16 +130,13 @@ nix eval --impure --raw --expr '
     };
     consumerFiles = consumer.config.files or { };
     dogfoodFiles = dogfood.config.files or { };
+    authoredSkills = pkgs.lib.filterAttrs (_: kind: kind == "directory") (builtins.readDir (flake.outPath + "/.agents/skills"));
+    skillNames = builtins.attrNames authoredSkills;
   in
   if
-    (! builtins.hasAttr ".codex/skills/tusk" consumerFiles)
-    && (! builtins.hasAttr ".codex/skills/ops" consumerFiles)
-    && (! builtins.hasAttr ".codex/skills/nix" consumerFiles)
-    && (! builtins.hasAttr ".codex/skills/skill-dev" consumerFiles)
-    && builtins.hasAttr ".codex/skills/tusk" dogfoodFiles
-    && builtins.hasAttr ".codex/skills/ops" dogfoodFiles
-    && builtins.hasAttr ".codex/skills/nix" dogfoodFiles
-    && builtins.hasAttr ".codex/skills/skill-dev" dogfoodFiles
+    builtins.length skillNames > 0
+    && builtins.all (name: ! builtins.hasAttr ".codex/skills/${name}" consumerFiles) skillNames
+    && builtins.all (name: builtins.hasAttr ".codex/skills/${name}" dogfoodFiles) skillNames
   then
     "ok"
   else
