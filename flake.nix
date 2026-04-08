@@ -68,6 +68,18 @@
       devenvNixClaudeSkillModule = mkClaudeSkillModule "nix";
       devenvSkillDevClaudeSkillModule = mkClaudeSkillModule "skill-dev";
       devenvTopologyClaudeSkillModule = mkClaudeSkillModule "topology";
+      devenvConsumerSharedSkillsModule = {
+        imports = [
+          devenvTuskSkillModule
+          devenvOpsSkillModule
+          devenvNixSkillModule
+          devenvTopologySkillModule
+          devenvTuskClaudeSkillModule
+          devenvOpsClaudeSkillModule
+          devenvNixClaudeSkillModule
+          devenvTopologyClaudeSkillModule
+        ];
+      };
       tuskSkillBundle = tuskLib.mkCodexSkillPackage {
         inherit pkgs;
         name = "tusk";
@@ -960,64 +972,64 @@
         "base.self.tuskd-status.service"
       ];
       repoSelfHostTusk =
-        (
-          nixpkgs.lib.evalModules {
-            modules = [
-              (
-                { lib, ... }:
-                {
-                  options.flake = lib.mkOption {
-                    type = lib.types.attrsOf lib.types.anything;
-                    default = { };
-                    description = "Plain module-eval hook for exporting flake attributes.";
-                  };
-                }
-              )
-              tuskFlakeModule
+        (nixpkgs.lib.evalModules {
+          modules = [
+            (
+              { lib, ... }:
               {
-                tusk = {
-                  enable = true;
-                  base = repoSelfHostBase;
-                  effects."self.trace-core-health" = {
-                    requires.base = builtins.attrNames repoSelfHostBase;
-                    inputs = repoSelfHostWitnessIds;
-                    intent = {
-                      kind = "self-host.trace";
-                      target = "tusk";
-                      action = "core-health";
-                      description = "Record a local trace over the first self-host witness set.";
-                    };
-                    description = "Trace the first self-host witness root through a safe repo-local executor.";
-                  };
-                  executors.local-trace = {
-                    enable = true;
-                    kind = "local-trace";
-                    description = "Safe repo-local executor that realizes admitted effects by appending trace receipts only.";
-                    mode = "receipt-only";
-                    receiptKind = "effect.trace";
-                  };
-                  drivers.local.receipts = {
-                    kind = "local-receipt";
-                    description = "Repo-local driver that sinks trace realizations into tuskd receipts.";
-                    sink = ".beads/tuskd/receipts.jsonl";
-                  };
-                  realizations."self.trace-core-health.local" = {
-                    effect = "self.trace-core-health";
-                    executor = "local-trace";
-                    driver = "local.receipts";
-                    receipt = {
-                      kind = "effect.trace";
-                      mode = "local-trace";
-                      description = "Repo-local trace receipt for the first self-host realization.";
-                    };
-                    description = "Bind the first self-host trace effect to the local receipt sink.";
-                  };
+                options.flake = lib.mkOption {
+                  type = lib.types.attrsOf lib.types.anything;
+                  default = { };
+                  description = "Plain module-eval hook for exporting flake attributes.";
                 };
               }
-            ];
-          }
-        ).config.flake.tusk;
-      repoSelfHostWitnessCheck = pkgs.writeText "tusk-self-host-witnesses.json" (builtins.toJSON repoSelfHostTusk);
+            )
+            tuskFlakeModule
+            {
+              tusk = {
+                enable = true;
+                base = repoSelfHostBase;
+                effects."self.trace-core-health" = {
+                  requires.base = builtins.attrNames repoSelfHostBase;
+                  inputs = repoSelfHostWitnessIds;
+                  intent = {
+                    kind = "self-host.trace";
+                    target = "tusk";
+                    action = "core-health";
+                    description = "Record a local trace over the first self-host witness set.";
+                  };
+                  description = "Trace the first self-host witness root through a safe repo-local executor.";
+                };
+                executors.local-trace = {
+                  enable = true;
+                  kind = "local-trace";
+                  description = "Safe repo-local executor that realizes admitted effects by appending trace receipts only.";
+                  mode = "receipt-only";
+                  receiptKind = "effect.trace";
+                };
+                drivers.local.receipts = {
+                  kind = "local-receipt";
+                  description = "Repo-local driver that sinks trace realizations into tuskd receipts.";
+                  sink = ".beads/tuskd/receipts.jsonl";
+                };
+                realizations."self.trace-core-health.local" = {
+                  effect = "self.trace-core-health";
+                  executor = "local-trace";
+                  driver = "local.receipts";
+                  receipt = {
+                    kind = "effect.trace";
+                    mode = "local-trace";
+                    description = "Repo-local trace receipt for the first self-host realization.";
+                  };
+                  description = "Bind the first self-host trace effect to the local receipt sink.";
+                };
+              };
+            }
+          ];
+        }).config.flake.tusk;
+      repoSelfHostWitnessCheck = pkgs.writeText "tusk-self-host-witnesses.json" (
+        builtins.toJSON repoSelfHostTusk
+      );
       repoSelfHostTraceCheck = pkgs.writeText "tusk-self-host-trace.json" (
         builtins.toJSON {
           admittedRealizations = repoSelfHostTusk.admission.realizations.admittedRealizationIds;
@@ -1042,6 +1054,7 @@
         consumer = consumerCodexModule;
         default = consumerCodexModule;
         dogfood = dogfoodModule;
+        consumer-shared-skills = devenvConsumerSharedSkillsModule;
         tusk-skill = devenvTuskSkillModule;
         ops-skill = devenvOpsSkillModule;
         nix-skill = devenvNixSkillModule;
