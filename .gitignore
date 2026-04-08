@@ -4,6 +4,7 @@
 .beads/
 .jj/
 .jj-workspaces/
+.claude/
 .codex/
 .codex-prompts/
 .gitsigners

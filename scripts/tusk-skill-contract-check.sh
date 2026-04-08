@@ -6,7 +6,7 @@ usage() {
 Usage: tusk-skill-contract-check [--repo PATH]
 
 Validate repo-authored skill structure, repo-owned OpenAI metadata, and the
-repo-local Codex skill projection contract.
+repo-local Codex plus Claude skill projection contract.
 EOF
 }
 
@@ -97,6 +97,9 @@ for skill_root in .agents/skills/*; do
   test -L ".codex/skills/$skill_name"
   test "$(readlink ".codex/skills/$skill_name")" = "$DEVENV_ROOT/.agents/skills/$skill_name"
   test -f ".codex/skills/$skill_name/SKILL.md"
+  test -L ".claude/skills/$skill_name"
+  test "$(readlink ".claude/skills/$skill_name")" = "$DEVENV_ROOT/.agents/skills/$skill_name"
+  test -f ".claude/skills/$skill_name/SKILL.md"
 done
 EOF
 )"
@@ -136,7 +139,9 @@ nix eval --impure --raw --expr '
   if
     builtins.length skillNames > 0
     && builtins.all (name: ! builtins.hasAttr ".codex/skills/${name}" consumerFiles) skillNames
+    && builtins.all (name: ! builtins.hasAttr ".claude/skills/${name}" consumerFiles) skillNames
     && builtins.all (name: builtins.hasAttr ".codex/skills/${name}" dogfoodFiles) skillNames
+    && builtins.all (name: builtins.hasAttr ".claude/skills/${name}" dogfoodFiles) skillNames
   then
     "ok"
   else

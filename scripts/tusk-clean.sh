@@ -17,6 +17,7 @@ Skipped by design:
 - .beads
 - .devenv
 - .direnv
+- .claude
 - .codex
 
 Current candidate directories:
@@ -88,6 +89,7 @@ mapfile -t raw_candidates < <(
         -name .beads -o \
         -name .devenv -o \
         -name .direnv -o \
+        -name .claude -o \
         -name .codex \
       \) \
     \) -prune -o \

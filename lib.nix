@@ -27,6 +27,21 @@ let
   mkDriver = args: args // { kind = args.kind or "driver"; };
   mkRealization = args: args // { kind = "realization"; };
 
+  validateSkillSource =
+    {
+      name,
+      src,
+      requiredFiles ? [ "SKILL.md" ],
+    }:
+    let
+      sourcePath = toString src;
+      missing = filter (relativePath: !(pathExists "${sourcePath}/${relativePath}")) requiredFiles;
+    in
+    if missing == [ ] then
+      src
+    else
+      throw "Skill `${name}` is missing required files: ${concatStringsSep ", " missing}";
+
   validateCodexSkillSource =
     {
       name,
@@ -36,14 +51,27 @@ let
         "agents/openai.yaml"
       ],
     }:
+    validateSkillSource {
+      inherit name src requiredFiles;
+    };
+
+  mkSkillPackage =
+    {
+      pkgs,
+      name,
+      src,
+      requiredFiles ? [ "SKILL.md" ],
+    }:
     let
-      sourcePath = toString src;
-      missing = filter (relativePath: !(pathExists "${sourcePath}/${relativePath}")) requiredFiles;
+      checkedSource = validateSkillSource {
+        inherit name src requiredFiles;
+      };
     in
-    if missing == [ ] then
-      src
-    else
-      throw "Codex skill `${name}` is missing required files: ${concatStringsSep ", " missing}";
+    pkgs.runCommand "${name}-skill" { } ''
+      mkdir -p "$out"
+      cp -R ${checkedSource}/. "$out/"
+      chmod -R u+w "$out"
+    '';
 
   mkCodexSkillPackage =
     {
@@ -60,6 +88,30 @@ let
       chmod -R u+w "$out"
     '';
 
+  mkDevenvSkillEntries =
+    {
+      pkgs,
+      name,
+      src,
+      root ? ".codex/skills",
+      requiredFiles ? [ "SKILL.md" ],
+    }:
+    let
+      checkedSource = validateSkillSource {
+        inherit name src requiredFiles;
+      };
+      package = mkSkillPackage {
+        inherit pkgs name;
+        src = checkedSource;
+        inherit requiredFiles;
+      };
+    in
+    {
+      "${root}/${name}" = {
+        source = package;
+      };
+    };
+
   mkDevenvCodexSkillEntries =
     {
       pkgs,
@@ -67,17 +119,12 @@ let
       src,
       root ? ".codex/skills",
     }:
-    let
-      checkedSource = validateCodexSkillSource { inherit name src; };
-      package = mkCodexSkillPackage {
-        inherit pkgs name;
-        src = checkedSource;
-      };
-    in
-    {
-      "${root}/${name}" = {
-        source = package;
-      };
+    mkDevenvSkillEntries {
+      inherit pkgs name src root;
+      requiredFiles = [
+        "SKILL.md"
+        "agents/openai.yaml"
+      ];
     };
 
   resolveId = value: fallback: if value != null then value else fallback;
@@ -385,8 +432,10 @@ let
 in
 {
   inherit
+    mkDevenvSkillEntries
     mkCodexSkillPackage
     mkDevenvCodexSkillEntries
+    mkSkillPackage
     mkBase
     mkDriver
     mkEffect
@@ -396,6 +445,7 @@ in
     mkWitness
     normalize
     renderValidationError
+    validateSkillSource
     validateCodexSkillSource
     ;
 }

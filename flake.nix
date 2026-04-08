@@ -45,23 +45,30 @@
       tuskFlakeModule = import ./flake-module.nix { inherit tuskLib; };
       devenvCodexModule = import ./devenv-codex-module.nix { inherit tuskLib; };
       devenvScratchModule = import ./devenv-scratch-module.nix;
-      codexSkillSources = {
+      skillSources = {
         tusk = ./.agents/skills/tusk;
         ops = ./.agents/skills/ops;
         nix = ./.agents/skills/nix;
         skill-dev = ./.agents/skills/skill-dev;
       };
       mkSkillModule = name: {
-        codex.skills.${name}.source = codexSkillSources.${name};
+        codex.skills.${name}.source = skillSources.${name};
+      };
+      mkClaudeSkillModule = name: {
+        claude.skills.${name}.source = skillSources.${name};
       };
       devenvTuskSkillModule = mkSkillModule "tusk";
       devenvOpsSkillModule = mkSkillModule "ops";
       devenvNixSkillModule = mkSkillModule "nix";
       devenvSkillDevSkillModule = mkSkillModule "skill-dev";
+      devenvTuskClaudeSkillModule = mkClaudeSkillModule "tusk";
+      devenvOpsClaudeSkillModule = mkClaudeSkillModule "ops";
+      devenvNixClaudeSkillModule = mkClaudeSkillModule "nix";
+      devenvSkillDevClaudeSkillModule = mkClaudeSkillModule "skill-dev";
       tuskSkillBundle = tuskLib.mkCodexSkillPackage {
         inherit pkgs;
         name = "tusk";
-        src = codexSkillSources.tusk;
+        src = skillSources.tusk;
       };
       beads = llm-agents.packages.${system}.beads;
       codexPkg = llm-agents.packages.${system}.codex;
@@ -541,6 +548,19 @@
           exec bash ${./scripts/tusk-codex.sh} "$@"
         '';
       };
+      repoTuskClaude = pkgs.writeShellApplication {
+        name = "tusk-claude";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.git
+          repoBeads
+        ];
+        text = ''
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+          export TUSK_REAL_BD=${repoBeads}/bin/bd
+          exec bash ${./scripts/tusk-claude.sh} "$@"
+        '';
+      };
       tuskFlakeRefPackage = pkgs.writeShellApplication {
         name = "tusk-flake-ref";
         runtimeInputs = [
@@ -625,6 +645,7 @@
           pkgs.git
           pkgs.nix
           pkgs.rebar3
+          repoTuskClaude
           pkgs.rust-analyzer
           tuskClean
           tuskFlakeRefPackage
@@ -656,6 +677,7 @@
           jj --version >/dev/null
           dolt version >/dev/null
           codex --help >/dev/null
+          tusk-claude --launcher-help >/dev/null
           tusk-codex --launcher-help >/dev/null
           tusk-skill-loop --watch-help >/dev/null
           tusk-clean --help >/dev/null
@@ -700,6 +722,10 @@
             devenvOpsSkillModule
             devenvNixSkillModule
             devenvSkillDevSkillModule
+            devenvTuskClaudeSkillModule
+            devenvOpsClaudeSkillModule
+            devenvNixClaudeSkillModule
+            devenvSkillDevClaudeSkillModule
           ];
 
           packages = [
@@ -707,6 +733,7 @@
             glistixPkg
             installTuskOpenaiSkill
             repoBeads
+            repoTuskClaude
             repoTuskCodex
             pkgs.deadnix
             pkgs.direnv
@@ -748,6 +775,7 @@
             echo "tusk dogfood shell"
             echo "  CODEX_HOME=$CODEX_HOME"
             echo "  codex"
+            echo "  tusk-claude --launcher-help"
             echo "  tusk-codex --launcher-help"
             echo "  tusk-skill-loop --watch-help"
             echo "  devenv up"
@@ -825,6 +853,7 @@
         rust-toolchain = rustToolchain;
         bd = repoBeads;
         beads = repoBeads;
+        tusk-claude = repoTuskClaude;
         tusk-codex = repoTuskCodex;
         tusk-skill-contract-check = tuskSkillContractCheck;
         tusk-skill-loop = tuskSkillLoopPackage;
@@ -850,6 +879,10 @@
         codex = {
           type = "app";
           program = "${repoCodex}/bin/codex";
+        };
+        tusk-claude = {
+          type = "app";
+          program = "${repoTuskClaude}/bin/tusk-claude";
         };
         tusk-codex = {
           type = "app";

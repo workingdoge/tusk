@@ -17,13 +17,14 @@ skill in `tusk`.
 1. edit the authored source under `.agents/skills/<name>/...`
 2. run `tusk-skill-contract-check --repo <checkout>`
 3. if the task needs a fresh session, use:
-   `tusk-codex --checkout <workspace>`
-4. if the task is iterative, use:
+   `tusk-codex --checkout <workspace>` or
+   `tusk-claude --checkout <workspace>`
+4. if the task is iterative and specifically needs the Codex restart loop, use:
    `tusk-skill-loop --checkout <workspace>`
 
 The loop validates before restart. If validation fails, fix the authored source
-and save again. Do not pretend the running Codex process can rescan skills
-in-place.
+and save again. Do not pretend the running Codex or Claude process can rescan
+skills in-place.
 
 ## Projection and wiring
 When adding a new shared skill, update all of these together:
