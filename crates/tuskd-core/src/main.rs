@@ -1290,7 +1290,8 @@ fn issue_id(issue: &Value) -> Option<&str> {
 }
 
 fn issue_title(issue: &Value) -> String {
-    issue.get("title")
+    issue
+        .get("title")
         .and_then(Value::as_str)
         .unwrap_or_else(|| issue_id(issue).unwrap_or("unknown issue"))
         .to_owned()
@@ -1307,16 +1308,14 @@ fn is_open_status(status: &str) -> bool {
 fn issue_priority_value(issue: &Value) -> i64 {
     match issue.get("priority") {
         Some(Value::Number(number)) => number.as_i64().unwrap_or(9),
-        Some(Value::String(text)) => text
-            .trim_start_matches('P')
-            .parse::<i64>()
-            .unwrap_or(9),
+        Some(Value::String(text)) => text.trim_start_matches('P').parse::<i64>().unwrap_or(9),
         _ => 9,
     }
 }
 
 fn issue_relation_entries(issue: &Value, key: &str) -> Vec<Value> {
-    issue.get(key)
+    issue
+        .get(key)
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -1335,7 +1334,8 @@ fn relation_titles(entries: &[Value], limit: usize) -> String {
     let mut titles = entries
         .iter()
         .filter_map(|entry| {
-            entry.get("title")
+            entry
+                .get("title")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
                 .or_else(|| issue_id(entry).map(ToOwned::to_owned))
@@ -1371,6 +1371,23 @@ fn choose_focus_issue(issues: &[Value]) -> Option<Value> {
             .then_with(|| issue_priority_value(right).cmp(&issue_priority_value(left)))
             .then_with(|| issue_title(left).cmp(&issue_title(right)))
     })
+}
+
+fn is_non_leaf_issue(issue: &Value) -> bool {
+    if issue.get("issue_type").and_then(Value::as_str) == Some("epic") {
+        return true;
+    }
+
+    open_issue_relation_entries(issue, "dependents")
+        .iter()
+        .any(|entry| entry.get("dependency_type").and_then(Value::as_str) == Some("parent-child"))
+}
+
+fn first_actionable_issue(issues: &[Value]) -> Option<Value> {
+    issues
+        .iter()
+        .find(|issue| !is_non_leaf_issue(issue))
+        .cloned()
 }
 
 fn load_issue_details(repo_root: &Path, issue_ids: &[String]) -> Vec<Value> {
@@ -1626,17 +1643,29 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
 
     let claimed_details = issue_details
         .iter()
-        .filter(|issue| issue_id(issue).map(|value| claimed_set.contains(value)).unwrap_or(false))
+        .filter(|issue| {
+            issue_id(issue)
+                .map(|value| claimed_set.contains(value))
+                .unwrap_or(false)
+        })
         .cloned()
         .collect::<Vec<_>>();
     let ready_details = issue_details
         .iter()
-        .filter(|issue| issue_id(issue).map(|value| ready_set.contains(value)).unwrap_or(false))
+        .filter(|issue| {
+            issue_id(issue)
+                .map(|value| ready_set.contains(value))
+                .unwrap_or(false)
+        })
         .cloned()
         .collect::<Vec<_>>();
     let blocked_details = issue_details
         .iter()
-        .filter(|issue| issue_id(issue).map(|value| blocked_set.contains(value)).unwrap_or(false))
+        .filter(|issue| {
+            issue_id(issue)
+                .map(|value| blocked_set.contains(value))
+                .unwrap_or(false)
+        })
         .cloned()
         .collect::<Vec<_>>();
 
@@ -1665,6 +1694,20 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
         .iter()
         .any(|value| value.get("kind").and_then(Value::as_str) == Some("runtime_unhealthy"));
 
+    let actionable_claimed = claimed_details
+        .iter()
+        .filter(|issue| !is_non_leaf_issue(issue))
+        .cloned()
+        .collect::<Vec<_>>();
+    let actionable_ready = ready_details
+        .iter()
+        .filter(|issue| !is_non_leaf_issue(issue))
+        .cloned()
+        .collect::<Vec<_>>();
+    let skipped_claimed_non_leaf = claimed_details
+        .len()
+        .saturating_sub(actionable_claimed.len());
+
     let primary_action = if runtime_unhealthy {
         Some(json!({
             "kind": "repair_runtime",
@@ -1691,7 +1734,7 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
             "dependencies": [],
             "dependents": [],
         }))
-    } else if let Some(issue) = choose_focus_issue(&claimed_details) {
+    } else if let Some(issue) = first_actionable_issue(&actionable_claimed) {
         let dependents = open_issue_relation_entries(&issue, "dependents");
         let dependencies = open_issue_relation_entries(&issue, "dependencies");
         let mut rationale = Vec::new();
@@ -1707,6 +1750,10 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
                 active_lanes.len()
             ));
         }
+        rationale.push(
+            "It is already claimed and has no open child work, so launching it creates a concrete lane."
+                .to_owned(),
+        );
         if !dependents.is_empty() {
             rationale.push(format!(
                 "It unlocks {} downstream item(s): {}.",
@@ -1723,7 +1770,10 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
         Some(build_issue_recommendation(
             &issue,
             "launch_claimed_issue",
-            format!("Launch {} next.", issue_id(&issue).unwrap_or("the claimed issue")),
+            format!(
+                "Launch {} next.",
+                issue_id(&issue).unwrap_or("the claimed issue")
+            ),
             Some(format!(
                 "tuskd launch-lane --repo {} --issue-id {} --base-rev main",
                 repo_root.to_string_lossy(),
@@ -1731,10 +1781,24 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
             )),
             rationale,
         ))
-    } else if let Some(issue) = choose_focus_issue(&ready_details) {
+    } else if let Some(issue) = first_actionable_issue(&actionable_ready) {
         let dependents = open_issue_relation_entries(&issue, "dependents");
         let dependencies = open_issue_relation_entries(&issue, "dependencies");
         let mut rationale = Vec::new();
+        if skipped_claimed_non_leaf > 0 {
+            rationale.push(format!(
+                "Skipped {} claimed issue(s) because they are still parent or non-leaf work.",
+                skipped_claimed_non_leaf
+            ));
+        } else if !claimed_issues.is_empty() {
+            rationale.push(format!(
+                "{} claimed issue(s) are waiting, but none is a concrete leaf lane candidate.",
+                claimed_issues.len()
+            ));
+        }
+        rationale.push(
+            "It is a leaf task with no open child work, so it can be claimed directly.".to_owned(),
+        );
         if !dependents.is_empty() {
             rationale.push(format!(
                 "Claiming it unlocks {} downstream item(s): {}.",
@@ -1754,12 +1818,40 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
         Some(build_issue_recommendation(
             &issue,
             "claim_ready_issue",
-            format!("Claim {} next.", issue_id(&issue).unwrap_or("the ready issue")),
+            format!(
+                "Claim {} next.",
+                issue_id(&issue).unwrap_or("the ready issue")
+            ),
             Some(format!(
                 "tuskd claim-issue --repo {} --issue-id {}",
                 repo_root.to_string_lossy(),
                 issue_id(&issue).unwrap_or("unknown")
             )),
+            rationale,
+        ))
+    } else if let Some(issue) = choose_focus_issue(&claimed_details) {
+        let dependents = open_issue_relation_entries(&issue, "dependents");
+        let mut rationale = Vec::new();
+        rationale.push(
+            "It is currently claimed, but it is still parent or non-leaf work rather than a concrete lane target."
+                .to_owned(),
+        );
+        if !dependents.is_empty() {
+            rationale.push(format!(
+                "Its open child or downstream work is {}.",
+                relation_titles(&dependents, 3)
+            ));
+        }
+        rationale
+            .push("Inspecting the child work is the fastest way to move the queue.".to_owned());
+        Some(build_issue_recommendation(
+            &issue,
+            "review_claimed_parent_issue",
+            format!(
+                "Inspect {} before launching it.",
+                issue_id(&issue).unwrap_or("the claimed issue")
+            ),
+            None,
             rationale,
         ))
     } else if let Some(issue) = choose_focus_issue(&blocked_details) {
@@ -1775,7 +1867,10 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
         Some(build_issue_recommendation(
             &issue,
             "review_blocked_issue",
-            format!("Inspect {} blockage.", issue_id(&issue).unwrap_or("the blocked issue")),
+            format!(
+                "Inspect {} blockage.",
+                issue_id(&issue).unwrap_or("the blocked issue")
+            ),
             None,
             rationale,
         ))
@@ -1827,7 +1922,8 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
         .and_then(|action| action.get("rationale"))
         .and_then(Value::as_array)
         .map(|items| {
-            items.iter()
+            items
+                .iter()
                 .filter_map(Value::as_str)
                 .map(ToOwned::to_owned)
                 .collect::<Vec<_>>()
@@ -1839,8 +1935,10 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
             "The runtime must be healthy before the operator view can be trusted.".to_owned(),
         );
     } else if active_lanes.is_empty() && !claimed_issues.is_empty() {
-        briefing_narrative
-            .insert(0, "No active lanes are currently moving claimed work.".to_owned());
+        briefing_narrative.insert(
+            0,
+            "No active lanes are currently moving claimed work.".to_owned(),
+        );
     }
 
     Ok(json!({
@@ -4802,7 +4900,13 @@ fn run_respond(args: &[String]) -> ExitCode {
     let kind = request.get("kind").and_then(Value::as_str).unwrap_or("");
     let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
 
-    match query_response(&parsed.repo_root, &parsed.socket_path, request_id, kind, &payload) {
+    match query_response(
+        &parsed.repo_root,
+        &parsed.socket_path,
+        request_id,
+        kind,
+        &payload,
+    ) {
         Ok(Some(response)) => match serde_json::to_string(&response) {
             Ok(text) => {
                 println!("{text}");

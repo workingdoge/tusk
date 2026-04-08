@@ -57,6 +57,7 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
    - Cut the final commit intentionally; do not rely on an unnamed working-copy change as the handoff artifact.
    - Default handoff: a verified visible `jj` commit in the workspace. Do not assume publish or merge is in scope unless the brief says so.
    - Re-run tracker preflight before `bd close` or other final issue mutations.
+   - If the repo ships a compaction path such as `tuskd compact-lane`, prefer it over replaying handoff, finish, workspace cleanup, archive, and close manually.
    - If landing is owned elsewhere, leave the issue open and record the handoff state. Close it only when the repo's actual completion boundary has been met.
    - Forget and remove the workspace only after confirming the work is landed or intentionally kept for later.
 

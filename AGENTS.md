@@ -5,7 +5,7 @@ These instructions apply to the canonical `tusk` repo checkout.
 ## Workflow
 
 - Use `nix develop --no-pure-eval path:.` or `direnv allow` before tracker or workflow work.
-- The dev shell provides a flake-owned `bd` wrapper, `tusk-flake-ref`, `tusk-tracker`, `dolt`, `jj`, `deadnix`, `statix`, `nil`, `nixd`, `nix-tree`, `nix-output-monitor`, `nixfmt`, `codex`, `tuskd`, `glistix`, `gleam`, `erl`, `rebar3`, a `rust-overlay` toolchain for `cargo`/`rustc`/`rustfmt`, and `rust-analyzer`.
+- The dev shell provides a flake-owned `bd` wrapper, `tusk-flake-ref`, `tusk-tracker`, `tusk-skill-contract-check`, `dolt`, `jj`, `deadnix`, `statix`, `nil`, `nixd`, `nix-tree`, `nix-output-monitor`, `nixfmt`, `codex`, `tuskd`, `glistix`, `gleam`, `erl`, `rebar3`, a `rust-overlay` toolchain for `cargo`/`rustc`/`rustfmt`, and `rust-analyzer`.
 - Run `devenv up` inside the dev shell to ensure repo-scoped tracker services when `.beads/` exists. `tuskd ensure` owns backend reuse and host-local coordination; shells must not stop Dolt on exit.
 - Bootstrap fresh trackers for `tuskd` with `bd init --server`; embedded Dolt mode is not a valid `tuskd` substrate.
 - Use this repo to develop `tusk` as a standalone flake and skill/tooling home; keep consumer-specific `bd-*` wrappers in the consuming repo unless they are intentionally promoted.
@@ -39,6 +39,7 @@ nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__funct
 nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && bd version && jj --version && dolt version'
 nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && glistix --help >/dev/null && erl -eval "erlang:halt()." -noshell >/dev/null && rebar3 version >/dev/null && cargo --version >/dev/null && rustc --version >/dev/null && rustfmt --version >/dev/null && rust-analyzer --version >/dev/null'
 codex-nix-check
+tusk-skill-contract-check
 tuskd --help
 nix run .#tuskd -- ensure --repo "$PWD"
 nix run .#tuskd -- status --repo "$PWD"
@@ -50,6 +51,7 @@ nix run .#tuskd -- launch-lane --repo "$PWD" --issue-id tusk-123 --base-rev main
 nix run .#tuskd -- handoff-lane --repo "$PWD" --revision <rev> --note "ready for landing"
 nix run .#tuskd -- finish-lane --repo "$PWD" --issue-id tusk-123 --outcome completed --note "workspace cleaned after handoff"
 nix run .#tuskd -- archive-lane --repo "$PWD" --issue-id tusk-123 --note "lane compacted into receipts"
+nix run .#tuskd -- compact-lane --repo "$PWD" --issue-id tusk-123 --revision <rev> --reason "completed in visible commit <rev>"
 nix build .#tusk-ui
 nix run .#tusk-ui -- --help
 ```
@@ -57,6 +59,7 @@ nix run .#tusk-ui -- --help
 ## Repo Shape
 
 - `flake.nix` exports `lib.tusk`, `flakeModules.tusk`, the development shell, `tusk-tracker`, `tuskd`, `tusk-ui`, the installable OpenAI/Codex skill bundle, and `devenvModules.{codex,scratch,consumer,dogfood,tusk-skill,ops-skill,nix-skill}`.
+- `flake.nix` also exports `tusk-skill-contract-check`, the named validation surface for repo-authored skill shape, OpenAI metadata, and repo-local skill projection.
 - `main` is the intended moving bookmark for flake consumers; once exported to Git and pushed, consumers can pin the repo with `?ref=main` and optionally a specific revision.
 - `flake.nix` also exports a flake-owned `bd`/`beads` wrapper app so raw-shell `nix run` calls reuse repo-scoped tracker state instead of ambient host Beads configuration.
 - `flake.nix` also exports `tusk-flake-ref`, which prints the canonical `path:`, `git+file:`, and remote `git+...?...ref=` forms for this repo and reports when no publish remote is configured.
@@ -96,11 +99,13 @@ nix run .#tusk-ui -- --help
 - Keep the shared scratch module focused on generic environment redirection; repo-specific cleanup choices still belong in the consuming repo.
 - Keep `tusk-clean` conservative: dry-run by default, skip `.jj-workspaces/`, and quarantine instead of deleting.
 - Prefer `codex-nix-check` and a shell smoke test after changing the flake or module surface.
+- Prefer `tusk-skill-contract-check` when the change is specifically about repo-authored skills or their projection contract.
 - If you initialize `.beads/` here for dogfooding, treat it as this repo's own tracker, not as an extension of `config`. The tracker state is local and ignored by Git in this repo.
 
 ## Verification
 
 - `codex-nix-check`
+- `tusk-skill-contract-check`
 - `nix build .#tusk-openai-skill`
 - `nix run .#install-tusk-openai-skill`
 - `nix run .#tusk-flake-ref -- --repo "$PWD" --json`

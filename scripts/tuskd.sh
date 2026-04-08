@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-program_name="${0##*/}"
+program_name="tuskd"
 paths_sh="${TUSK_PATHS_SH:?TUSK_PATHS_SH is required}"
 
 source "${paths_sh}"
@@ -21,6 +21,7 @@ Usage:
   tuskd handoff-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --revision REV [--note TEXT]
   tuskd finish-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --outcome OUTCOME [--note TEXT]
   tuskd archive-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID [--note TEXT]
+  tuskd compact-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON [--revision REV] [--outcome OUTCOME] [--note TEXT] [--quarantine]
   tuskd serve [--repo PATH] [--socket PATH]
   tuskd query [--repo PATH] [--socket PATH] --kind KIND [--request-id ID] [--payload JSON]
 
@@ -37,6 +38,7 @@ Commands:
   handoff-lane  Record a lane handoff with an explicit revision.
   finish-lane   Record a terminal lane outcome without collapsing into issue closure.
   archive-lane  Remove one finished lane from live state once its workspace is gone.
+  compact-lane  Compact one live lane through handoff, finish, workspace cleanup, archive, and close.
   serve         Serve the local JSON protocol over a Unix socket.
   query         Query one tuskd protocol request; read kinds are handled locally, actions still require a live socket.
 
@@ -56,8 +58,92 @@ EOF
 }
 
 fail() {
-  echo "${program_name}: $*" >&2
+  render_actionable_summary "${command:-}" "$*" "" >&2 || true
   exit 1
+}
+
+summary_next_action() {
+  local command_name="$1"
+  local message="$2"
+  local details_json="${3:-}"
+  local issue_id=""
+  local issue_status=""
+  local workspace_path=""
+
+  if [ -n "${details_json}" ] && [ "${details_json}" != "null" ]; then
+    issue_id="$(jq -r '.issue_id // .error.details.issue_id // .error.carrier.intent.payload.issue_id // ""' <<<"${details_json}" 2>/dev/null || true)"
+    issue_status="$(jq -r '.status // .error.details.status // .error.carrier.issue.status // ""' <<<"${details_json}" 2>/dev/null || true)"
+    workspace_path="$(jq -r '.workspace_path // .error.details.workspace_path // .error.carrier.workspace.path // ""' <<<"${details_json}" 2>/dev/null || true)"
+  fi
+
+  case "${message}" in
+    *"requires --issue-id"*)
+      printf 'retry with the lane issue id: tuskd %s --repo <repo> --issue-id <issue>' "${command_name}"
+      ;;
+    *"requires --revision"*)
+      printf 'retry with the visible revision: tuskd %s --repo <repo> --issue-id <issue> --revision <rev>' "${command_name}"
+      ;;
+    *"requires --reason"*)
+      printf 'retry with a closure reason: tuskd %s --repo <repo> --issue-id <issue> --reason \"completed in visible commit <rev>\"' "${command_name}"
+      ;;
+    *"requires --outcome"*)
+      printf 'retry with an explicit outcome: tuskd %s --repo <repo> --issue-id <issue> --outcome completed' "${command_name}"
+      ;;
+    *"requires --base-rev"*)
+      printf 'retry with an explicit base revision: tuskd %s --repo <repo> --issue-id <issue> --base-rev main' "${command_name}"
+      ;;
+    "claim_issue requires a ready issue")
+      printf 'pick a ready issue first: nix run .#bd -- ready --json or nix run .#tuskd -- operator-snapshot --repo <repo>'
+      ;;
+    "claim_issue requires an open issue")
+      if [ "${issue_status}" = "in_progress" ]; then
+        printf 'that issue is already claimed or active; pick another open issue or launch/finish its existing lane'
+      elif [ "${issue_status}" = "closed" ]; then
+        printf 'pick a non-closed issue id before retrying claim-issue'
+      else
+        printf 'choose an open issue id before retrying claim-issue'
+      fi
+      ;;
+    "launch_lane requires no existing live lane")
+      printf 'finish or archive the existing live lane before launching another one for this issue'
+      ;;
+    "handoff_lane requires an existing lane record")
+      printf 'launch a lane for %s before handing it off' "${issue_id:-<issue>}"
+      ;;
+    "finish_lane requires an existing lane record")
+      printf 'launch a lane for %s before finishing it' "${issue_id:-<issue>}"
+      ;;
+    "archive_lane requires a finished lane")
+      printf 'run tuskd finish-lane --repo <repo> --issue-id %s --outcome completed before archiving' "${issue_id:-<issue>}"
+      ;;
+    "archive_lane requires the lane workspace to be removed first")
+      if [ -n "${workspace_path}" ]; then
+        printf 'forget and remove or quarantine %s, then rerun tuskd archive-lane --repo <repo> --issue-id %s' "${workspace_path}" "${issue_id:-<issue>}"
+      else
+        printf 'forget and remove or quarantine the lane workspace, then rerun tuskd archive-lane --repo <repo> --issue-id %s' "${issue_id:-<issue>}"
+      fi
+      ;;
+    "close_issue requires the live lane to be archived first")
+      printf 'archive the live lane for %s before closing the issue' "${issue_id:-<issue>}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+render_actionable_summary() {
+  local command_name="$1"
+  local message="$2"
+  local details_json="${3:-}"
+  local next_action=""
+
+  [ -n "${message}" ] || return 1
+
+  printf '%s: %s\n' "${program_name}" "${message}"
+  if next_action="$(summary_next_action "${command_name}" "${message}" "${details_json}")"; then
+    printf 'next: %s\n' "${next_action}"
+  fi
 }
 
 require_tuskd_core_bin() {
@@ -2367,6 +2453,196 @@ rollback_launch_artifacts() {
     }'
 }
 
+workspace_registration_present() {
+  local repo_root="$1"
+  local workspace_name="$2"
+  local list_output=""
+
+  [ -n "${workspace_name}" ] || return 1
+  if ! list_output="$(run_in_repo_capture "${repo_root}" jj --repository "${repo_root}" workspace list --ignore-working-copy --color never)"; then
+    return 1
+  fi
+
+  printf '%s\n' "${list_output}" | grep -F "${workspace_name}" >/dev/null 2>&1
+}
+
+workspace_quarantine_path() {
+  local repo_root="$1"
+  local workspace_name="$2"
+  local suffix
+
+  suffix="$(date -u +"%Y%m%dT%H%M%SZ")"
+  printf '%s/.quarantine-%s-%s\n' "$(workspace_root_dir "${repo_root}")" "${workspace_name:-workspace}" "${suffix}"
+}
+
+compact_lane_workspace() {
+  local repo_root="$1"
+  local issue_id="$2"
+  local workspace_name="$3"
+  local workspace_path="$4"
+  local quarantine_requested="${5:-false}"
+  local workspace_root=""
+  local requested_mode="remove"
+  local effective_mode="none"
+  local quarantine_path=""
+  local registration_present=false
+  local path_present=false
+  local forget_output=""
+  local forget_exit=0
+  local cleanup_output=""
+  local cleanup_exit=0
+
+  workspace_root="$(workspace_root_dir "${repo_root}")"
+  if [ "${quarantine_requested}" = true ]; then
+    requested_mode="quarantine"
+  fi
+
+  if [ -n "${workspace_path}" ]; then
+    case "${workspace_path}" in
+      "${workspace_root}/"*)
+        ;;
+      *)
+        jq -cn \
+          --arg issue_id "${issue_id}" \
+          --arg workspace_name "${workspace_name}" \
+          --arg workspace_path "${workspace_path}" \
+          --arg workspace_root "${workspace_root}" \
+          '{
+            ok: false,
+            issue_id: $issue_id,
+            error: {
+              message: "compact_lane refuses to mutate a workspace outside the repo workspace root"
+            },
+            workspace_name: $workspace_name,
+            workspace_path: $workspace_path,
+            workspace_root: $workspace_root
+          }'
+        return 0
+        ;;
+    esac
+  fi
+
+  if workspace_registration_present "${repo_root}" "${workspace_name}"; then
+    registration_present=true
+  fi
+  if [ -n "${workspace_path}" ] && [ -e "${workspace_path}" ]; then
+    path_present=true
+  fi
+
+  if [ "${registration_present}" = true ]; then
+    if forget_output="$(run_in_repo_capture "${repo_root}" jj --repository "${repo_root}" workspace forget "${workspace_name}")"; then
+      forget_exit=0
+    else
+      forget_exit=$?
+    fi
+  fi
+
+  if [ "${forget_exit}" -ne 0 ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg workspace_name "${workspace_name}" \
+      --arg workspace_path "${workspace_path}" \
+      --argjson registration_present "$(json_bool "${registration_present}")" \
+      --argjson forget_exit "${forget_exit}" \
+      --arg forget_output "${forget_output}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        error: {
+          message: "compact_lane failed to forget the jj workspace"
+        },
+        workspace_name: $workspace_name,
+        workspace_path: $workspace_path,
+        registration_present: $registration_present,
+        forget_workspace: {
+          exit_code: $forget_exit,
+          output: (if ($forget_output | length) > 0 then $forget_output else null end)
+        }
+      }'
+    return 0
+  fi
+
+  if [ "${path_present}" = true ]; then
+    if [ "${requested_mode}" = "quarantine" ]; then
+      quarantine_path="$(workspace_quarantine_path "${repo_root}" "${workspace_name}")"
+      mkdir -p "${workspace_root}"
+      if cleanup_output="$(run_in_repo_capture "${repo_root}" mv -- "${workspace_path}" "${quarantine_path}")"; then
+        cleanup_exit=0
+        effective_mode="quarantine"
+      else
+        cleanup_exit=$?
+      fi
+    else
+      if cleanup_output="$(run_in_repo_capture "${repo_root}" rm -rf -- "${workspace_path}")"; then
+        cleanup_exit=0
+        effective_mode="remove"
+      else
+        cleanup_exit=$?
+        quarantine_path="$(workspace_quarantine_path "${repo_root}" "${workspace_name}")"
+        mkdir -p "${workspace_root}"
+        if cleanup_output="$(run_in_repo_capture "${repo_root}" mv -- "${workspace_path}" "${quarantine_path}")"; then
+          cleanup_exit=0
+          effective_mode="quarantine"
+        fi
+      fi
+    fi
+  fi
+
+  if [ "${cleanup_exit}" -ne 0 ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg workspace_name "${workspace_name}" \
+      --arg workspace_path "${workspace_path}" \
+      --arg requested_mode "${requested_mode}" \
+      --arg quarantine_path "${quarantine_path}" \
+      --argjson path_present "$(json_bool "${path_present}")" \
+      --argjson cleanup_exit "${cleanup_exit}" \
+      --arg cleanup_output "${cleanup_output}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        error: {
+          message: "compact_lane failed to clean the lane workspace"
+        },
+        workspace_name: $workspace_name,
+        workspace_path: $workspace_path,
+        path_present: $path_present,
+        cleanup: {
+          requested_mode: $requested_mode,
+          quarantine_path: (if ($quarantine_path | length) > 0 then $quarantine_path else null end),
+          exit_code: $cleanup_exit,
+          output: (if ($cleanup_output | length) > 0 then $cleanup_output else null end)
+        }
+      }'
+    return 0
+  fi
+
+  jq -cn \
+    --arg issue_id "${issue_id}" \
+    --arg workspace_name "${workspace_name}" \
+    --arg workspace_path "${workspace_path}" \
+    --arg requested_mode "${requested_mode}" \
+    --arg effective_mode "${effective_mode}" \
+    --arg quarantine_path "${quarantine_path}" \
+    --argjson registration_present "$(json_bool "${registration_present}")" \
+    --argjson path_present "$(json_bool "${path_present}")" \
+    --argjson workspace_exists_after "$(json_bool "$([ -n "${workspace_path}" ] && [ -e "${workspace_path}" ] && echo true || echo false)")" \
+    --argjson quarantine_exists "$(json_bool "$([ -n "${quarantine_path}" ] && [ -e "${quarantine_path}" ] && echo true || echo false)")" \
+    '{
+      ok: true,
+      issue_id: $issue_id,
+      workspace_name: $workspace_name,
+      workspace_path: $workspace_path,
+      registration_present: $registration_present,
+      path_present: $path_present,
+      requested_mode: $requested_mode,
+      effective_mode: $effective_mode,
+      workspace_exists_after: $workspace_exists_after,
+      quarantine_path: (if ($quarantine_path | length) > 0 then $quarantine_path else null end),
+      quarantine_exists: $quarantine_exists
+    }'
+}
+
 build_claim_issue_carrier() {
   local repo_root="$1"
   local socket_path="$2"
@@ -3099,6 +3375,11 @@ cmd_transition_action() {
     return 0
   fi
 
+  render_actionable_summary \
+    "${kind//_/-}" \
+    "$(jq -r '.error.message // "request failed"' <<<"${action_result}")" \
+    "${action_result}" \
+    >&2 || true
   jq -c '.' <<<"${action_result}"
   return 1
 }
@@ -3280,6 +3561,179 @@ cmd_archive_lane() {
   cmd_transition_action "${repo_root}" "${socket_path}" "archive_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg note "${note}" '{issue_id:$issue_id, note:$note}')"
 }
 
+compact_lane_action() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local revision="$4"
+  local reason="$5"
+  local outcome="${6:-completed}"
+  local note="${7:-}"
+  local quarantine_requested="${8:-false}"
+  local lane_json="null"
+  local lane_status=""
+  local workspace_name=""
+  local workspace_path=""
+  local handoff_result='{"ok":true,"payload":null}'
+  local finish_result='{"ok":true,"payload":null}'
+  local cleanup_result='{"ok":true,"payload":null}'
+  local archive_result='{"ok":true,"payload":null}'
+  local close_result='{"ok":true,"payload":null}'
+
+  if [ -z "${issue_id}" ]; then
+    jq -cn '{ok:false, error:{message:"compact_lane requires issue_id"}}'
+    return 0
+  fi
+
+  if [ -z "${reason}" ]; then
+    jq -cn --arg issue_id "${issue_id}" '{ok:false, error:{message:"compact_lane requires reason"}, issue_id:$issue_id}'
+    return 0
+  fi
+
+  ensure_state_files "${repo_root}"
+  lane_json="$(current_lane_for_issue "${repo_root}" "${issue_id}")"
+  if [ "${lane_json}" = "null" ]; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      '{ok:false, issue_id:$issue_id, error:{message:"compact_lane requires an existing lane record"}}'
+    return 0
+  fi
+
+  lane_status="$(jq -r '.status // ""' <<<"${lane_json}")"
+  workspace_name="$(jq -r '.workspace_name // ""' <<<"${lane_json}")"
+  workspace_path="$(jq -r '.workspace_path // ""' <<<"${lane_json}")"
+
+  case "${lane_status}" in
+    launched)
+      if [ -z "${revision}" ]; then
+        jq -cn \
+          --arg issue_id "${issue_id}" \
+          --arg status "${lane_status}" \
+          '{ok:false, issue_id:$issue_id, status:$status, error:{message:"compact_lane requires --revision before a launched lane can be compacted"}}'
+        return 0
+      fi
+      handoff_result="$(run_transition_action "${repo_root}" "${socket_path}" "handoff_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg revision "${revision}" --arg note "${note}" '{issue_id:$issue_id, revision:$revision, note:$note}')")"
+      if ! jq -e '.ok == true' >/dev/null <<<"${handoff_result}"; then
+        jq -cn \
+          --arg issue_id "${issue_id}" \
+          --arg status "${lane_status}" \
+          --argjson details "${handoff_result}" \
+          '{ok:false, issue_id:$issue_id, status:$status, error:{message:"compact_lane failed during handoff_lane", details:$details}}'
+        return 0
+      fi
+      finish_result="$(run_transition_action "${repo_root}" "${socket_path}" "finish_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg outcome "${outcome}" --arg note "${note}" '{issue_id:$issue_id, outcome:$outcome, note:$note}')")"
+      if ! jq -e '.ok == true' >/dev/null <<<"${finish_result}"; then
+        jq -cn \
+          --arg issue_id "${issue_id}" \
+          --arg status "${lane_status}" \
+          --argjson details "${finish_result}" \
+          '{ok:false, issue_id:$issue_id, status:$status, error:{message:"compact_lane failed during finish_lane", details:$details}}'
+        return 0
+      fi
+      ;;
+    handed_off)
+      finish_result="$(run_transition_action "${repo_root}" "${socket_path}" "finish_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg outcome "${outcome}" --arg note "${note}" '{issue_id:$issue_id, outcome:$outcome, note:$note}')")"
+      if ! jq -e '.ok == true' >/dev/null <<<"${finish_result}"; then
+        jq -cn \
+          --arg issue_id "${issue_id}" \
+          --arg status "${lane_status}" \
+          --argjson details "${finish_result}" \
+          '{ok:false, issue_id:$issue_id, status:$status, error:{message:"compact_lane failed during finish_lane", details:$details}}'
+        return 0
+      fi
+      ;;
+    finished)
+      ;;
+    *)
+      jq -cn \
+        --arg issue_id "${issue_id}" \
+        --arg status "${lane_status}" \
+        '{ok:false, issue_id:$issue_id, status:$status, error:{message:"compact_lane requires a launched, handed_off, or finished lane"}}'
+      return 0
+      ;;
+  esac
+
+  cleanup_result="$(compact_lane_workspace "${repo_root}" "${issue_id}" "${workspace_name}" "${workspace_path}" "${quarantine_requested}")"
+  if ! jq -e '.ok == true' >/dev/null <<<"${cleanup_result}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg status "${lane_status}" \
+      --argjson details "${cleanup_result}" \
+      '{ok:false, issue_id:$issue_id, status:$status, error:{message:"compact_lane failed during workspace cleanup", details:$details}}'
+    return 0
+  fi
+
+  archive_result="$(run_transition_action "${repo_root}" "${socket_path}" "archive_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg note "${note}" '{issue_id:$issue_id, note:$note}')")"
+  if ! jq -e '.ok == true' >/dev/null <<<"${archive_result}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg status "${lane_status}" \
+      --argjson details "${archive_result}" \
+      '{ok:false, issue_id:$issue_id, status:$status, error:{message:"compact_lane failed during archive_lane", details:$details}}'
+    return 0
+  fi
+
+  close_result="$(run_transition_action "${repo_root}" "${socket_path}" "close_issue" "$(jq -cn --arg issue_id "${issue_id}" --arg reason "${reason}" '{issue_id:$issue_id, reason:$reason}')")"
+  if ! jq -e '.ok == true' >/dev/null <<<"${close_result}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg status "${lane_status}" \
+      --argjson details "${close_result}" \
+      '{ok:false, issue_id:$issue_id, status:$status, error:{message:"compact_lane failed during close_issue", details:$details}}'
+    return 0
+  fi
+
+  jq -cn \
+    --arg issue_id "${issue_id}" \
+    --arg from_status "${lane_status}" \
+    --arg reason "${reason}" \
+    --arg outcome "${outcome}" \
+    --arg revision "${revision}" \
+    --arg note "${note}" \
+    --argjson handoff "$(jq -c '.payload' <<<"${handoff_result}")" \
+    --argjson finish "$(jq -c '.payload' <<<"${finish_result}")" \
+    --argjson cleanup "${cleanup_result}" \
+    --argjson archive "$(jq -c '.payload' <<<"${archive_result}")" \
+    --argjson close "$(jq -c '.payload' <<<"${close_result}")" \
+    '{
+      ok: true,
+      payload: {
+        issue_id: $issue_id,
+        from_status: $from_status,
+        reason: $reason,
+        outcome: $outcome,
+        revision: (if ($revision | length) > 0 then $revision else null end),
+        note: (if ($note | length) > 0 then $note else null end),
+        handoff: $handoff,
+        finish: $finish,
+        cleanup: $cleanup,
+        archive: $archive,
+        close: $close
+      }
+    }'
+}
+
+cmd_compact_lane() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local issue_id="$3"
+  local revision="$4"
+  local reason="$5"
+  local outcome="${6:-completed}"
+  local note="${7:-}"
+  local quarantine_requested="${8:-false}"
+  local compact_result=""
+
+  compact_result="$(compact_lane_action "${repo_root}" "${socket_path}" "${issue_id}" "${revision}" "${reason}" "${outcome}" "${note}" "${quarantine_requested}")"
+  if jq -e '.ok == true' >/dev/null <<<"${compact_result}"; then
+    jq -c '.payload' <<<"${compact_result}"
+    return 0
+  fi
+
+  jq -c '.' <<<"${compact_result}"
+  return 1
+}
+
 cmd_serve() {
   local repo_root="$1"
   local socket_path="$2"
@@ -3366,6 +3820,7 @@ revision_arg=""
 outcome_arg=""
 note_arg=""
 payload_arg="null"
+quarantine_arg=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -3423,6 +3878,10 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || fail "--note requires a value"
       note_arg="$2"
       shift 2
+      ;;
+    --quarantine)
+      quarantine_arg=true
+      shift
       ;;
     --payload)
       [ $# -ge 2 ] || fail "--payload requires a JSON value"
@@ -3485,6 +3944,11 @@ case "${command}" in
   archive-lane)
     [ -n "${issue_id_arg}" ] || fail "archive-lane requires --issue-id"
     cmd_archive_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${note_arg}"
+    ;;
+  compact-lane)
+    [ -n "${issue_id_arg}" ] || fail "compact-lane requires --issue-id"
+    [ -n "${reason_arg}" ] || fail "compact-lane requires --reason"
+    cmd_compact_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${revision_arg}" "${reason_arg}" "${outcome_arg:-completed}" "${note_arg}" "${quarantine_arg}"
     ;;
   serve)
     cmd_serve "${repo_root}" "${socket_path}"

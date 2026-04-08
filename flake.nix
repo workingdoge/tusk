@@ -440,6 +440,21 @@
           exec ${tuskUiBinaryPackage}/bin/tusk-ui "$@"
         '';
       };
+      tuskSkillContractCheck = pkgs.writeShellApplication {
+        name = "tusk-skill-contract-check";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.gawk
+          pkgs.git
+          pkgs.gnugrep
+          pkgs.nix
+        ];
+        text = ''
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+          export TUSK_SKILL_CHECK_SYSTEM=${system}
+          exec bash ${./scripts/tusk-skill-contract-check.sh} "$@"
+        '';
+      };
       codexNixCheck = pkgs.writeShellApplication {
         name = "codex-nix-check";
         runtimeInputs = [
@@ -452,6 +467,7 @@
           pkgs.rust-analyzer
           tuskClean
           tuskFlakeRefPackage
+          tuskSkillContractCheck
           tuskTrackerPackage
           tuskdTransitionTestsPackage
           rustToolchain
@@ -489,52 +505,11 @@
           rustc --version >/dev/null
           rustfmt --version >/dev/null
           rust-analyzer --version >/dev/null
-          test "$CODEX_HOME" = "$DEVENV_ROOT/.codex"
-          test -L .codex/skills/tusk
-          test -L .codex/skills/ops
-          test -L .codex/skills/nix
-          test -f .codex/skills/tusk/SKILL.md
-          test -f .codex/skills/ops/references/TOOLING.md
-          test -f .codex/skills/nix/scripts/detect-shape.py
+          tusk-skill-contract-check --repo "$DEVENV_ROOT"
           EOF
           )"
           nix develop --no-pure-eval "path:$checkout_root" \
             -c sh -lc "export TUSK_CHECKOUT_ROOT=\"$TUSK_CHECKOUT_ROOT\"; export TUSK_TRACKER_ROOT=\"$TUSK_TRACKER_ROOT\"; export DEVENV_ROOT=\"$TUSK_CHECKOUT_ROOT\"; export BEADS_WORKSPACE_ROOT=\"$TUSK_TRACKER_ROOT\"; $check_cmd"
-          nix eval --impure --raw --expr '
-            let
-              flake = builtins.getFlake "path:'"$checkout_root"'";
-              pkgs = flake.inputs.nixpkgs.legacyPackages.${system};
-              consumer = flake.inputs.devenv.lib.mkShell {
-                inherit (flake) inputs;
-                inherit pkgs;
-                modules = [
-                  flake.devenvModules.consumer
-                  {
-                    tusk.consumer.enable = true;
-                    tusk.consumer.smokeCheck.enable = false;
-                  }
-                ];
-              };
-              dogfood = flake.inputs.devenv.lib.mkShell {
-                inherit (flake) inputs;
-                inherit pkgs;
-                modules = [ flake.devenvModules.dogfood ];
-              };
-              consumerFiles = consumer.config.files or { };
-              dogfoodFiles = dogfood.config.files or { };
-            in
-            if
-              (! builtins.hasAttr ".codex/skills/tusk" consumerFiles)
-              && (! builtins.hasAttr ".codex/skills/ops" consumerFiles)
-              && (! builtins.hasAttr ".codex/skills/nix" consumerFiles)
-              && builtins.hasAttr ".codex/skills/tusk" dogfoodFiles
-              && builtins.hasAttr ".codex/skills/ops" dogfoodFiles
-              && builtins.hasAttr ".codex/skills/nix" dogfoodFiles
-            then
-              "ok"
-            else
-              throw "consumer/dogfood skill contract mismatch"
-          ' >/dev/null
         '';
       };
       installTuskOpenaiSkill = pkgs.writeShellApplication {
@@ -588,6 +563,7 @@
             pkgs.socat
             pkgs.statix
             repoCodex
+            tuskSkillContractCheck
             tuskClean
             tuskFlakeRefPackage
             tuskTrackerPackage
@@ -610,6 +586,7 @@
             echo "  bd status --json"
             echo "  bd ready --json"
             echo "  jj st"
+            echo "  tusk-skill-contract-check"
             echo "  codex-nix-check"
             echo "  tusk-clean"
             echo "  glistix --help"
@@ -672,6 +649,7 @@
         rust-toolchain = rustToolchain;
         bd = repoBeads;
         beads = repoBeads;
+        tusk-skill-contract-check = tuskSkillContractCheck;
         tusk-clean = tuskClean;
         tusk-flake-ref = tuskFlakeRefPackage;
         tusk-tracker = tuskTrackerPackage;
@@ -697,6 +675,10 @@
         codex-nix-check = {
           type = "app";
           program = "${codexNixCheck}/bin/codex-nix-check";
+        };
+        tusk-skill-contract-check = {
+          type = "app";
+          program = "${tuskSkillContractCheck}/bin/tusk-skill-contract-check";
         };
         install-tusk-openai-skill = {
           type = "app";

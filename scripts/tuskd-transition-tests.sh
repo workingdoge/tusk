@@ -48,11 +48,17 @@ capture_command() {
   shift 2
   local output=""
   local status=0
+  local stderr_path=""
 
+  stderr_path="$(mktemp)"
   set +e
-  output="$("$@" 2>&1)"
+  output="$("$@" 2>"${stderr_path}")"
   status=$?
   set -e
+  if [ -s "${stderr_path}" ]; then
+    cat "${stderr_path}" >&2
+  fi
+  rm -f -- "${stderr_path}"
 
   printf -v "${output_var}" '%s' "${output}"
   printf -v "${status_var}" '%s' "${status}"
@@ -100,6 +106,13 @@ assert_file_missing() {
   local context="$2"
 
   [ ! -e "${path}" ] || fail "${context}: ${path} still exists"
+}
+
+assert_file_present() {
+  local path="$1"
+  local context="$2"
+
+  [ -e "${path}" ] || fail "${context}: ${path} is missing"
 }
 
 create_issue() {
@@ -470,6 +483,108 @@ test_launch_rollback() {
   note "rollback: ok"
 }
 
+test_compact_lane_remove() {
+  local repo_root="$1"
+  local base_rev="$2"
+  local issue_id=""
+  local claim_json=""
+  local claim_status=0
+  local launch_json=""
+  local launch_status=0
+  local compact_json=""
+  local compact_status=0
+  local revision=""
+  local workspace_path=""
+
+  note "compact-remove: begin"
+  issue_id="$(create_issue "${repo_root}" "transition compact remove probe")"
+
+  run_cli_json claim_json claim_status \
+    tuskd claim-issue --repo "${repo_root}" --issue-id "${issue_id}"
+  assert_status "${claim_status}" "0" "claim compact remove issue"
+
+  run_cli_json launch_json launch_status \
+    tuskd launch-lane --repo "${repo_root}" --issue-id "${issue_id}" --base-rev "${base_rev}" --slug compact-remove-probe
+  assert_status "${launch_status}" "0" "launch compact remove lane"
+
+  revision="$(current_revision "${repo_root}")"
+  run_cli_json compact_json compact_status \
+    tuskd compact-lane \
+      --repo "${repo_root}" \
+      --issue-id "${issue_id}" \
+      --revision "${revision}" \
+      --reason "compact remove test completed" \
+      --note "compact remove probe"
+  assert_status "${compact_status}" "0" "compact lane remove"
+  assert_json_value "${compact_json}" '.cleanup.effective_mode' "remove" "compact remove mode"
+
+  workspace_path="$(jq -r '.cleanup.workspace_path // ""' <<<"${compact_json}")"
+  [ -n "${workspace_path}" ] || fail "compact remove output missing workspace_path"$'\n'"${compact_json}"
+  assert_file_missing "${workspace_path}" "compact remove workspace cleanup"
+  [ "$(lane_count "${repo_root}" "${issue_id}")" = "0" ] || fail "compact remove left lane state behind for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "issue.claim")" = "1" ] || fail "compact remove issue.claim receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.launch")" = "1" ] || fail "compact remove lane.launch receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.handoff")" = "1" ] || fail "compact remove lane.handoff receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.finish")" = "1" ] || fail "compact remove lane.finish receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.archive")" = "1" ] || fail "compact remove lane.archive receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "issue.close")" = "1" ] || fail "compact remove issue.close receipt count mismatch for ${issue_id}"
+
+  note "compact-remove: ok"
+}
+
+test_compact_lane_quarantine() {
+  local repo_root="$1"
+  local base_rev="$2"
+  local issue_id=""
+  local claim_json=""
+  local claim_status=0
+  local launch_json=""
+  local launch_status=0
+  local compact_json=""
+  local compact_status=0
+  local revision=""
+  local workspace_path=""
+  local quarantine_path=""
+
+  note "compact-quarantine: begin"
+  issue_id="$(create_issue "${repo_root}" "transition compact quarantine probe")"
+
+  run_cli_json claim_json claim_status \
+    tuskd claim-issue --repo "${repo_root}" --issue-id "${issue_id}"
+  assert_status "${claim_status}" "0" "claim compact quarantine issue"
+
+  run_cli_json launch_json launch_status \
+    tuskd launch-lane --repo "${repo_root}" --issue-id "${issue_id}" --base-rev "${base_rev}" --slug compact-quarantine-probe
+  assert_status "${launch_status}" "0" "launch compact quarantine lane"
+
+  revision="$(current_revision "${repo_root}")"
+  run_cli_json compact_json compact_status \
+    tuskd compact-lane \
+      --repo "${repo_root}" \
+      --issue-id "${issue_id}" \
+      --revision "${revision}" \
+      --reason "compact quarantine test completed" \
+      --note "compact quarantine probe" \
+      --quarantine
+  assert_status "${compact_status}" "0" "compact lane quarantine"
+  assert_json_value "${compact_json}" '.cleanup.effective_mode' "quarantine" "compact quarantine mode"
+
+  workspace_path="$(jq -r '.cleanup.workspace_path // ""' <<<"${compact_json}")"
+  quarantine_path="$(jq -r '.cleanup.quarantine_path // ""' <<<"${compact_json}")"
+  [ -n "${workspace_path}" ] || fail "compact quarantine output missing workspace_path"$'\n'"${compact_json}"
+  [ -n "${quarantine_path}" ] || fail "compact quarantine output missing quarantine_path"$'\n'"${compact_json}"
+  assert_file_missing "${workspace_path}" "compact quarantine removed original workspace path"
+  assert_file_present "${quarantine_path}" "compact quarantine moved workspace"
+  [ "$(lane_count "${repo_root}" "${issue_id}")" = "0" ] || fail "compact quarantine left lane state behind for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.handoff")" = "1" ] || fail "compact quarantine lane.handoff receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.finish")" = "1" ] || fail "compact quarantine lane.finish receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.archive")" = "1" ] || fail "compact quarantine lane.archive receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "issue.close")" = "1" ] || fail "compact quarantine issue.close receipt count mismatch for ${issue_id}"
+
+  rm -rf -- "${quarantine_path}"
+  note "compact-quarantine: ok"
+}
+
 run_inner_tests() {
   local repo_root="$1"
   local base_rev="$2"
@@ -489,6 +604,8 @@ run_inner_tests() {
   test_lifecycle_guards "${repo_root}" "${base_rev}"
   test_concurrent_claims "${repo_root}"
   test_launch_rollback "${repo_root}" "${base_rev}"
+  test_compact_lane_remove "${repo_root}" "${base_rev}"
+  test_compact_lane_quarantine "${repo_root}" "${base_rev}"
 
   note "all transition tests passed"
 }

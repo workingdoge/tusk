@@ -305,6 +305,8 @@ Finish
 
 Choose cleanup based on lane state.
 
+If the repo ships a compaction wrapper such as `tuskd compact-lane`, prefer it over replaying handoff, finish, workspace cleanup, archive, and close manually.
+
 ### Landed
 
 Run full cleanup only after the work is actually landed:
