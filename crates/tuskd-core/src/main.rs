@@ -698,6 +698,59 @@ fn backend_runtime_snapshot(repo_root: &Path) -> Value {
     })
 }
 
+fn merge_backend_observation(runtime: &Value, tracker_show_output: Option<&Value>) -> Value {
+    let mut merged = runtime.as_object().cloned().unwrap_or_default();
+    let Some(Value::Object(object)) = tracker_show_output else {
+        return Value::Object(merged);
+    };
+
+    for (key, value) in object {
+        merged.insert(key.clone(), value.clone());
+    }
+
+    let tracker_connection_ok = object
+        .get("connection_ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let runtime_port = runtime.get("port").cloned().unwrap_or(Value::Null);
+    let runtime_pid = runtime.get("pid").cloned().unwrap_or(Value::Null);
+    let runtime_running = runtime.get("running").cloned().unwrap_or(json!(false));
+    let runtime_host = runtime.get("host").cloned().unwrap_or(Value::Null);
+    let runtime_data_dir = runtime.get("data_dir").cloned().unwrap_or(Value::Null);
+
+    let merged_port = normalize_backend_port(
+        merged
+            .get("port")
+            .and_then(Value::as_u64)
+            .and_then(|value| value.try_into().ok()),
+    );
+
+    if !tracker_connection_ok || merged_port.is_none() {
+        merged.insert("port".into(), runtime_port);
+        merged.insert("pid".into(), runtime_pid);
+        merged.insert("running".into(), runtime_running);
+        merged.insert("host".into(), runtime_host);
+        merged.insert("data_dir".into(), runtime_data_dir);
+    } else {
+        if merged
+            .get("host")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            merged.insert("host".into(), runtime_host);
+        }
+        if merged
+            .get("data_dir")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            merged.insert("data_dir".into(), runtime_data_dir);
+        }
+    }
+
+    Value::Object(merged)
+}
+
 fn health_snapshot(
     repo_root: &Path,
     socket_path: &Path,
@@ -723,16 +776,7 @@ fn health_snapshot(
 
     let runtime = backend_runtime_snapshot(repo_root);
     let backend = if show.get("ok").and_then(Value::as_bool) == Some(true) {
-        match show.get("output") {
-            Some(Value::Object(object)) => {
-                let mut merged = runtime.as_object().cloned().unwrap_or_default();
-                for (key, value) in object {
-                    merged.insert(key.clone(), value.clone());
-                }
-                Value::Object(merged)
-            }
-            _ => runtime,
-        }
+        merge_backend_observation(&runtime, show.get("output"))
     } else {
         runtime
     };
@@ -5383,7 +5427,8 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_dolt_sql_server_port;
+    use super::{merge_backend_observation, parse_dolt_sql_server_port};
+    use serde_json::json;
 
     #[test]
     fn parses_split_dolt_server_port_flag() {
@@ -5406,5 +5451,62 @@ mod tests {
     #[test]
     fn ignores_non_dolt_commands() {
         assert_eq!(parse_dolt_sql_server_port("python -P 32642"), None);
+    }
+
+    #[test]
+    fn preserves_runtime_port_when_tracker_show_reports_zero() {
+        let runtime = json!({
+            "host": "127.0.0.1",
+            "port": 32642,
+            "pid": 75075,
+            "running": true,
+            "data_dir": "/tmp/dolt",
+        });
+        let tracker_show = json!({
+            "backend": "dolt",
+            "connection_ok": false,
+            "host": "127.0.0.1",
+            "port": 0,
+        });
+
+        let merged = merge_backend_observation(&runtime, Some(&tracker_show));
+
+        assert_eq!(merged.get("port").and_then(|value| value.as_u64()), Some(32642));
+        assert_eq!(merged.get("pid").and_then(|value| value.as_i64()), Some(75075));
+        assert_eq!(
+            merged.get("running").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            merged.get("backend").and_then(|value| value.as_str()),
+            Some("dolt")
+        );
+    }
+
+    #[test]
+    fn preserves_runtime_endpoint_when_tracker_show_is_unhealthy() {
+        let runtime = json!({
+            "host": "127.0.0.1",
+            "port": 32642,
+            "pid": 75075,
+            "running": true,
+            "data_dir": "/tmp/dolt",
+        });
+        let tracker_show = json!({
+            "backend": "dolt",
+            "connection_ok": false,
+            "host": "127.0.0.1",
+            "port": 62558,
+            "shared_server": false,
+        });
+
+        let merged = merge_backend_observation(&runtime, Some(&tracker_show));
+
+        assert_eq!(merged.get("port").and_then(|value| value.as_u64()), Some(32642));
+        assert_eq!(merged.get("pid").and_then(|value| value.as_i64()), Some(75075));
+        assert_eq!(
+            merged.get("shared_server").and_then(|value| value.as_bool()),
+            Some(false)
+        );
     }
 }

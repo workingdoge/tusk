@@ -717,6 +717,36 @@ backend_runtime_snapshot() {
     }'
 }
 
+merge_backend_observation() {
+  local runtime_json="$1"
+  local show_output_json="${2:-null}"
+
+  jq -cn \
+    --argjson runtime "${runtime_json}" \
+    --argjson show "${show_output_json}" \
+    '
+      def valid_port($value):
+        ($value | type) == "number" and $value >= 1 and $value <= 65535;
+
+      if ($show | type) != "object" then
+        $runtime
+      else
+        ($runtime + $show) as $merged
+        | if (($show.connection_ok // false) | not) or (valid_port($merged.port) | not) then
+            $merged
+            | .port = ($runtime.port // null)
+            | .pid = ($runtime.pid // null)
+            | .running = ($runtime.running // false)
+            | .host = ($runtime.host // null)
+            | .data_dir = ($runtime.data_dir // null)
+          else
+            $merged
+            | if ((.host // "") | tostring | length) == 0 then .host = ($runtime.host // null) else . end
+            | if ((.data_dir // "") | tostring | length) == 0 then .data_dir = ($runtime.data_dir // null) else . end
+          end
+      end'
+}
+
 configure_backend_endpoint() {
   local repo_root="$1"
   local port="$2"
@@ -1009,15 +1039,11 @@ health_snapshot() {
   dolt_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_backend_status" backend status)"
   status_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_status" status)"
   runtime_json="$(backend_runtime_snapshot "${repo_root}")"
-  backend_json="$(
-    jq -cn \
-      --argjson runtime "${runtime_json}" \
-      --argjson show "${dolt_show_result}" \
-      'if $show.ok and (($show.output | type) == "object")
-       then $runtime + $show.output
-       else $runtime
-       end'
-  )"
+  if jq -e '.ok and ((.output | type) == "object")' >/dev/null <<<"${dolt_show_result}"; then
+    backend_json="$(merge_backend_observation "${runtime_json}" "$(jq -c '.output' <<<"${dolt_show_result}")")"
+  else
+    backend_json="${runtime_json}"
+  fi
 
   jq -cn \
     --arg checked_at "$(now_iso8601)" \
