@@ -1,5 +1,6 @@
 use std::env;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -97,13 +98,37 @@ Keys:
 }
 
 pub(crate) fn canonical_repo_root(path: Option<&Path>) -> Result<PathBuf> {
-    let cwd = match path {
-        Some(path) => path.to_path_buf(),
-        None => env::current_dir().context("resolve current directory")?,
-    };
+    if let Some(path) = path {
+        return root_from_candidate(path);
+    }
 
-    let output = std::process::Command::new("git")
-        .current_dir(&cwd)
+    for candidate in [
+        env::var_os("TUSK_TRACKER_ROOT"),
+        env::var_os("BEADS_WORKSPACE_ROOT"),
+        env::var_os("TUSK_CHECKOUT_ROOT"),
+        env::var_os("DEVENV_ROOT"),
+        env::var_os("TUSK_FLAKE_ROOT"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let candidate = PathBuf::from(candidate);
+        if !candidate.as_os_str().is_empty() {
+            return root_from_candidate(&candidate);
+        }
+    }
+
+    root_from_candidate(&env::current_dir().context("resolve current directory")?)
+}
+
+pub(crate) fn default_socket_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(".beads").join("tuskd").join("tuskd.sock")
+}
+
+fn root_from_candidate(path: &Path) -> Result<PathBuf> {
+    let candidate = candidate_dir(path);
+    let output = Command::new("git")
+        .current_dir(&candidate)
         .args(["rev-parse", "--show-toplevel"])
         .output();
 
@@ -112,10 +137,101 @@ pub(crate) fn canonical_repo_root(path: Option<&Path>) -> Result<PathBuf> {
             let root = String::from_utf8(output.stdout).context("decode git output")?;
             Ok(PathBuf::from(root.trim()))
         }
-        _ => Ok(cwd.canonicalize().unwrap_or(cwd)),
+        _ => Ok(candidate.canonicalize().unwrap_or(candidate)),
     }
 }
 
-pub(crate) fn default_socket_path(repo_root: &Path) -> PathBuf {
-    repo_root.join(".beads").join("tuskd").join("tuskd.sock")
+fn candidate_dir(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = env::temp_dir().join(format!("{prefix}-{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn canonical_repo_root_prefers_tracker_env_over_cwd() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        let cwd = env::current_dir().unwrap();
+        let temp_dir = unique_temp_dir("tusk-ui-cli-cwd");
+        let tracker_root = unique_temp_dir("tusk-ui-cli-tracker");
+
+        let old_tracker_root = env::var_os("TUSK_TRACKER_ROOT");
+        let old_beads_root = env::var_os("BEADS_WORKSPACE_ROOT");
+        let old_checkout_root = env::var_os("TUSK_CHECKOUT_ROOT");
+        let old_devenv_root = env::var_os("DEVENV_ROOT");
+        let old_flake_root = env::var_os("TUSK_FLAKE_ROOT");
+
+        env::set_current_dir(&temp_dir).unwrap();
+        unsafe {
+            env::set_var("TUSK_TRACKER_ROOT", &tracker_root);
+            env::remove_var("BEADS_WORKSPACE_ROOT");
+            env::remove_var("TUSK_CHECKOUT_ROOT");
+            env::remove_var("DEVENV_ROOT");
+            env::remove_var("TUSK_FLAKE_ROOT");
+        }
+
+        let resolved = canonical_repo_root(None).unwrap();
+        assert_eq!(resolved, tracker_root.canonicalize().unwrap());
+
+        env::set_current_dir(cwd).unwrap();
+        restore_env("TUSK_TRACKER_ROOT", old_tracker_root);
+        restore_env("BEADS_WORKSPACE_ROOT", old_beads_root);
+        restore_env("TUSK_CHECKOUT_ROOT", old_checkout_root);
+        restore_env("DEVENV_ROOT", old_devenv_root);
+        restore_env("TUSK_FLAKE_ROOT", old_flake_root);
+    }
+
+    #[test]
+    fn canonical_repo_root_prefers_explicit_repo_arg() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        let explicit_root = unique_temp_dir("tusk-ui-cli-explicit");
+        let nested_dir = explicit_root.join("nested");
+        let nested_file = nested_dir.join("config.toml");
+        let old_tracker_root = env::var_os("TUSK_TRACKER_ROOT");
+
+        fs::create_dir_all(&nested_dir).unwrap();
+        fs::write(&nested_file, "ok").unwrap();
+        unsafe {
+            env::set_var("TUSK_TRACKER_ROOT", unique_temp_dir("tusk-ui-cli-ignored"));
+        }
+
+        let resolved = canonical_repo_root(Some(&nested_file)).unwrap();
+        assert_eq!(resolved, nested_dir.canonicalize().unwrap());
+
+        restore_env("TUSK_TRACKER_ROOT", old_tracker_root);
+    }
+
+    fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
+        unsafe {
+            match value {
+                Some(value) => env::set_var(key, value),
+                None => env::remove_var(key),
+            }
+        }
+    }
 }
