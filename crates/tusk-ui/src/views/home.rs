@@ -353,6 +353,17 @@ pub(crate) fn home_context_lines(snapshot: &HomeViewModel) -> Vec<Line<'static>>
                         warning_style(),
                     )));
                 }
+                ContextAnomaly::DirtyTree {
+                    root,
+                    changed_paths,
+                } => {
+                    lines.push(Line::from(ratatui::text::Span::styled(
+                        format!(
+                            "working tree is dirty at {root} ({changed_paths} changed path(s))"
+                        ),
+                        warning_style(),
+                    )));
+                }
             }
         }
     }
@@ -459,9 +470,7 @@ mod tests {
 
         assert!(rendered.contains("ambient root checkout"));
         assert!(
-            rendered.contains(
-                "tuskd launch-lane --repo /tmp/repo --issue-id <id> --base-rev main"
-            )
+            rendered.contains("tuskd launch-lane --repo /tmp/repo --issue-id <id> --base-rev main")
         );
     }
 
@@ -488,5 +497,34 @@ mod tests {
             .join("\n");
 
         assert!(rendered.contains("1m ago: claimed tusk-ready"));
+    }
+
+    #[test]
+    fn home_context_lines_warn_about_runtime_stale_and_dirty_state() {
+        let mut snapshot = sample_operator_snapshot();
+        snapshot.now.runtime.health = Some("unhealthy".to_owned());
+        snapshot
+            .now
+            .obstructions
+            .push(crate::types::OperatorObstruction {
+                kind: "runtime_unhealthy".to_owned(),
+                message: "tracker or backend health is not currently healthy".to_owned(),
+                issue_id: None,
+            });
+        snapshot.context.dirty_tree = Some(crate::types::OperatorDirtyTree {
+            root: "/tmp/repo".to_owned(),
+            dirty: true,
+            changed_paths: 2,
+        });
+
+        let rendered = home_context_lines(&home_viewmodel(&snapshot))
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("tracker or backend health is not currently healthy"));
+        assert!(rendered.contains("1 stale workspaces"));
+        assert!(rendered.contains("working tree is dirty at /tmp/repo (2 changed path(s))"));
     }
 }

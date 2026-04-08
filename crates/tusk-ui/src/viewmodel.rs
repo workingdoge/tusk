@@ -4,9 +4,9 @@ use serde_json::Value;
 
 use crate::types::{
     BoardIssue, BoardStatus, BoardSummary, InspectLane, IssueInspection, LaneEntry,
-    OperatorContext, OperatorFocusIssue, OperatorHistory, OperatorIssueRef, OperatorLane,
-    OperatorReceipt, OperatorRecommendation, OperatorSnapshot, ReceiptEntry, ReceiptsStatus,
-    TrackerStatus, WorkspaceEntry,
+    OperatorFocusIssue, OperatorHistory, OperatorIssueRef, OperatorLane, OperatorReceipt,
+    OperatorRecommendation, OperatorSnapshot, ReceiptEntry, ReceiptsStatus, TrackerStatus,
+    WorkspaceEntry,
 };
 
 #[allow(dead_code)]
@@ -100,13 +100,24 @@ pub(crate) struct WorkspaceItem {
 #[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ContextAnomaly {
-    RootMismatch { checkout: String, tracker: String },
+    RootMismatch {
+        checkout: String,
+        tracker: String,
+    },
     AmbientRootCheckout {
         tracker: String,
         lane_workspaces: Vec<String>,
     },
-    BackendUnhealthy { message: String },
-    StaleWorkspaces { count: u64 },
+    BackendUnhealthy {
+        message: String,
+    },
+    StaleWorkspaces {
+        count: u64,
+    },
+    DirtyTree {
+        root: String,
+        changed_paths: u64,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -309,7 +320,7 @@ pub(crate) fn home_viewmodel(snapshot: &OperatorSnapshot) -> HomeViewModel {
         history: history_items(&snapshot.history),
         recent_count: snapshot.history.counts.recent_transitions,
         available_receipts: snapshot.history.counts.available_receipts,
-        context: context_summary(&snapshot.context),
+        context: context_summary(snapshot),
     }
 }
 
@@ -595,7 +606,8 @@ fn history_items(history: &OperatorHistory) -> Vec<HistoryItem> {
         .collect()
 }
 
-fn context_summary(context: &OperatorContext) -> ContextSummary {
+fn context_summary(snapshot: &OperatorSnapshot) -> ContextSummary {
+    let context = &snapshot.context;
     let repo_name = Path::new(&context.repo_root)
         .file_name()
         .and_then(|value| value.to_str())
@@ -634,6 +646,42 @@ fn context_summary(context: &OperatorContext) -> ContextSummary {
                 lane_workspaces,
             });
         }
+    }
+    if let Some(message) = snapshot
+        .now
+        .obstructions
+        .iter()
+        .find(|obstruction| obstruction.kind == "runtime_unhealthy")
+        .map(|obstruction| obstruction.message.clone())
+        .or_else(|| {
+            snapshot
+                .now
+                .runtime
+                .health
+                .as_deref()
+                .filter(|health| *health != "healthy")
+                .map(|health| format!("tracker or backend health is {health}"))
+        })
+    {
+        anomalies.push(ContextAnomaly::BackendUnhealthy { message });
+    }
+    let stale_workspace_count = snapshot.now.counts.stale_lanes.max(
+        u64::try_from(snapshot.now.stale_lanes.len()).unwrap_or(snapshot.now.counts.stale_lanes),
+    );
+    if stale_workspace_count > 0 {
+        anomalies.push(ContextAnomaly::StaleWorkspaces {
+            count: stale_workspace_count,
+        });
+    }
+    if let Some(dirty_tree) = context
+        .dirty_tree
+        .as_ref()
+        .filter(|dirty_tree| dirty_tree.dirty)
+    {
+        anomalies.push(ContextAnomaly::DirtyTree {
+            root: dirty_tree.root.clone(),
+            changed_paths: dirty_tree.changed_paths,
+        });
     }
 
     ContextSummary {
@@ -882,14 +930,17 @@ mod tests {
     #[test]
     fn home_viewmodel_flags_ambient_root_checkout_when_lane_workspaces_exist() {
         let mut snapshot = golden_operator_snapshot();
-        snapshot.context.workspaces.push(crate::types::WorkspaceEntry {
-            name: "tusk-asy.11.1-ui-recovery".to_owned(),
-            change_id: Some("lane123".to_owned()),
-            commit_id: Some("lane456".to_owned()),
-            empty: false,
-            description: Some("tusk-asy.11.1: wip".to_owned()),
-            raw: "tusk-asy.11.1-ui-recovery: lane123 lane456 tusk-asy.11.1: wip".to_owned(),
-        });
+        snapshot
+            .context
+            .workspaces
+            .push(crate::types::WorkspaceEntry {
+                name: "tusk-asy.11.1-ui-recovery".to_owned(),
+                change_id: Some("lane123".to_owned()),
+                commit_id: Some("lane456".to_owned()),
+                empty: false,
+                description: Some("tusk-asy.11.1: wip".to_owned()),
+                raw: "tusk-asy.11.1-ui-recovery: lane123 lane456 tusk-asy.11.1: wip".to_owned(),
+            });
 
         let model = home_viewmodel(&snapshot);
 
@@ -905,25 +956,70 @@ mod tests {
     #[test]
     fn home_viewmodel_keeps_lane_checkout_quiet_when_roots_differ() {
         let mut snapshot = golden_operator_snapshot();
-        snapshot.context.checkout_root = "/tmp/repo/.jj-workspaces/tusk-asy.11.2-guardrail".to_owned();
-        snapshot.context.workspaces.push(crate::types::WorkspaceEntry {
-            name: "tusk-asy.11.2-guardrail".to_owned(),
-            change_id: Some("lane123".to_owned()),
-            commit_id: Some("lane456".to_owned()),
-            empty: false,
-            description: Some("tusk-asy.11.2: wip".to_owned()),
-            raw: "tusk-asy.11.2-guardrail: lane123 lane456 tusk-asy.11.2: wip".to_owned(),
+        snapshot.context.checkout_root =
+            "/tmp/repo/.jj-workspaces/tusk-asy.11.2-guardrail".to_owned();
+        snapshot
+            .context
+            .workspaces
+            .push(crate::types::WorkspaceEntry {
+                name: "tusk-asy.11.2-guardrail".to_owned(),
+                change_id: Some("lane123".to_owned()),
+                commit_id: Some("lane456".to_owned()),
+                empty: false,
+                description: Some("tusk-asy.11.2: wip".to_owned()),
+                raw: "tusk-asy.11.2-guardrail: lane123 lane456 tusk-asy.11.2: wip".to_owned(),
+            });
+
+        let model = home_viewmodel(&snapshot);
+
+        assert!(
+            !model.context.anomalies.iter().any(|anomaly| matches!(
+                anomaly,
+                super::ContextAnomaly::AmbientRootCheckout { .. }
+            ))
+        );
+        assert!(
+            model
+                .context
+                .anomalies
+                .iter()
+                .any(|anomaly| matches!(anomaly, super::ContextAnomaly::RootMismatch { .. }))
+        );
+    }
+
+    #[test]
+    fn home_viewmodel_surfaces_runtime_stale_and_dirty_context_anomalies() {
+        let mut snapshot = golden_operator_snapshot();
+        snapshot.now.runtime.health = Some("unhealthy".to_owned());
+        snapshot
+            .now
+            .obstructions
+            .push(crate::types::OperatorObstruction {
+                kind: "runtime_unhealthy".to_owned(),
+                message: "tracker or backend health is not currently healthy".to_owned(),
+                issue_id: None,
+            });
+        snapshot.context.dirty_tree = Some(crate::types::OperatorDirtyTree {
+            root: "/tmp/repo".to_owned(),
+            dirty: true,
+            changed_paths: 2,
         });
 
         let model = home_viewmodel(&snapshot);
 
-        assert!(!model.context.anomalies.iter().any(|anomaly| matches!(
+        assert!(model.context.anomalies.iter().any(|anomaly| matches!(
             anomaly,
-            super::ContextAnomaly::AmbientRootCheckout { .. }
+            super::ContextAnomaly::BackendUnhealthy { message }
+                if message == "tracker or backend health is not currently healthy"
         )));
         assert!(model.context.anomalies.iter().any(|anomaly| matches!(
             anomaly,
-            super::ContextAnomaly::RootMismatch { .. }
+            super::ContextAnomaly::StaleWorkspaces { count } if *count == 1
+        )));
+        assert!(model.context.anomalies.iter().any(|anomaly| matches!(
+            anomaly,
+            super::ContextAnomaly::DirtyTree { root, changed_paths }
+                if root == "/tmp/repo" && *changed_paths == 2
         )));
     }
 

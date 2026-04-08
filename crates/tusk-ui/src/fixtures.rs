@@ -173,6 +173,11 @@ pub(crate) const GOLDEN_OPERATOR_SNAPSHOT_FIXTURE_JSON: &str = r#"{
       "host": "127.0.0.1",
       "port": 32642
     },
+    "dirty_tree": {
+      "root": "/tmp/repo",
+      "dirty": false,
+      "changed_paths": 0
+    },
     "summary": {
       "total_issues": 10,
       "open_issues": 3,

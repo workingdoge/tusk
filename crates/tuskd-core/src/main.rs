@@ -1516,10 +1516,40 @@ fn context_root(var_names: &[&str], fallback: &Path) -> String {
     fallback.to_string_lossy().into_owned()
 }
 
+fn dirty_tree_projection(checkout_root: &Path) -> Value {
+    if !checkout_root.exists() {
+        return Value::Null;
+    }
+
+    match run_lines_command_in_repo(
+        checkout_root,
+        "jj_diff_summary",
+        "jj",
+        ["diff", "--summary", "--color", "never"],
+    ) {
+        Ok(result) => {
+            let changed_paths = result
+                .get("output")
+                .and_then(Value::as_array)
+                .map(|items| items.len())
+                .unwrap_or_default();
+            json!({
+                "root": checkout_root.to_string_lossy().into_owned(),
+                "dirty": changed_paths > 0,
+                "changed_paths": changed_paths,
+            })
+        }
+        Err(_) => Value::Null,
+    }
+}
+
 fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<Value, String> {
     let status = status_projection(repo_root, socket_path)?;
     let board = board_status_projection(repo_root, socket_path)?;
     let receipts = receipts_status_projection(repo_root)?;
+    let checkout_root = context_root(&["TUSK_CHECKOUT_ROOT", "DEVENV_ROOT"], repo_root);
+    let tracker_root = context_root(&["TUSK_TRACKER_ROOT", "BEADS_WORKSPACE_ROOT"], repo_root);
+    let dirty_tree = dirty_tree_projection(Path::new(&checkout_root));
 
     let lanes = board
         .get("lanes")
@@ -2014,11 +2044,12 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
         },
         "context": {
             "repo_root": repo_root.to_string_lossy().into_owned(),
-            "checkout_root": context_root(&["TUSK_CHECKOUT_ROOT", "DEVENV_ROOT"], repo_root),
-            "tracker_root": context_root(&["TUSK_TRACKER_ROOT", "BEADS_WORKSPACE_ROOT"], repo_root),
+            "checkout_root": checkout_root,
+            "tracker_root": tracker_root,
             "protocol": status.get("protocol").cloned().unwrap_or(Value::Null),
             "service": status.get("tuskd").cloned().unwrap_or(Value::Null),
             "backend_endpoint": status.get("backend_endpoint").cloned().unwrap_or(Value::Null),
+            "dirty_tree": dirty_tree,
             "summary": status.get("summary").cloned().unwrap_or(Value::Null),
             "workspaces": workspace_rows,
             "counts": {

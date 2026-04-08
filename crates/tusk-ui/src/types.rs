@@ -311,6 +311,8 @@ pub(crate) struct OperatorContext {
     pub(crate) backend_endpoint: Option<OperatorBackendEndpoint>,
     pub(crate) summary: Option<BoardSummary>,
     #[serde(default)]
+    pub(crate) dirty_tree: Option<OperatorDirtyTree>,
+    #[serde(default)]
     pub(crate) workspaces: Vec<WorkspaceEntry>,
     pub(crate) counts: OperatorContextCounts,
 }
@@ -319,6 +321,13 @@ pub(crate) struct OperatorContext {
 pub(crate) struct OperatorBackendEndpoint {
     pub(crate) host: Option<String>,
     pub(crate) port: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OperatorDirtyTree {
+    pub(crate) root: String,
+    pub(crate) dirty: bool,
+    pub(crate) changed_paths: u64,
 }
 
 #[derive(Debug, Deserialize)]
