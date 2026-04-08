@@ -3,6 +3,8 @@ use std::error::Error;
 use std::fmt;
 #[cfg(not(target_arch = "wasm32"))]
 use std::process::Command;
+#[cfg(target_arch = "wasm32")]
+mod nix_plugin;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResolveRequest {
@@ -25,6 +27,7 @@ pub enum LockedFetchMetadata {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolveError {
     EmptyField(&'static str),
+    MissingField(&'static str),
     BranchNotFound {
         branch: String,
         url: String,
@@ -43,6 +46,9 @@ impl fmt::Display for ResolveError {
         match self {
             Self::EmptyField(field) => {
                 write!(f, "resolver request field `{field}` must not be empty")
+            }
+            Self::MissingField(field) => {
+                write!(f, "resolver request field `{field}` is required")
             }
             Self::BranchNotFound { branch, url } => {
                 write!(f, "branch `{branch}` was not found at `{url}`")

@@ -79,7 +79,10 @@
       craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
       radicleWasmToolchain = pkgs.rust-bin.stable.latest.default.override {
         extensions = [ "rust-src" ];
-        targets = [ "wasm32-wasip1" ];
+        targets = [
+          "wasm32-unknown-unknown"
+          "wasm32-wasip1"
+        ];
       };
       radicleWasmCraneLib = (crane.mkLib pkgs).overrideToolchain radicleWasmToolchain;
       radicleFlakeWasmSrc = radicleWasmCraneLib.cleanCargoSource ./tools/radicle-flake-wasm;
@@ -109,6 +112,25 @@
       radicleFlakeWasmWasiArgs = radicleFlakeWasmCommonArgs // {
         cargoExtraArgs = "-p radicle-flake-wasm-resolver --target wasm32-wasip1";
       };
+      radicleFlakeWasmPluginArgs = radicleFlakeWasmCommonArgs // {
+        cargoExtraArgs = "-p radicle-flake-wasm-resolver --lib --target wasm32-unknown-unknown";
+      };
+      radicleFlakeWasmPluginCargoArtifacts = radicleWasmCraneLib.buildDepsOnly radicleFlakeWasmPluginArgs;
+      radicleFlakeWasmPluginPackage = radicleWasmCraneLib.buildPackage (
+        radicleFlakeWasmPluginArgs
+        // {
+          cargoArtifacts = radicleFlakeWasmPluginCargoArtifacts;
+          doCheck = false;
+          nativeBuildInputs = [ pkgs.wasm-tools ];
+          installPhase = ''
+            wasm_path="target/wasm32-unknown-unknown/release/radicle_flake_wasm_resolver.wasm"
+            test -f "$wasm_path"
+            wasm-tools validate "$wasm_path"
+            mkdir -p "$out/share/wasm"
+            cp "$wasm_path" "$out/share/wasm/"
+          '';
+        }
+      );
       radicleFlakeWasmWasiCargoArtifacts = radicleWasmCraneLib.buildDepsOnly radicleFlakeWasmWasiArgs;
       radicleFlakeWasmResolverWasiCheck = radicleWasmCraneLib.buildPackage (
         radicleFlakeWasmWasiArgs
@@ -847,6 +869,7 @@
       flakeModules.tusk = tuskFlakeModule;
       flakeModules.default = tuskFlakeModule;
       checks.${system} = {
+        radicle-flake-wasm-plugin = radicleFlakeWasmPluginPackage;
         radicle-flake-wasm-resolver-wasi = radicleFlakeWasmResolverWasiCheck;
       };
       packages.${system} = {
@@ -857,6 +880,7 @@
         tusk-codex = repoTuskCodex;
         tusk-skill-contract-check = tuskSkillContractCheck;
         tusk-skill-loop = tuskSkillLoopPackage;
+        radicle-flake-wasm-plugin = radicleFlakeWasmPluginPackage;
         radicle-flake-wasm-resolver = radicleFlakeWasmResolverPackage;
         tusk-clean = tuskClean;
         tusk-flake-ref = tuskFlakeRefPackage;

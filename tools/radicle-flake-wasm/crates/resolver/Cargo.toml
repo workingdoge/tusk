@@ -16,3 +16,6 @@ path = "src/main.rs"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+nix-wasm-rust = { git = "https://github.com/DeterminateSystems/nix-wasm-rust", rev = "1d5362c96b2d5f84b1b4f34b179a357abf5d0d22" }

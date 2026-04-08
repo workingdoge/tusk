@@ -36,7 +36,10 @@
               "rust-src"
               "rustfmt"
             ];
-            targets = [ "wasm32-wasip1" ];
+            targets = [
+              "wasm32-unknown-unknown"
+              "wasm32-wasip1"
+            ];
           };
         in
         {
@@ -56,6 +59,7 @@
               echo "radicle-flake-wasm dev shell"
               echo "  goal: resolve rad: ids into lockable git fetch metadata"
               echo "  cargo test -p radicle-flake-wasm-resolver"
+              echo "  cargo build --release -p radicle-flake-wasm-resolver --lib --target wasm32-unknown-unknown"
               echo "  cargo build --release -p radicle-flake-wasm-resolver --target wasm32-wasip1"
             '';
           };

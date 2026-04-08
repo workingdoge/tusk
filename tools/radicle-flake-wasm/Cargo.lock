@@ -15,6 +15,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "nix-wasm-rust"
+version = "0.1.0"
+source = "git+https://github.com/DeterminateSystems/nix-wasm-rust?rev=1d5362c96b2d5f84b1b4f34b179a357abf5d0d22#1d5362c96b2d5f84b1b4f34b179a357abf5d0d22"
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -36,6 +41,7 @@ dependencies = [
 name = "radicle-flake-wasm-resolver"
 version = "0.1.0"
 dependencies = [
+ "nix-wasm-rust",
  "serde",
  "serde_json",
 ]

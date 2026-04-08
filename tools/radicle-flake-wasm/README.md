@@ -49,7 +49,7 @@ and returns JSON shaped like:
 }
 ```
 
-The current implementation now uses one explicit host-side transport seam:
+The current native implementation now uses one explicit host-side transport seam:
 
 - it validates the request shape
 - it derives the seed smart-HTTP endpoint as `https://<seed>/<rid>.git`
@@ -59,15 +59,25 @@ The current implementation now uses one explicit host-side transport seam:
 This keeps the contract in ordinary Git fetch terms while making the
 Radicle-aware lookup path concrete.
 
+For Determinate Nix, the first host bridge is narrower:
+
+- the Wasm module normalizes `rid`, `seed`, and `branch`
+- the host callback resolves `rev` with ordinary Nix `fetchTree`
+- the module returns `{ kind, url, ref, rev }`
+
 ## Current design stance
 
-- keep the experiment out-of-tree from `tusk`
+- keep the experiment isolated under `tools/` and out of `tusk`'s stable
+  consumer contract
 - prefer a small Rust/Wasm module over a large evaluator fork
 - treat Radicle resolution as a separate concern from flake fetching
 - keep the stable consumer path on normal Git refs until this prototype proves
   itself
-- keep the live resolution mechanism explicit as a bounded subprocess seam for
-  now instead of pretending plain `wasm32-wasip1` can do host networking alone
+- keep the live native resolution mechanism explicit as a bounded subprocess
+  seam for now instead of pretending plain `wasm32-wasip1` can do host
+  networking alone
+- use a Determinate-only host callback for the first `builtins.wasm` proof
+  instead of claiming native `rad:` flake support too early
 
 ## Development
 
@@ -107,10 +117,28 @@ Current runtime assumption:
 - the `wasm32-wasip1` output is still a build-validated artifact, not yet a
   fully network-capable Wasm host integration
 
+Current Determinate host path:
+
+- `tools/radicle-flake-wasm/nix/determinate-wasm.nix` wraps the plugin through
+  `builtins.wasm`
+- `resolveWithRev` proves the Wasm value bridge with a caller-supplied `rev`
+- `resolve` proves a live host-assisted path by calling back into Nix
+  `fetchTree` to obtain `rev`
+
+Example calls from the repo root:
+
+```bash
+nix build .#radicle-flake-wasm-plugin
+nix eval --extra-experimental-features wasm-builtin --impure --json \
+  --file tools/radicle-flake-wasm/nix/demo-with-rev.nix
+nix eval --extra-experimental-features wasm-builtin --impure --json \
+  --file tools/radicle-flake-wasm/nix/demo-live.nix
+```
+
 ## Next steps
 
 1. Replace the subprocess seam with a first-class host API once the right
    Radicle crate or protocol boundary is proven.
 2. Decide whether a tarball-shaped output belongs beside the Git-shaped one.
-3. Adapt the crate boundary from CLI/WASI prototype to the eventual
-   `builtins.wasm` host contract.
+3. Decide whether the Determinate host callback should stay a demo wrapper or
+   become a reusable flake helper surface.
