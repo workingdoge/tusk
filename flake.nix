@@ -526,6 +526,8 @@
         text = ''
           export TUSKD_CORE_BIN=${tuskdCorePackage}/bin/tuskd-core
           export TUSK_SELF_HOST_BIN=${tuskSelfHostPackage}/bin/tusk-self-host
+          : "''${TUSKD_CODEX_LAUNCHER:=''${TUSK_CODEX_LAUNCHER:-${tuskdCodexLauncherPackage}/bin/tuskd-codex-launcher}}"
+          export TUSKD_CODEX_LAUNCHER
           export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
           exec bash ${./scripts/tuskd.sh} "$@"
         '';
@@ -599,6 +601,20 @@
           export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
           export TUSK_CODEX_BOOTSTRAP_SH=${./scripts/codex-home-bootstrap.sh}
           export TUSK_REAL_BD=${repoBeads}/bin/bd
+          export TUSK_REAL_CODEX=${codexPkg}/bin/codex
+          exec bash ${./scripts/tusk-codex.sh} "$@"
+        '';
+      };
+      tuskdCodexLauncherPackage = pkgs.writeShellApplication {
+        name = "tuskd-codex-launcher";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.git
+        ];
+        text = ''
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+          export TUSK_CODEX_BOOTSTRAP_SH=${./scripts/codex-home-bootstrap.sh}
+          export TUSK_REAL_BD=${beads}/bin/bd
           export TUSK_REAL_CODEX=${codexPkg}/bin/codex
           exec bash ${./scripts/tusk-codex.sh} "$@"
         '';

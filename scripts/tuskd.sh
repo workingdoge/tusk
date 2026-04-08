@@ -1380,7 +1380,7 @@ autonomous_policy_class_id() {
 }
 
 dispatch_worker_launcher() {
-  printf '%s\n' "${TUSKD_CODEX_LAUNCHER:-tusk-codex}"
+  printf '%s\n' "${TUSKD_CODEX_LAUNCHER:-${TUSK_CODEX_LAUNCHER:-tusk-codex}}"
 }
 
 dispatch_command_args_json() {
