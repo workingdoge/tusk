@@ -15,6 +15,7 @@ Usage:
   tuskd coordinator-status [--repo PATH]
   tuskd operator-snapshot [--repo PATH] [--socket PATH]
   tuskd board-status [--repo PATH]
+  tuskd sessions-status [--repo PATH]
   tuskd receipts-status [--repo PATH]
   tuskd self-host-run [--repo PATH] [--checkout PATH] [--realization ID] [--note TEXT] [--plan]
   tuskd land-main [--repo PATH] --revision REV [--note TEXT] [--plan]
@@ -39,6 +40,7 @@ Commands:
   coordinator-status Print the default-workspace drift projection.
   operator-snapshot Print the compact operator-facing home projection.
   board-status  Print the current board projection.
+  sessions-status Print the current worker session projection.
   receipts-status Print the current receipt projection.
   self-host-run Execute the first self-host build/check loop and record receipts.
   land-main     Land one revision onto exported main, export Git state, and sync the coordinator checkout.
@@ -61,6 +63,7 @@ Protocol request kinds:
   coordinator_status
   operator_snapshot
   board_status
+  sessions_status
   receipts_status
   self_host_status
   claim_issue
@@ -4313,6 +4316,12 @@ cmd_board_status() {
   exec_tuskd_core board-status --repo "${repo_root}" --socket "${socket_path}"
 }
 
+cmd_sessions_status() {
+  local repo_root="$1"
+
+  exec_tuskd_core sessions-status --repo "${repo_root}"
+}
+
 cmd_receipts_status() {
   local repo_root="$1"
   local socket_path="$2"
@@ -6249,6 +6258,9 @@ case "${command}" in
     ;;
   board-status)
     cmd_board_status "${repo_root}" "${socket_path}"
+    ;;
+  sessions-status)
+    cmd_sessions_status "${repo_root}"
     ;;
   receipts-status)
     cmd_receipts_status "${repo_root}" "${socket_path}"

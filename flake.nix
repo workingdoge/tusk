@@ -563,31 +563,10 @@
       repoCodex = pkgs.writeShellApplication {
         name = "codex";
         runtimeInputs = [
-          pkgs.coreutils
-          pkgs.git
-          repoBeads
+          repoTuskCodex
         ];
         text = ''
-          set -eu
-
-          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
-          # shellcheck disable=SC1090
-          source "$TUSK_PATHS_SH"
-
-          checkout_root="$(tusk_resolve_checkout_root)"
-          tracker_root="$(tusk_resolve_tracker_root)"
-          tusk_export_runtime_roots "$checkout_root" "$tracker_root"
-          export CODEX_HOME="$checkout_root/.codex"
-          sh ${./scripts/codex-home-bootstrap.sh} "$checkout_root" ".codex"
-
-          if [ -d "$tracker_root/.beads" ]; then
-            (
-              cd "$tracker_root"
-              bd ready --json >/dev/null 2>&1 || true
-            )
-          fi
-
-          exec ${codexPkg}/bin/codex "$@"
+          exec ${repoTuskCodex}/bin/tusk-codex "$@"
         '';
       };
       repoTuskCodex = pkgs.writeShellApplication {
@@ -595,11 +574,14 @@
         runtimeInputs = [
           pkgs.coreutils
           pkgs.git
+          pkgs.jq
           repoBeads
+          tuskdCorePackage
         ];
         text = ''
           export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
           export TUSK_CODEX_BOOTSTRAP_SH=${./scripts/codex-home-bootstrap.sh}
+          export TUSKD_CORE_BIN=${tuskdCorePackage}/bin/tuskd-core
           export TUSK_REAL_BD=${repoBeads}/bin/bd
           export TUSK_REAL_CODEX=${codexPkg}/bin/codex
           exec bash ${./scripts/tusk-codex.sh} "$@"
@@ -610,10 +592,13 @@
         runtimeInputs = [
           pkgs.coreutils
           pkgs.git
+          pkgs.jq
+          tuskdCorePackage
         ];
         text = ''
           export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
           export TUSK_CODEX_BOOTSTRAP_SH=${./scripts/codex-home-bootstrap.sh}
+          export TUSKD_CORE_BIN=${tuskdCorePackage}/bin/tuskd-core
           export TUSK_REAL_BD=${beads}/bin/bd
           export TUSK_REAL_CODEX=${codexPkg}/bin/codex
           exec bash ${./scripts/tusk-codex.sh} "$@"
@@ -624,10 +609,13 @@
         runtimeInputs = [
           pkgs.coreutils
           pkgs.git
+          pkgs.jq
           repoBeads
+          tuskdCorePackage
         ];
         text = ''
           export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+          export TUSKD_CORE_BIN=${tuskdCorePackage}/bin/tuskd-core
           export TUSK_REAL_BD=${repoBeads}/bin/bd
           exec bash ${./scripts/tusk-claude.sh} "$@"
         '';

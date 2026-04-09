@@ -20,8 +20,10 @@ Usage:
   tuskd-core coordinator-status --repo PATH
   tuskd-core operator-snapshot --repo PATH [--socket PATH]
   tuskd-core board-status --repo PATH
+  tuskd-core sessions-status --repo PATH
   tuskd-core receipts-status --repo PATH
   tuskd-core lane-state <upsert|remove> ...
+  tuskd-core session-state <upsert|remove> ...
   tuskd-core receipt append ...
   tuskd-core action-prepare --repo PATH [--socket PATH] --kind KIND --payload JSON
   tuskd-core action-run --repo PATH [--socket PATH] --kind KIND --payload JSON
@@ -36,8 +38,10 @@ Commands:
   coordinator-status Publish the default-workspace drift projection.
   operator-snapshot Publish the compact operator-facing home projection.
   board-status    Publish the current board projection.
+  sessions-status Publish the current worker session projection.
   receipts-status Publish the current receipt projection.
   lane-state      Mutate repo-local lane state through Rust-owned file updates.
+  session-state   Mutate repo-local worker session state through Rust-owned file updates.
   receipt         Append one receipt through the Rust-owned audit seam.
   action-prepare  Build one write-side carrier and admission result.
   action-run      Execute one write-side coordinator action through the Rust kernel.
@@ -158,6 +162,10 @@ fn receipts_path(repo_root: &Path) -> PathBuf {
 
 fn lanes_path(repo_root: &Path) -> PathBuf {
     state_root(repo_root).join("lanes.json")
+}
+
+fn sessions_path(repo_root: &Path) -> PathBuf {
+    state_root(repo_root).join("sessions.json")
 }
 
 fn metadata_path(repo_root: &Path) -> PathBuf {
@@ -289,7 +297,11 @@ struct DirLock {
 
 impl DirLock {
     fn acquire(path: PathBuf) -> Result<Self, String> {
-        ensure_host_state_dirs()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!("failed to create lock parent {}: {err}", parent.display())
+            })?;
+        }
 
         loop {
             match fs::create_dir(&path) {
@@ -927,6 +939,7 @@ fn ensure_state_files(repo_root: &Path) -> Result<(), String> {
     for (path, default) in [
         (leases_path(repo_root), "[]\n"),
         (lanes_path(repo_root), "[]\n"),
+        (sessions_path(repo_root), "[]\n"),
     ] {
         if !path.exists() {
             fs::write(&path, default)
@@ -1109,10 +1122,21 @@ fn current_lanes(repo_root: &Path) -> Value {
     }
 }
 
+fn current_sessions(repo_root: &Path) -> Value {
+    match read_json_file(&sessions_path(repo_root)) {
+        Value::Array(items) => Value::Array(items),
+        _ => json!([]),
+    }
+}
+
 fn write_json_value(path: &Path, value: &Value) -> Result<(), String> {
     let bytes = serde_json::to_vec(value)
         .map_err(|err| format!("failed to encode {}: {err}", path.display()))?;
     atomic_write(path, &bytes)
+}
+
+fn session_state_lock_dir(repo_root: &Path) -> PathBuf {
+    state_root(repo_root).join("sessions.lock")
 }
 
 fn lane_state_upsert(repo_root: &Path, lane: Value) -> Result<Value, String> {
@@ -1176,6 +1200,74 @@ fn lane_state_remove(repo_root: &Path, issue_id: &str) -> Result<Value, String> 
     }))
 }
 
+fn session_state_upsert(repo_root: &Path, session: Value) -> Result<Value, String> {
+    ensure_state_files(repo_root)?;
+    let _lock = DirLock::acquire(session_state_lock_dir(repo_root))?;
+
+    let session_id = session
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("session-state upsert requires session_json.id")?
+        .to_string();
+
+    let mut session_object = session.as_object().cloned().unwrap_or_default();
+    session_object.insert("id".to_string(), Value::String(session_id.clone()));
+    session_object.insert("updated_at".to_string(), Value::String(now_iso8601()));
+    let session = Value::Object(session_object);
+
+    let mut sessions = match current_sessions(repo_root) {
+        Value::Array(items) => items,
+        _ => Vec::new(),
+    };
+    sessions
+        .retain(|existing| existing.get("id").and_then(Value::as_str) != Some(session_id.as_str()));
+    sessions.push(session.clone());
+    sessions.sort_by(|left, right| {
+        let left_id = left.get("id").and_then(Value::as_str).unwrap_or("");
+        let right_id = right.get("id").and_then(Value::as_str).unwrap_or("");
+        left_id.cmp(right_id)
+    });
+
+    write_json_value(&sessions_path(repo_root), &Value::Array(sessions))?;
+    Ok(json!({
+        "repo_root": repo_root.to_string_lossy().into_owned(),
+        "session_id": session_id,
+        "session": session,
+    }))
+}
+
+fn session_state_remove(repo_root: &Path, session_id: &str) -> Result<Value, String> {
+    ensure_state_files(repo_root)?;
+    let _lock = DirLock::acquire(session_state_lock_dir(repo_root))?;
+
+    if session_id.is_empty() {
+        return Err("session-state remove requires --session-id".to_string());
+    }
+
+    let mut removed_session = Value::Null;
+    let sessions = match current_sessions(repo_root) {
+        Value::Array(items) => items,
+        _ => Vec::new(),
+    };
+    let retained = sessions
+        .into_iter()
+        .filter(|existing| {
+            let matches = existing.get("id").and_then(Value::as_str) == Some(session_id);
+            if matches {
+                removed_session = existing.clone();
+            }
+            !matches
+        })
+        .collect::<Vec<_>>();
+
+    write_json_value(&sessions_path(repo_root), &Value::Array(retained))?;
+    Ok(json!({
+        "repo_root": repo_root.to_string_lossy().into_owned(),
+        "session_id": session_id,
+        "removed_session": removed_session,
+    }))
+}
+
 fn lane_state_projection(repo_root: &Path) -> Result<Value, String> {
     ensure_state_files(repo_root)?;
     let lanes = current_lanes(repo_root);
@@ -1212,6 +1304,227 @@ fn lane_state_projection(repo_root: &Path) -> Result<Value, String> {
     }
 
     Ok(Value::Array(projected))
+}
+
+fn current_lane_for_workspace(repo_root: &Path, workspace_path: &str) -> Value {
+    if workspace_path.is_empty() {
+        return Value::Null;
+    }
+
+    current_lanes_array(repo_root)
+        .into_iter()
+        .find(|lane| lane.get("workspace_path").and_then(Value::as_str) == Some(workspace_path))
+        .unwrap_or(Value::Null)
+}
+
+fn parse_iso8601_utc(timestamp: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+}
+
+fn session_stale_seconds() -> i64 {
+    env::var("TUSKD_SESSION_STALE_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(60)
+}
+
+fn session_last_seen_at(session: &Value) -> Option<String> {
+    for key in ["finished_at", "heartbeat_at", "updated_at", "launched_at"] {
+        if let Some(value) = session.get(key).and_then(Value::as_str) {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn session_observed_status(session: &Value, now: &DateTime<Utc>) -> (String, bool, Option<String>) {
+    let reported_status = session
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("running");
+    let pid = session
+        .get("pid")
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok());
+    let pid_live = pid.map(is_live_pid).unwrap_or(false);
+    let last_seen_at = session_last_seen_at(session);
+    let last_seen_age = last_seen_at
+        .as_deref()
+        .and_then(parse_iso8601_utc)
+        .map(|value| now.signed_duration_since(value).num_seconds());
+    let stale = last_seen_age
+        .map(|age| age > session_stale_seconds())
+        .unwrap_or(false);
+
+    let status = if reported_status == "blocked" {
+        "blocked".to_string()
+    } else if matches!(
+        reported_status,
+        "exited" | "finished" | "completed" | "failed"
+    ) || session.get("finished_at").and_then(Value::as_str).is_some()
+        || pid.is_some_and(|_| !pid_live)
+    {
+        "exited".to_string()
+    } else if stale {
+        "stale".to_string()
+    } else {
+        "running".to_string()
+    };
+
+    (status, pid_live, last_seen_at)
+}
+
+fn session_workspace_name(session: &Value, lane: &Value) -> Value {
+    if let Some(value) = lane.get("workspace_name").filter(|value| !value.is_null()) {
+        return value.clone();
+    }
+
+    session
+        .get("checkout_root")
+        .and_then(Value::as_str)
+        .and_then(|path| Path::new(path).file_name())
+        .and_then(OsStr::to_str)
+        .map(|value| Value::String(value.to_string()))
+        .unwrap_or(Value::Null)
+}
+
+fn session_projection_row(repo_root: &Path, session: &Value, now: &DateTime<Utc>) -> Value {
+    let checkout_root = session
+        .get("checkout_root")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let lane = current_lane_for_workspace(repo_root, checkout_root);
+    let (status, pid_live, last_seen_at) = session_observed_status(session, now);
+
+    json!({
+        "id": session.get("id").cloned().unwrap_or(Value::Null),
+        "runtime_kind": session.get("runtime_kind").cloned().unwrap_or(Value::Null),
+        "launcher": session.get("launcher").cloned().unwrap_or(Value::Null),
+        "checkout_root": if checkout_root.is_empty() { Value::Null } else { Value::String(checkout_root.to_string()) },
+        "tracker_root": session.get("tracker_root").cloned().unwrap_or_else(|| Value::String(repo_root.to_string_lossy().into_owned())),
+        "workspace_name": session_workspace_name(session, &lane),
+        "workspace_path": if lane.is_null() {
+            session.get("checkout_root").cloned().unwrap_or(Value::Null)
+        } else {
+            lane.get("workspace_path").cloned().unwrap_or_else(|| session.get("checkout_root").cloned().unwrap_or(Value::Null))
+        },
+        "workspace_exists": session
+            .get("checkout_root")
+            .and_then(Value::as_str)
+            .map(|path| Path::new(path).exists())
+            .map(Value::Bool)
+            .unwrap_or(Value::Null),
+        "issue_id": if lane.is_null() {
+            session.get("issue_id").cloned().unwrap_or(Value::Null)
+        } else {
+            lane.get("issue_id").cloned().unwrap_or_else(|| session.get("issue_id").cloned().unwrap_or(Value::Null))
+        },
+        "issue_title": if lane.is_null() {
+            Value::Null
+        } else {
+            lane.get("issue_title").cloned().unwrap_or(Value::Null)
+        },
+        "lane_status": if lane.is_null() {
+            Value::Null
+        } else {
+            lane.get("status").cloned().unwrap_or(Value::Null)
+        },
+        "reported_status": session.get("status").cloned().unwrap_or(Value::Null),
+        "status": status,
+        "pid": session.get("pid").cloned().unwrap_or(Value::Null),
+        "pid_live": pid_live,
+        "handle": session.get("handle").cloned().unwrap_or(Value::Null),
+        "launched_at": session.get("launched_at").cloned().unwrap_or(Value::Null),
+        "heartbeat_at": session.get("heartbeat_at").cloned().unwrap_or(Value::Null),
+        "last_seen_at": last_seen_at.map(Value::String).unwrap_or(Value::Null),
+        "finished_at": session.get("finished_at").cloned().unwrap_or(Value::Null),
+        "exit_code": session.get("exit_code").cloned().unwrap_or(Value::Null),
+        "updated_at": session.get("updated_at").cloned().unwrap_or(Value::Null),
+        "stale_after_seconds": session_stale_seconds(),
+    })
+}
+
+fn sessions_status_projection(repo_root: &Path) -> Result<Value, String> {
+    ensure_state_files(repo_root)?;
+    let now = Utc::now();
+    let mut sessions = current_sessions(repo_root)
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|session| session_projection_row(repo_root, session, &now))
+        .collect::<Vec<_>>();
+
+    sessions.sort_by(|left, right| {
+        let left_priority = match left.get("status").and_then(Value::as_str).unwrap_or("") {
+            "blocked" => 0,
+            "stale" => 1,
+            "running" => 2,
+            "exited" => 3,
+            _ => 4,
+        };
+        let right_priority = match right.get("status").and_then(Value::as_str).unwrap_or("") {
+            "blocked" => 0,
+            "stale" => 1,
+            "running" => 2,
+            "exited" => 3,
+            _ => 4,
+        };
+
+        left_priority
+            .cmp(&right_priority)
+            .then_with(|| {
+                right
+                    .get("last_seen_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .cmp(
+                        left.get("last_seen_at")
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
+                    )
+            })
+            .then_with(|| {
+                left.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .cmp(right.get("id").and_then(Value::as_str).unwrap_or(""))
+            })
+    });
+
+    let total_sessions = sessions.len();
+    let running_sessions = sessions
+        .iter()
+        .filter(|session| session.get("status").and_then(Value::as_str) == Some("running"))
+        .count();
+    let stale_sessions = sessions
+        .iter()
+        .filter(|session| session.get("status").and_then(Value::as_str) == Some("stale"))
+        .count();
+    let blocked_sessions = sessions
+        .iter()
+        .filter(|session| session.get("status").and_then(Value::as_str) == Some("blocked"))
+        .count();
+    let exited_sessions = sessions
+        .iter()
+        .filter(|session| session.get("status").and_then(Value::as_str) == Some("exited"))
+        .count();
+
+    Ok(json!({
+        "repo_root": repo_root.to_string_lossy().into_owned(),
+        "generated_at": now_iso8601(),
+        "summary": {
+            "total_sessions": total_sessions,
+            "active_sessions": running_sessions + stale_sessions + blocked_sessions,
+            "running_sessions": running_sessions,
+            "stale_sessions": stale_sessions,
+            "blocked_sessions": blocked_sessions,
+            "exited_sessions": exited_sessions,
+        },
+        "sessions": sessions,
+    }))
 }
 
 fn compact_issue_projection(issue: &Value) -> Value {
@@ -1816,6 +2129,7 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
     let status = status_projection(repo_root, socket_path)?;
     let board = board_status_projection(repo_root, socket_path)?;
     let receipts = receipts_status_projection(repo_root)?;
+    let sessions_projection = sessions_status_projection(repo_root)?;
     let checkout_root = context_root(&["TUSK_CHECKOUT_ROOT", "DEVENV_ROOT"], repo_root);
     let tracker_root = context_root(&["TUSK_TRACKER_ROOT", "BEADS_WORKSPACE_ROOT"], repo_root);
     let dirty_tree = dirty_tree_projection(Path::new(&checkout_root));
@@ -1851,6 +2165,15 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
         .cloned()
         .unwrap_or_default();
     let coordinator = board.get("coordinator").cloned().unwrap_or(Value::Null);
+    let session_rows = sessions_projection
+        .get("sessions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let session_summary = sessions_projection
+        .get("summary")
+        .cloned()
+        .unwrap_or(Value::Null);
     let receipt_rows = receipts
         .get("receipts")
         .and_then(Value::as_array)
@@ -1878,6 +2201,16 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
         .filter(|lane| lane.get("observed_status").and_then(Value::as_str) == Some("stale"))
         .filter_map(|lane| lane.get("issue_id").and_then(Value::as_str))
         .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let stale_sessions = session_rows
+        .iter()
+        .filter(|session| session.get("status").and_then(Value::as_str) == Some("stale"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let blocked_sessions = session_rows
+        .iter()
+        .filter(|session| session.get("status").and_then(Value::as_str) == Some("blocked"))
+        .cloned()
         .collect::<Vec<_>>();
 
     let mut detail_issue_ids = Vec::new();
@@ -1989,6 +2322,26 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
             "message": "lane workspace is missing from disk",
         }));
     }
+    for session in &stale_sessions {
+        obstructions.push(json!({
+            "kind": "stale_session",
+            "session_id": session.get("id").cloned().unwrap_or(Value::Null),
+            "runtime_kind": session.get("runtime_kind").cloned().unwrap_or(Value::Null),
+            "issue_id": session.get("issue_id").cloned().unwrap_or(Value::Null),
+            "workspace_path": session.get("workspace_path").cloned().unwrap_or(Value::Null),
+            "message": "worker session stopped heartbeating but is not marked exited",
+        }));
+    }
+    for session in &blocked_sessions {
+        obstructions.push(json!({
+            "kind": "blocked_session",
+            "session_id": session.get("id").cloned().unwrap_or(Value::Null),
+            "runtime_kind": session.get("runtime_kind").cloned().unwrap_or(Value::Null),
+            "issue_id": session.get("issue_id").cloned().unwrap_or(Value::Null),
+            "workspace_path": session.get("workspace_path").cloned().unwrap_or(Value::Null),
+            "message": "worker session reported a blocked status",
+        }));
+    }
     if coordinator.get("drifted").and_then(Value::as_bool) == Some(true) {
         obstructions.push(json!({
             "kind": "coordinator_drift",
@@ -2062,6 +2415,20 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
             "rationale": [
                 "A lane is recorded in state, but its workspace is missing from disk.",
                 "Cleaning up or recreating the workspace keeps receipts and lane state coherent."
+            ],
+            "dependencies": [],
+            "dependents": [],
+        }))
+    } else if let Some(session) = stale_sessions.first() {
+        Some(json!({
+            "kind": "inspect_stale_session",
+            "session_id": session.get("id").cloned().unwrap_or(Value::Null),
+            "issue_id": session.get("issue_id").cloned().unwrap_or(Value::Null),
+            "message": "Inspect the stale worker session before launching more work.",
+            "command": Value::Null,
+            "rationale": [
+                "A worker session is still recorded but stopped heartbeating.",
+                "Recovering or closing stale sessions reduces operator confusion before new launches."
             ],
             "dependencies": [],
             "dependents": [],
@@ -2228,13 +2595,17 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
             .to_owned()
     } else {
         format!(
-            "Runtime is {}. {} active lane(s), {} claimed issue(s), {} ready issue(s), {} blocked issue(s).",
+            "Runtime is {}. {} active lane(s), {} active session(s), {} claimed issue(s), {} ready issue(s), {} blocked issue(s).",
             status
                 .get("health")
                 .and_then(|value| value.get("status"))
                 .and_then(Value::as_str)
                 .unwrap_or("unknown"),
             active_lanes.len(),
+            session_summary
+                .get("active_sessions")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
             claimed_issues.len(),
             ready_issues.len(),
             blocked_issues.len()
@@ -2353,6 +2724,10 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
                 "available_receipts": receipt_rows.len(),
             },
         },
+        "sessions": {
+            "summary": session_summary,
+            "rows": session_rows,
+        },
         "context": {
             "repo_root": repo_root.to_string_lossy().into_owned(),
             "checkout_root": checkout_root,
@@ -2394,6 +2769,7 @@ fn board_status_projection(repo_root: &Path, socket_path: &Path) -> Result<Value
         ],
     )?;
     let lanes = lane_state_projection(repo_root)?;
+    let sessions = sessions_status_projection(repo_root)?;
 
     let summary = status_result
         .get("output")
@@ -2462,6 +2838,7 @@ fn board_status_projection(repo_root: &Path, socket_path: &Path) -> Result<Value
         "blocked_issues": blocked_issues,
         "deferred_issues": deferred_issues,
         "lanes": lanes,
+        "sessions": sessions,
         "coordinator": coordinator,
         "workspaces": workspaces,
         "automation": {
@@ -2652,6 +3029,7 @@ fn read_payload_for_kind(
         "coordinator_status" => Ok(Some(coordinator_status_projection(repo_root)?)),
         "operator_snapshot" => Ok(Some(operator_snapshot_projection(repo_root, socket_path)?)),
         "board_status" => Ok(Some(board_status_projection(repo_root, socket_path)?)),
+        "sessions_status" => Ok(Some(sessions_status_projection(repo_root)?)),
         "receipts_status" => Ok(Some(receipts_status_projection(repo_root)?)),
         "self_host_status" => Ok(Some(self_host_status_projection(repo_root))),
         "issue_inspect" => Ok(Some(issue_inspect_projection(
@@ -4840,6 +5218,32 @@ fn run_board_status(args: &[String]) -> ExitCode {
     }
 }
 
+fn print_sessions_status_help() {
+    println!("Usage:\n  tuskd-core sessions-status --repo PATH");
+}
+
+fn run_sessions_status(args: &[String]) -> ExitCode {
+    let parsed = match parse_projection_args(args, "sessions-status") {
+        Ok(parsed) => parsed,
+        Err(message) if message == "USAGE" => {
+            print_sessions_status_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => return fail(&message),
+    };
+
+    match sessions_status_projection(&parsed.repo_root) {
+        Ok(record) => match serde_json::to_string(&record) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => fail(&format!("failed to encode sessions projection: {err}")),
+        },
+        Err(message) => fail(&message),
+    }
+}
+
 fn print_operator_snapshot_help() {
     println!("Usage:\n  tuskd-core operator-snapshot --repo PATH [--socket PATH]");
 }
@@ -4900,6 +5304,17 @@ enum LaneStateArgs {
     Remove {
         repo_root: PathBuf,
         issue_id: String,
+    },
+}
+
+enum SessionStateArgs {
+    Upsert {
+        repo_root: PathBuf,
+        session: Value,
+    },
+    Remove {
+        repo_root: PathBuf,
+        session_id: String,
     },
 }
 
@@ -4967,9 +5382,79 @@ fn parse_lane_state_args(args: &[String]) -> Result<LaneStateArgs, String> {
     }
 }
 
+fn parse_session_state_args(args: &[String]) -> Result<SessionStateArgs, String> {
+    let subcommand = args.first().ok_or("USAGE".to_string())?;
+
+    match subcommand.as_str() {
+        "upsert" => {
+            let mut repo_root: Option<PathBuf> = None;
+            let mut session_json: Option<Value> = None;
+            let mut index = 1;
+
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--repo" => {
+                        let value = args.get(index + 1).ok_or("--repo requires a path")?;
+                        repo_root = Some(repo_root_arg(value)?);
+                        index += 2;
+                    }
+                    "--session-json" => {
+                        let value = args.get(index + 1).ok_or("--session-json requires JSON")?;
+                        let parsed = serde_json::from_str::<Value>(value)
+                            .map_err(|err| format!("invalid --session-json: {err}"))?;
+                        session_json = Some(parsed);
+                        index += 2;
+                    }
+                    "--help" | "-h" => return Err("USAGE".to_string()),
+                    flag => return Err(format!("unknown session-state upsert argument: {flag}")),
+                }
+            }
+
+            Ok(SessionStateArgs::Upsert {
+                repo_root: repo_root.ok_or("session-state upsert requires --repo")?,
+                session: session_json.ok_or("session-state upsert requires --session-json")?,
+            })
+        }
+        "remove" => {
+            let mut repo_root: Option<PathBuf> = None;
+            let mut session_id: Option<String> = None;
+            let mut index = 1;
+
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--repo" => {
+                        let value = args.get(index + 1).ok_or("--repo requires a path")?;
+                        repo_root = Some(repo_root_arg(value)?);
+                        index += 2;
+                    }
+                    "--session-id" => {
+                        let value = args.get(index + 1).ok_or("--session-id requires a value")?;
+                        session_id = Some(value.clone());
+                        index += 2;
+                    }
+                    "--help" | "-h" => return Err("USAGE".to_string()),
+                    flag => return Err(format!("unknown session-state remove argument: {flag}")),
+                }
+            }
+
+            Ok(SessionStateArgs::Remove {
+                repo_root: repo_root.ok_or("session-state remove requires --repo")?,
+                session_id: session_id.ok_or("session-state remove requires --session-id")?,
+            })
+        }
+        _ => Err("USAGE".to_string()),
+    }
+}
+
 fn print_lane_state_help() {
     println!(
         "Usage:\n  tuskd-core lane-state upsert --repo PATH --lane-json JSON\n  tuskd-core lane-state remove --repo PATH --issue-id ISSUE_ID"
+    );
+}
+
+fn print_session_state_help() {
+    println!(
+        "Usage:\n  tuskd-core session-state upsert --repo PATH --session-json JSON\n  tuskd-core session-state remove --repo PATH --session-id SESSION_ID"
     );
 }
 
@@ -4998,6 +5483,38 @@ fn run_lane_state(args: &[String]) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(err) => fail(&format!("failed to encode lane-state result: {err}")),
+        },
+        Err(message) => fail(&message),
+    }
+}
+
+fn run_session_state(args: &[String]) -> ExitCode {
+    let parsed = match parse_session_state_args(args) {
+        Ok(parsed) => parsed,
+        Err(message) if message == "USAGE" => {
+            print_session_state_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => return fail(&message),
+    };
+
+    let result = match parsed {
+        SessionStateArgs::Upsert { repo_root, session } => {
+            session_state_upsert(&repo_root, session)
+        }
+        SessionStateArgs::Remove {
+            repo_root,
+            session_id,
+        } => session_state_remove(&repo_root, &session_id),
+    };
+
+    match result {
+        Ok(payload) => match serde_json::to_string(&payload) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => fail(&format!("failed to encode session-state result: {err}")),
         },
         Err(message) => fail(&message),
     }
@@ -5416,8 +5933,10 @@ fn main() -> ExitCode {
         Some("coordinator-status") => run_coordinator_status(&args[1..]),
         Some("operator-snapshot") => run_operator_snapshot(&args[1..]),
         Some("board-status") => run_board_status(&args[1..]),
+        Some("sessions-status") => run_sessions_status(&args[1..]),
         Some("receipts-status") => run_receipts_status(&args[1..]),
         Some("lane-state") => run_lane_state(&args[1..]),
+        Some("session-state") => run_session_state(&args[1..]),
         Some("receipt") => run_receipt(&args[1..]),
         Some("action-prepare") => run_action_prepare(&args[1..]),
         Some("action-run") => run_action_run(&args[1..]),
@@ -5429,8 +5948,24 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_backend_observation, parse_dolt_sql_server_port};
+    use super::{
+        current_pid, lane_state_upsert, merge_backend_observation, now_iso8601,
+        parse_dolt_sql_server_port, session_observed_status, session_state_upsert,
+        sessions_status_projection,
+    };
     use serde_json::json;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_repo_root(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "tuskd-core-{name}-{}-{}",
+            current_pid(),
+            now_iso8601().replace(':', "-")
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn parses_split_dolt_server_port_flag() {
@@ -5473,8 +6008,14 @@ mod tests {
 
         let merged = merge_backend_observation(&runtime, Some(&tracker_show));
 
-        assert_eq!(merged.get("port").and_then(|value| value.as_u64()), Some(32642));
-        assert_eq!(merged.get("pid").and_then(|value| value.as_i64()), Some(75075));
+        assert_eq!(
+            merged.get("port").and_then(|value| value.as_u64()),
+            Some(32642)
+        );
+        assert_eq!(
+            merged.get("pid").and_then(|value| value.as_i64()),
+            Some(75075)
+        );
         assert_eq!(
             merged.get("running").and_then(|value| value.as_bool()),
             Some(true)
@@ -5504,11 +6045,115 @@ mod tests {
 
         let merged = merge_backend_observation(&runtime, Some(&tracker_show));
 
-        assert_eq!(merged.get("port").and_then(|value| value.as_u64()), Some(32642));
-        assert_eq!(merged.get("pid").and_then(|value| value.as_i64()), Some(75075));
         assert_eq!(
-            merged.get("shared_server").and_then(|value| value.as_bool()),
+            merged.get("port").and_then(|value| value.as_u64()),
+            Some(32642)
+        );
+        assert_eq!(
+            merged.get("pid").and_then(|value| value.as_i64()),
+            Some(75075)
+        );
+        assert_eq!(
+            merged
+                .get("shared_server")
+                .and_then(|value| value.as_bool()),
             Some(false)
         );
+    }
+
+    #[test]
+    fn classifies_live_session_with_old_heartbeat_as_stale() {
+        let session = json!({
+            "id": "codex-1",
+            "status": "running",
+            "pid": current_pid(),
+            "heartbeat_at": "2000-01-01T00:00:00Z",
+            "launched_at": "2000-01-01T00:00:00Z",
+        });
+
+        let (status, pid_live, last_seen_at) =
+            session_observed_status(&session, &chrono::Utc::now());
+
+        assert_eq!(status, "stale");
+        assert!(pid_live);
+        assert_eq!(last_seen_at.as_deref(), Some("2000-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn classifies_dead_session_pid_as_exited() {
+        let session = json!({
+            "id": "codex-2",
+            "status": "running",
+            "pid": 999_999_i64,
+            "launched_at": "2026-04-09T00:00:00Z",
+        });
+
+        let (status, pid_live, _) = session_observed_status(&session, &chrono::Utc::now());
+
+        assert_eq!(status, "exited");
+        assert!(!pid_live);
+    }
+
+    #[test]
+    fn session_projection_joins_lane_workspace_to_issue() {
+        let repo_root = temp_repo_root("sessions-join");
+        let workspace_path = repo_root
+            .join(".jj-workspaces")
+            .join("tusk-asy.2.19-sessions");
+        fs::create_dir_all(&workspace_path).unwrap();
+
+        lane_state_upsert(
+            &repo_root,
+            json!({
+                "issue_id": "tusk-asy.2.19",
+                "issue_title": "SESSIONS: model worker runtime sessions as first-class control-plane state",
+                "status": "launched",
+                "workspace_name": "tusk-asy.2.19-sessions",
+                "workspace_path": workspace_path.to_string_lossy().into_owned(),
+                "base_rev": "main",
+                "base_commit": "a9152e21",
+                "launched_at": now_iso8601(),
+            }),
+        )
+        .unwrap();
+
+        session_state_upsert(
+            &repo_root,
+            json!({
+                "id": "codex-live",
+                "runtime_kind": "codex",
+                "launcher": "tusk-codex",
+                "checkout_root": workspace_path.to_string_lossy().into_owned(),
+                "tracker_root": repo_root.to_string_lossy().into_owned(),
+                "pid": current_pid(),
+                "status": "running",
+                "launched_at": now_iso8601(),
+                "heartbeat_at": now_iso8601(),
+            }),
+        )
+        .unwrap();
+
+        let projection = sessions_status_projection(&repo_root).unwrap();
+        let row = projection
+            .get("sessions")
+            .and_then(|value| value.as_array())
+            .and_then(|items| items.first())
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+
+        assert_eq!(
+            row.get("issue_id").and_then(|value| value.as_str()),
+            Some("tusk-asy.2.19")
+        );
+        assert_eq!(
+            row.get("workspace_name").and_then(|value| value.as_str()),
+            Some("tusk-asy.2.19-sessions")
+        );
+        assert_eq!(
+            row.get("status").and_then(|value| value.as_str()),
+            Some("running")
+        );
+
+        fs::remove_dir_all(repo_root).unwrap();
     }
 }
