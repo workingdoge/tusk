@@ -5,7 +5,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::App;
 use crate::theme::{error_lines, kv_line, pane_block, source_line, title_line, warning_style};
-use crate::viewmodel::{ContextAnomaly, HistoryItem, HomeViewModel, IssueRef};
+use crate::viewmodel::{ContextAnomaly, HistoryItem, HomeViewModel, IssueRef, WorkerItem};
 
 use super::board::summary_lines;
 use super::{panel_title, prepend_panel_notice, render_scrolled_lines_panel};
@@ -132,6 +132,29 @@ pub(crate) fn home_now_lines(snapshot: &HomeViewModel) -> Vec<Line<'static>> {
             .take(4)
         {
             lines.push(Line::from(line.clone()));
+        }
+    }
+
+    if snapshot.workers.total > 0 {
+        lines.push(Line::from(""));
+        lines.push(title_line("worker sessions"));
+        lines.push(Line::from(format!(
+            "active {} | running {} | stale {} | blocked {} | exited {}",
+            snapshot.workers.active,
+            snapshot.workers.running,
+            snapshot.workers.stale,
+            snapshot.workers.blocked,
+            snapshot.workers.exited
+        )));
+
+        let primary_workers = if !snapshot.attention_workers.is_empty() {
+            &snapshot.attention_workers
+        } else {
+            &snapshot.live_workers
+        };
+
+        for worker in primary_workers.iter().take(3) {
+            lines.extend(compact_worker_lines(worker));
         }
     }
 
@@ -416,6 +439,35 @@ fn issue_ref_label(issue: &IssueRef) -> String {
     }
 }
 
+fn compact_worker_lines(worker: &WorkerItem) -> Vec<Line<'static>> {
+    let issue = worker
+        .issue_id
+        .as_deref()
+        .or(worker.issue_title.as_deref())
+        .unwrap_or("detached");
+    let workspace = worker.workspace_name.as_deref().unwrap_or("unknown");
+    let mut lines = vec![Line::from(format!(
+        "{} {} [{}] — {}",
+        worker.runtime_kind, worker.id, worker.status, issue
+    ))];
+
+    let mut details = vec![format!("ws {workspace}")];
+    if let Some(last_seen_at) = &worker.last_seen_at {
+        details.push(format!("last seen {last_seen_at}"));
+    } else if let Some(heartbeat_at) = &worker.heartbeat_at {
+        details.push(format!("heartbeat {heartbeat_at}"));
+    }
+    if !details.is_empty() {
+        lines.push(Line::from(format!("  {}", details.join(" | "))));
+    }
+
+    if !worker.obstructions.is_empty() {
+        lines.push(Line::from(format!("  attention {}", worker.obstructions.join(" | "))));
+    }
+
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::{home_context_lines, home_history_lines, home_next_lines, home_now_lines};
@@ -434,6 +486,8 @@ mod tests {
         assert!(rendered.contains("focus"));
         assert!(rendered.contains("ready issue"));
         assert!(rendered.contains("why now"));
+        assert!(rendered.contains("worker sessions"));
+        assert!(rendered.contains("session-stale"));
     }
 
     #[test]

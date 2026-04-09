@@ -84,7 +84,60 @@ pub(crate) struct BoardStatus {
     #[serde(default)]
     pub(crate) lanes: Vec<LaneEntry>,
     #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) sessions: Option<SessionsStatus>,
+    #[serde(default)]
     pub(crate) workspaces: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct SessionsStatus {
+    pub(crate) repo_root: String,
+    pub(crate) generated_at: String,
+    #[serde(default)]
+    pub(crate) summary: SessionSummary,
+    #[serde(default)]
+    pub(crate) sessions: Vec<SessionRow>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct SessionSummary {
+    pub(crate) total_sessions: u64,
+    pub(crate) active_sessions: u64,
+    pub(crate) running_sessions: u64,
+    pub(crate) stale_sessions: u64,
+    pub(crate) blocked_sessions: u64,
+    pub(crate) exited_sessions: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SessionRow {
+    pub(crate) id: String,
+    pub(crate) runtime_kind: Option<String>,
+    pub(crate) launcher: Option<String>,
+    pub(crate) checkout_root: Option<String>,
+    pub(crate) tracker_root: Option<String>,
+    pub(crate) workspace_name: Option<String>,
+    pub(crate) workspace_path: Option<String>,
+    pub(crate) workspace_exists: Option<bool>,
+    pub(crate) issue_id: Option<String>,
+    pub(crate) issue_title: Option<String>,
+    pub(crate) lane_status: Option<String>,
+    pub(crate) reported_status: Option<String>,
+    pub(crate) status: String,
+    pub(crate) pid: Option<i64>,
+    #[serde(default)]
+    pub(crate) pid_live: bool,
+    pub(crate) handle: Option<String>,
+    pub(crate) launched_at: Option<String>,
+    pub(crate) heartbeat_at: Option<String>,
+    pub(crate) last_seen_at: Option<String>,
+    pub(crate) finished_at: Option<String>,
+    pub(crate) exit_code: Option<i64>,
+    pub(crate) updated_at: Option<String>,
+    pub(crate) stale_after_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,7 +198,17 @@ pub(crate) struct OperatorSnapshot {
     pub(crate) now: OperatorNow,
     pub(crate) next: OperatorNext,
     pub(crate) history: OperatorHistory,
+    #[serde(default)]
+    pub(crate) sessions: OperatorSessions,
     pub(crate) context: OperatorContext,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct OperatorSessions {
+    #[serde(default)]
+    pub(crate) summary: SessionSummary,
+    #[serde(default)]
+    pub(crate) rows: Vec<SessionRow>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -443,6 +506,11 @@ mod tests {
         assert_eq!(
             snapshot.history.narrative.first().map(String::as_str),
             Some("1m ago: claimed tusk-ready")
+        );
+        assert_eq!(snapshot.sessions.summary.total_sessions, 3);
+        assert_eq!(
+            snapshot.sessions.rows.first().map(|row| row.status.as_str()),
+            Some("stale")
         );
     }
 

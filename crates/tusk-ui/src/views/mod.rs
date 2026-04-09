@@ -3,6 +3,7 @@ pub(crate) mod home;
 pub(crate) mod overlay;
 pub(crate) mod receipts;
 pub(crate) mod tracker;
+pub(crate) mod workers;
 
 use std::time::Duration;
 
@@ -43,6 +44,7 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
 
     match app.view {
         ViewMode::Home => home::render_home(frame, vertical[1], app),
+        ViewMode::Workers => workers::render_workers(frame, vertical[1], app),
         ViewMode::Tracker => tracker::render_tracker(frame, vertical[1], app),
         ViewMode::Board => board::render_board(frame, vertical[1], app),
         ViewMode::Receipts => receipts::render_receipts(frame, vertical[1], app),
@@ -203,12 +205,13 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     .alignment(ratatui::layout::Alignment::Right);
     frame.render_widget(transport, top[1]);
 
-    let titles = ["Home", "Tracker", "Board", "Receipts"];
+    let titles = ["Home", "Workers", "Tracker", "Board", "Receipts"];
     let selected = match app.view {
         ViewMode::Home => 0,
-        ViewMode::Tracker => 1,
-        ViewMode::Board => 2,
-        ViewMode::Receipts => 3,
+        ViewMode::Workers => 1,
+        ViewMode::Tracker => 2,
+        ViewMode::Board => 3,
+        ViewMode::Receipts => 4,
     };
     let tabs = Tabs::new(titles)
         .select(selected)

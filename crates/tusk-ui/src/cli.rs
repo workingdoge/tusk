@@ -80,8 +80,8 @@ Keys:
   ? / h        open help overlay
   Tab          focus next view
   Shift+Tab    focus previous view
-  o / t / b / e
-               focus home, tracker, board, or receipts
+  o / w / t / b / e
+               focus home, workers, tracker, board, or receipts
   j / k        scroll the current panel, or move board selection on the board
   Up / Down    scroll the current panel, or move board selection on the board
   PageUp/Down  scroll the current panel by a page

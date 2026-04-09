@@ -10,14 +10,16 @@ use crate::types::{
     OperatorSnapshot, PingStatus, ReceiptsStatus, TrackerStatus,
 };
 use crate::viewmodel::{
-    BoardViewModel, HomeViewModel, ReceiptsViewModel, TrackerViewModel, board_viewmodel,
-    home_viewmodel, issue_inspect_viewmodel, receipts_viewmodel, tracker_viewmodel,
+    BoardViewModel, HomeViewModel, ReceiptsViewModel, TrackerViewModel, WorkersViewModel,
+    board_viewmodel, home_viewmodel, issue_inspect_viewmodel, receipts_viewmodel,
+    tracker_viewmodel, workers_viewmodel,
 };
 use crate::views::board::{board_lines, selected_line_offset};
 use crate::views::home::{home_context_lines, home_history_lines, home_next_lines, home_now_lines};
 use crate::views::overlay::issue_inspection_lines;
 use crate::views::receipts::receipt_lines;
 use crate::views::tracker::tracker_lines;
+use crate::views::workers::workers_lines;
 use crate::worker::{RefreshSet, RefreshUpdate, RefreshWorker};
 
 #[derive(Debug)]
@@ -54,7 +56,8 @@ impl App {
             default_base_rev,
             worker,
             last_refresh_requested: Instant::now() - refresh_interval,
-            status_line: "press r to refresh, o for home, b for board, q to quit".to_owned(),
+            status_line: "press r to refresh, o for home, w for workers, b for board, q to quit"
+                .to_owned(),
             should_quit: false,
             view: ViewMode::Home,
             selected_board_item_id: None,
@@ -146,6 +149,10 @@ impl App {
 
     pub(crate) fn tracker_viewmodel(&self) -> Option<TrackerViewModel> {
         self.tracker.value.as_ref().map(tracker_viewmodel)
+    }
+
+    pub(crate) fn workers_viewmodel(&self) -> Option<WorkersViewModel> {
+        self.home.value.as_ref().map(workers_viewmodel)
     }
 
     pub(crate) fn board_viewmodel(&self) -> Option<BoardViewModel> {
@@ -254,16 +261,19 @@ impl App {
 
         match self.view {
             ViewMode::Home => {
-                "o/t/b/e view  Tab cycle  ? help  i inspect  j/k scroll  PgUp/PgDn page  g/G edge  b board  r refresh  p ping  q quit"
+                "o/w/t/b/e view  Tab cycle  ? help  i inspect  j/k scroll  PgUp/PgDn page  g/G edge  b board  r refresh  p ping  q quit"
+            }
+            ViewMode::Workers => {
+                "o/w/t/b/e view  Tab cycle  ? help  j/k scroll  PgUp/PgDn page  g/G edge  r refresh  p ping  q quit"
             }
             ViewMode::Board => {
-                "o/t/b/e view  Tab cycle  ? help  / filter  i inspect  j/k move  PgUp/PgDn page  g/G edge  Esc clear  c claim  l launch  f finish  r refresh  p ping  q quit"
+                "o/w/t/b/e view  Tab cycle  ? help  / filter  i inspect  j/k move  PgUp/PgDn page  g/G edge  Esc clear  c claim  l launch  f finish  r refresh  p ping  q quit"
             }
             ViewMode::Receipts => {
-                "o/t/b/e view  Tab cycle  ? help  / filter  j/k scroll  PgUp/PgDn page  g/G edge  Esc clear  r refresh  p ping  q quit"
+                "o/w/t/b/e view  Tab cycle  ? help  / filter  j/k scroll  PgUp/PgDn page  g/G edge  Esc clear  r refresh  p ping  q quit"
             }
             _ => {
-                "o/t/b/e view  Tab cycle  ? help  j/k scroll  PgUp/PgDn page  g/G edge  r refresh  p ping  q quit"
+                "o/w/t/b/e view  Tab cycle  ? help  j/k scroll  PgUp/PgDn page  g/G edge  r refresh  p ping  q quit"
             }
         }
     }
@@ -278,6 +288,7 @@ impl App {
     pub(crate) fn current_panel_age(&self) -> Option<Duration> {
         match self.view {
             ViewMode::Home => self.home.age(),
+            ViewMode::Workers => self.home.age(),
             ViewMode::Tracker => self.tracker.age(),
             ViewMode::Board => self.board.age(),
             ViewMode::Receipts => self.receipts.age(),
@@ -287,6 +298,7 @@ impl App {
     pub(crate) fn current_panel_is_refreshing(&self) -> bool {
         match self.view {
             ViewMode::Home => self.home.is_refreshing(),
+            ViewMode::Workers => self.home.is_refreshing(),
             ViewMode::Tracker => self.tracker.is_refreshing(),
             ViewMode::Board => self.board.is_refreshing(),
             ViewMode::Receipts => self.receipts.is_refreshing(),
@@ -296,6 +308,7 @@ impl App {
     pub(crate) fn current_scroll_offset(&self) -> u16 {
         match self.view {
             ViewMode::Home => self.scroll.home,
+            ViewMode::Workers => self.scroll.workers,
             ViewMode::Tracker => self.scroll.tracker,
             ViewMode::Board => self.scroll.board,
             ViewMode::Receipts => self.scroll.receipts,
@@ -347,6 +360,7 @@ impl App {
                 Some(UiAction::Scroll(-1))
             }
             KeyCode::Char('o') => Some(UiAction::SwitchView(ViewMode::Home)),
+            KeyCode::Char('w') => Some(UiAction::SwitchView(ViewMode::Workers)),
             KeyCode::Char('t') => Some(UiAction::SwitchView(ViewMode::Tracker)),
             KeyCode::Char('b') => Some(UiAction::SwitchView(ViewMode::Board)),
             KeyCode::Char('e') => Some(UiAction::SwitchView(ViewMode::Receipts)),
@@ -776,6 +790,10 @@ impl App {
                 home: true,
                 ..RefreshSet::default()
             },
+            ViewMode::Workers => RefreshSet {
+                home: true,
+                ..RefreshSet::default()
+            },
             ViewMode::Tracker => RefreshSet {
                 tracker: true,
                 ..RefreshSet::default()
@@ -967,6 +985,7 @@ impl App {
     fn current_scroll_offset_mut(&mut self) -> &mut u16 {
         match self.view {
             ViewMode::Home => &mut self.scroll.home,
+            ViewMode::Workers => &mut self.scroll.workers,
             ViewMode::Tracker => &mut self.scroll.tracker,
             ViewMode::Board => &mut self.scroll.board,
             ViewMode::Receipts => &mut self.scroll.receipts,
@@ -983,6 +1002,10 @@ impl App {
                         + home_history_lines(&home).len()
                         + home_context_lines(&home).len()
                 })
+                .unwrap_or(1),
+            ViewMode::Workers => self
+                .workers_viewmodel()
+                .map(|workers| workers_lines(&workers).len())
                 .unwrap_or(1),
             ViewMode::Tracker => self
                 .tracker_viewmodel()
@@ -1036,6 +1059,7 @@ impl App {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ScrollOffsets {
     home: u16,
+    workers: u16,
     tracker: u16,
     board: u16,
     receipts: u16,
@@ -1066,6 +1090,7 @@ pub(crate) struct FilterBarState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ViewMode {
     Home,
+    Workers,
     Tracker,
     Board,
     Receipts,
@@ -1075,6 +1100,7 @@ impl ViewMode {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Home => "home",
+            Self::Workers => "workers",
             Self::Tracker => "tracker",
             Self::Board => "board",
             Self::Receipts => "receipts",
@@ -1083,7 +1109,8 @@ impl ViewMode {
 
     pub(crate) fn next(self) -> Self {
         match self {
-            Self::Home => Self::Tracker,
+            Self::Home => Self::Workers,
+            Self::Workers => Self::Tracker,
             Self::Tracker => Self::Board,
             Self::Board => Self::Receipts,
             Self::Receipts => Self::Home,
@@ -1093,7 +1120,8 @@ impl ViewMode {
     pub(crate) fn previous(self) -> Self {
         match self {
             Self::Home => Self::Receipts,
-            Self::Tracker => Self::Home,
+            Self::Workers => Self::Home,
+            Self::Tracker => Self::Workers,
             Self::Board => Self::Tracker,
             Self::Receipts => Self::Board,
         }
@@ -1111,7 +1139,7 @@ impl OverlayState {
     fn help(view: ViewMode) -> Self {
         let mut body = vec![
             "Global".to_owned(),
-            "  o / t / b / e  switch views".to_owned(),
+            "  o / w / t / b / e  switch views".to_owned(),
             "  Tab / Shift+Tab cycle views".to_owned(),
             "  PageUp / PageDown scroll the current panel".to_owned(),
             "  g / G          jump to top or bottom of the current panel".to_owned(),
@@ -1131,6 +1159,12 @@ impl OverlayState {
                 body.push("  i              inspect the focus issue".to_owned());
                 body.push("  Read the current briefing, next move, and recent history".to_owned());
                 body.push("  Press b to jump into the board for action".to_owned());
+            }
+            ViewMode::Workers => {
+                body.push("Workers".to_owned());
+                body.push("  j / k or Up / Down scroll session state".to_owned());
+                body.push("  Review live sessions, stale workers, and recent exits".to_owned());
+                body.push("  Use this view when worker pressure matters more than lane counts".to_owned());
             }
             ViewMode::Tracker => {
                 body.push("Tracker".to_owned());
@@ -1540,6 +1574,7 @@ mod tests {
                 outcome: None,
                 workspace_name: Some("tusk-d-lane".to_owned()),
             }],
+            sessions: None,
             workspaces: vec![],
         }
     }
@@ -1660,6 +1695,10 @@ mod tests {
             app.action_for_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)),
             Ok(Some(UiAction::ScrollToBottom))
         );
+        assert_eq!(
+            app.action_for_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)),
+            Ok(Some(UiAction::SwitchView(ViewMode::Workers)))
+        );
     }
 
     #[test]
@@ -1677,6 +1716,9 @@ mod tests {
 
         app.dispatch_action(UiAction::CycleView(Direction::Forward));
         assert_eq!(app.view, ViewMode::Receipts);
+
+        app.dispatch_action(UiAction::CycleView(Direction::Backward));
+        assert_eq!(app.view, ViewMode::Board);
     }
 
     #[test]

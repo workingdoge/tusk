@@ -5,8 +5,8 @@ use serde_json::Value;
 use crate::types::{
     BoardIssue, BoardStatus, BoardSummary, InspectLane, IssueInspection, LaneEntry,
     OperatorFocusIssue, OperatorHistory, OperatorIssueRef, OperatorLane, OperatorReceipt,
-    OperatorRecommendation, OperatorSnapshot, ReceiptEntry, ReceiptsStatus, TrackerStatus,
-    WorkspaceEntry,
+    OperatorRecommendation, OperatorSnapshot, ReceiptEntry, ReceiptsStatus, SessionRow,
+    SessionSummary, TrackerStatus, WorkspaceEntry,
 };
 
 #[allow(dead_code)]
@@ -56,6 +56,39 @@ pub(crate) struct LaneItem {
     pub(crate) workspace_exists: Option<bool>,
     pub(crate) outcome: Option<String>,
     pub(crate) selected: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorkerSummary {
+    pub(crate) total: u64,
+    pub(crate) active: u64,
+    pub(crate) running: u64,
+    pub(crate) stale: u64,
+    pub(crate) blocked: u64,
+    pub(crate) exited: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorkerItem {
+    pub(crate) id: String,
+    pub(crate) runtime_kind: String,
+    pub(crate) status: String,
+    pub(crate) issue_id: Option<String>,
+    pub(crate) issue_title: Option<String>,
+    pub(crate) workspace_name: Option<String>,
+    pub(crate) workspace_path: Option<String>,
+    pub(crate) workspace_exists: Option<bool>,
+    pub(crate) lane_status: Option<String>,
+    pub(crate) reported_status: Option<String>,
+    pub(crate) launcher: Option<String>,
+    pub(crate) pid: Option<i64>,
+    pub(crate) pid_live: bool,
+    pub(crate) launched_at: Option<String>,
+    pub(crate) heartbeat_at: Option<String>,
+    pub(crate) last_seen_at: Option<String>,
+    pub(crate) finished_at: Option<String>,
+    pub(crate) exit_code: Option<i64>,
+    pub(crate) obstructions: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -160,6 +193,9 @@ pub(crate) struct HomeViewModel {
     pub(crate) summary: String,
     pub(crate) updated_at: String,
     pub(crate) focus: Option<FocusNarrative>,
+    pub(crate) workers: WorkerSummary,
+    pub(crate) attention_workers: Vec<WorkerItem>,
+    pub(crate) live_workers: Vec<WorkerItem>,
     pub(crate) active_lanes: Vec<LaneItem>,
     pub(crate) claimed: Vec<IssueItem>,
     pub(crate) stale: Vec<LaneItem>,
@@ -172,6 +208,16 @@ pub(crate) struct HomeViewModel {
     pub(crate) recent_count: u64,
     pub(crate) available_receipts: u64,
     pub(crate) context: ContextSummary,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorkersViewModel {
+    pub(crate) repo_root: String,
+    pub(crate) updated_at: String,
+    pub(crate) summary: WorkerSummary,
+    pub(crate) attention: Vec<WorkerItem>,
+    pub(crate) live: Vec<WorkerItem>,
+    pub(crate) recent_exits: Vec<WorkerItem>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -263,12 +309,16 @@ pub(crate) fn home_viewmodel(snapshot: &OperatorSnapshot) -> HomeViewModel {
         snapshot.next.primary_action.as_ref(),
         &snapshot.briefing.narrative,
     );
+    let workers = workers_viewmodel(snapshot);
 
     HomeViewModel {
         headline: snapshot.briefing.headline.clone(),
         summary: snapshot.briefing.summary.clone(),
         updated_at: snapshot.generated_at.clone(),
         focus,
+        workers: workers.summary.clone(),
+        attention_workers: workers.attention.iter().take(4).cloned().collect(),
+        live_workers: workers.live.iter().take(4).cloned().collect(),
         active_lanes: snapshot
             .now
             .active_lanes
@@ -321,6 +371,33 @@ pub(crate) fn home_viewmodel(snapshot: &OperatorSnapshot) -> HomeViewModel {
         recent_count: snapshot.history.counts.recent_transitions,
         available_receipts: snapshot.history.counts.available_receipts,
         context: context_summary(snapshot),
+    }
+}
+
+pub(crate) fn workers_viewmodel(snapshot: &OperatorSnapshot) -> WorkersViewModel {
+    let mut attention = Vec::new();
+    let mut live = Vec::new();
+    let mut recent_exits = Vec::new();
+
+    for row in &snapshot.sessions.rows {
+        let item = worker_item(row);
+        if needs_attention(&item) {
+            attention.push(item.clone());
+        }
+
+        match item.status.as_str() {
+            "exited" => recent_exits.push(item),
+            _ => live.push(item),
+        }
+    }
+
+    WorkersViewModel {
+        repo_root: snapshot.context.repo_root.clone(),
+        updated_at: snapshot.generated_at.clone(),
+        summary: worker_summary(&snapshot.sessions.summary),
+        attention,
+        live,
+        recent_exits,
     }
 }
 
@@ -711,6 +788,17 @@ fn summary_view(summary: &BoardSummary) -> SummaryView {
     }
 }
 
+fn worker_summary(summary: &SessionSummary) -> WorkerSummary {
+    WorkerSummary {
+        total: summary.total_sessions,
+        active: summary.active_sessions,
+        running: summary.running_sessions,
+        stale: summary.stale_sessions,
+        blocked: summary.blocked_sessions,
+        exited: summary.exited_sessions,
+    }
+}
+
 fn issue_item(issue: &BoardIssue, selected: bool) -> IssueItem {
     IssueItem {
         id: issue.id.clone(),
@@ -718,6 +806,71 @@ fn issue_item(issue: &BoardIssue, selected: bool) -> IssueItem {
         status: issue.status.clone(),
         selected,
     }
+}
+
+fn worker_item(row: &SessionRow) -> WorkerItem {
+    let mut obstructions = Vec::new();
+
+    match row.status.as_str() {
+        "blocked" => obstructions.push("session is blocked".to_owned()),
+        "stale" => {
+            let detail = row
+                .last_seen_at
+                .as_ref()
+                .or(row.heartbeat_at.as_ref())
+                .map(|timestamp| format!("heartbeat is stale since {timestamp}"))
+                .unwrap_or_else(|| "heartbeat is stale".to_owned());
+            obstructions.push(detail);
+        }
+        _ => {}
+    }
+
+    if row.workspace_exists == Some(false) {
+        obstructions.push("workspace is missing from disk".to_owned());
+    }
+    if row.issue_id.is_none() && row.status != "exited" {
+        obstructions.push("session is detached from issue work".to_owned());
+    }
+    if row
+        .reported_status
+        .as_ref()
+        .is_some_and(|reported| reported != &row.status)
+    {
+        obstructions.push(format!(
+            "reported {} but observed {}",
+            row.reported_status.as_deref().unwrap_or("unknown"),
+            row.status
+        ));
+    }
+
+    WorkerItem {
+        id: row.id.clone(),
+        runtime_kind: row
+            .runtime_kind
+            .clone()
+            .unwrap_or_else(|| "worker".to_owned()),
+        status: row.status.clone(),
+        issue_id: row.issue_id.clone(),
+        issue_title: row.issue_title.clone(),
+        workspace_name: row.workspace_name.clone(),
+        workspace_path: row.workspace_path.clone(),
+        workspace_exists: row.workspace_exists,
+        lane_status: row.lane_status.clone(),
+        reported_status: row.reported_status.clone(),
+        launcher: row.launcher.clone(),
+        pid: row.pid,
+        pid_live: row.pid_live,
+        launched_at: row.launched_at.clone(),
+        heartbeat_at: row.heartbeat_at.clone(),
+        last_seen_at: row.last_seen_at.clone(),
+        finished_at: row.finished_at.clone(),
+        exit_code: row.exit_code,
+        obstructions,
+    }
+}
+
+fn needs_attention(worker: &WorkerItem) -> bool {
+    !worker.obstructions.is_empty() || matches!(worker.status.as_str(), "blocked" | "stale")
 }
 
 fn normalized_filter_query(query: Option<&str>) -> Option<String> {
@@ -897,7 +1050,10 @@ fn lane_group(lane: &LaneEntry) -> LaneGroup {
 
 #[cfg(test)]
 mod tests {
-    use super::{board_viewmodel, home_viewmodel, issue_inspect_viewmodel, receipts_viewmodel};
+    use super::{
+        board_viewmodel, home_viewmodel, issue_inspect_viewmodel, receipts_viewmodel,
+        workers_viewmodel,
+    };
     use crate::types::{
         BoardIssue, BoardStatus, LaneEntry, ReceiptEntry, ReceiptsStatus, golden_issue_inspection,
         golden_operator_snapshot,
@@ -925,6 +1081,22 @@ mod tests {
             Some(1)
         );
         assert_eq!(model.context.repo_name, "repo");
+        assert_eq!(model.workers.total, 3);
+        assert_eq!(model.attention_workers.len(), 1);
+        assert_eq!(model.attention_workers[0].status, "stale");
+    }
+
+    #[test]
+    fn workers_viewmodel_partitions_attention_live_and_recent_exits() {
+        let model = workers_viewmodel(&golden_operator_snapshot());
+
+        assert_eq!(model.summary.active, 2);
+        assert_eq!(model.summary.stale, 1);
+        assert_eq!(model.attention.len(), 1);
+        assert_eq!(model.attention[0].id, "session-stale");
+        assert_eq!(model.live.len(), 2);
+        assert_eq!(model.recent_exits.len(), 1);
+        assert_eq!(model.recent_exits[0].id, "session-exited");
     }
 
     #[test]
@@ -1072,6 +1244,7 @@ mod tests {
                 outcome: None,
                 workspace_name: Some("tusk-lane".to_owned()),
             }],
+            sessions: None,
             workspaces: vec![],
         };
 

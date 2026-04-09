@@ -304,6 +304,7 @@ mod tests {
             blocked_issues: vec![],
             deferred_issues: vec![],
             lanes: vec![],
+            sessions: None,
             workspaces: vec!["default".to_owned()],
         };
 
@@ -340,6 +341,7 @@ mod tests {
                 status: Some("deferred".to_owned()),
             }],
             lanes: vec![],
+            sessions: None,
             workspaces: vec![],
         };
 
@@ -396,6 +398,7 @@ mod tests {
                     workspace_name: Some("tusk-stale-lane".to_owned()),
                 },
             ],
+            sessions: None,
             workspaces: vec![],
         };
 
@@ -440,6 +443,7 @@ mod tests {
             blocked_issues: vec![],
             deferred_issues: vec![],
             lanes: vec![],
+            sessions: None,
             workspaces: vec![],
         };
 
@@ -472,6 +476,7 @@ mod tests {
             blocked_issues: vec![],
             deferred_issues: vec![],
             lanes: vec![],
+            sessions: None,
             workspaces: vec![],
         };
 
@@ -504,6 +509,7 @@ mod tests {
                 outcome: None,
                 workspace_name: Some("tusk-live-lane".to_owned()),
             }],
+            sessions: None,
             workspaces: vec![],
         };
 
