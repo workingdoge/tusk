@@ -248,3 +248,6 @@ Proceed as if:
 - `tusk` owns protocol normalization, not wallet execution
 - mode policy stays consumer-local until the kernel is extracted
 - and settlement remains downstream of a clean protocol boundary
+
+The first extracted kernel for this boundary now lives under
+[`tools/paid-http-kernel`](../tools/paid-http-kernel/README.md).
