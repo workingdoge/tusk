@@ -1,0 +1,4 @@
+interface:
+  display_name: "Topology"
+  short_description: "Place work and shape one clean lane wire"
+  default_prompt: "Use $topology to decide where consequential work belongs, shape one bounded wire, and only then hand execution to $tusk."

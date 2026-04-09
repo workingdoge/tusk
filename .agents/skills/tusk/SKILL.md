@@ -25,6 +25,8 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
 3. Pick and claim exactly one issue for the lane.
    - Use `bd ready --json`, `bd show <id>`, and `bd update <id> --claim --json`.
    - Prefer ready issues: clear goal, non-goals, verification, and landing boundary.
+   - If repo placement or ownership is still unclear, route through the
+     `topology` skill before you claim.
    - If the issue is too broad or underspecified, shape or split it before launching a worker.
    - When shaping or splitting work, prefer repo-local issue wrappers such as `bd-new-issue` when they exist.
    - Do not widen the lane. File discovered work as new linked issues instead.

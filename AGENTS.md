@@ -71,7 +71,7 @@ nix run .#tusk-ui -- --help
 
 ## Repo Shape
 
-- `flake.nix` exports `lib.{tusk,crane,mkRepoShell,mkDarwinSystem,mkNixosSystem,mkHomeConfiguration}`, `flakeModules.tusk`, the development shell, `tusk-tracker`, `tuskd`, `tusk-ui`, the installable OpenAI/Codex skill bundle, and `devenvModules.{codex,scratch,consumer,dogfood,tusk-skill,ops-skill,nix-skill}`.
+- `flake.nix` exports `lib.{tusk,crane,mkRepoShell,mkDarwinSystem,mkNixosSystem,mkHomeConfiguration}`, `flakeModules.tusk`, the development shell, `tusk-tracker`, `tuskd`, `tusk-ui`, the installable OpenAI/Codex skill bundle, and `devenvModules.{codex,scratch,consumer,dogfood,tusk-skill,ops-skill,nix-skill,skill-dev-skill,topology-skill}`.
 - `flake.nix` also exports `tusk-claude`, `tusk-codex`, `tusk-skill-contract-check`, and `tusk-skill-loop` as the repo-owned launcher, validation surface, and fast-restart authoring loop for shared skills.
 - `main` is the intended moving bookmark for flake consumers; once exported to Git and pushed, consumers can pin the repo with `?ref=main` and optionally a specific revision.
 - `flake.nix` also exports a flake-owned `bd`/`beads` wrapper app so raw-shell `nix run` calls reuse repo-scoped tracker state instead of ambient host Beads configuration.
@@ -83,8 +83,7 @@ nix run .#tusk-ui -- --help
 - `devenvModules.consumer` is the reusable downstream shell surface: repo-local `CODEX_HOME`, explicit skill opt-in, scratch relocation, and the conservative `tusk-clean` helper.
 - `lib.mkRepoShell` is the preferred stable repo-shell builder over direct `devenv.lib.mkShell` reach-through; it composes `devenvModules.consumer` for downstream shells.
 - `lib.mkDarwinSystem`, `lib.mkNixosSystem`, and `lib.mkHomeConfiguration` are the preferred stable machine/home builder entrypoints over direct upstream builder-lib reach-through.
-- `devenvModules.dogfood` is the repo's own downstream composition of `codex` plus explicit `tusk`/`ops`/`nix` skill packs.
-- `devenvModules.dogfood` is the repo's own downstream composition of `codex` plus explicit `tusk`/`ops`/`nix`/`skill-dev` skill packs.
+- `devenvModules.dogfood` is the repo's own downstream composition of `codex` plus explicit `tusk`/`ops`/`nix`/`skill-dev`/`topology` skill packs.
 - `scripts/codex-home-bootstrap.sh` copies auth/config/rules from `~/.codex` only as a first-use migration into the repo-local `.codex` home.
 - `scripts/tusk-claude.sh` launches Claude Code against an explicit checkout so repo-local `.claude/skills` follows the active workspace while tracker state stays canonical.
 - `scripts/tusk-codex.sh` launches Codex against an explicit checkout while preserving canonical tracker-root wiring.

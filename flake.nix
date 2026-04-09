@@ -50,6 +50,7 @@
         ops = ./.agents/skills/ops;
         nix = ./.agents/skills/nix;
         skill-dev = ./.agents/skills/skill-dev;
+        topology = ./.agents/skills/topology;
       };
       mkSkillModule = name: {
         codex.skills.${name}.source = skillSources.${name};
@@ -61,10 +62,12 @@
       devenvOpsSkillModule = mkSkillModule "ops";
       devenvNixSkillModule = mkSkillModule "nix";
       devenvSkillDevSkillModule = mkSkillModule "skill-dev";
+      devenvTopologySkillModule = mkSkillModule "topology";
       devenvTuskClaudeSkillModule = mkClaudeSkillModule "tusk";
       devenvOpsClaudeSkillModule = mkClaudeSkillModule "ops";
       devenvNixClaudeSkillModule = mkClaudeSkillModule "nix";
       devenvSkillDevClaudeSkillModule = mkClaudeSkillModule "skill-dev";
+      devenvTopologyClaudeSkillModule = mkClaudeSkillModule "topology";
       tuskSkillBundle = tuskLib.mkCodexSkillPackage {
         inherit pkgs;
         name = "tusk";
@@ -781,21 +784,25 @@
             devenvOpsSkillModule
             devenvNixSkillModule
             devenvSkillDevSkillModule
+            devenvTopologySkillModule
             devenvTuskClaudeSkillModule
             devenvOpsClaudeSkillModule
             devenvNixClaudeSkillModule
             devenvSkillDevClaudeSkillModule
+            devenvTopologyClaudeSkillModule
           ];
 
           codex.skills.tusk.runtimePath = ".agents/skills/tusk";
           codex.skills.ops.runtimePath = ".agents/skills/ops";
           codex.skills.nix.runtimePath = ".agents/skills/nix";
           codex.skills.skill-dev.runtimePath = ".agents/skills/skill-dev";
+          codex.skills.topology.runtimePath = ".agents/skills/topology";
 
           claude.skills.tusk.runtimePath = ".agents/skills/tusk";
           claude.skills.ops.runtimePath = ".agents/skills/ops";
           claude.skills.nix.runtimePath = ".agents/skills/nix";
           claude.skills.skill-dev.runtimePath = ".agents/skills/skill-dev";
+          claude.skills.topology.runtimePath = ".agents/skills/topology";
 
           packages = [
             codexNixCheck
@@ -1039,6 +1046,7 @@
         ops-skill = devenvOpsSkillModule;
         nix-skill = devenvNixSkillModule;
         skill-dev-skill = devenvSkillDevSkillModule;
+        topology-skill = devenvTopologySkillModule;
       };
       flakeModules.tusk = tuskFlakeModule;
       flakeModules.default = tuskFlakeModule;
