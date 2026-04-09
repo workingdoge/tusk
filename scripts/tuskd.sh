@@ -20,6 +20,7 @@ Usage:
   tuskd self-host-run [--repo PATH] [--checkout PATH] [--realization ID] [--note TEXT] [--plan]
   tuskd land-main [--repo PATH] --revision REV [--note TEXT] [--plan]
   tuskd repair-coordinator [--repo PATH] [--target-rev REV] [--note TEXT] [--plan]
+  tuskd create-child-issue [--repo PATH] [--socket PATH] --parent-id ISSUE_ID --title TITLE [--description TEXT] [--type TYPE] [--priority PRIORITY] [--labels CSV]
   tuskd claim-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID
   tuskd close-issue [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON
   tuskd launch-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --base-rev REV [--slug SLUG]
@@ -45,6 +46,7 @@ Commands:
   self-host-run Execute the first self-host build/check loop and record receipts.
   land-main     Land one revision onto exported main, export Git state, and sync the coordinator checkout.
   repair-coordinator Rebase the default coordinator workspace onto current main and record a receipt.
+  create-child-issue Create one governed child issue with tuskd-owned id allocation and verification.
   claim-issue   Claim one issue through the coordinator action surface.
   close-issue   Close one issue through the coordinator action surface.
   launch-lane   Create one dedicated issue workspace through the coordinator action surface.
@@ -66,6 +68,7 @@ Protocol request kinds:
   sessions_status
   receipts_status
   self_host_status
+  create_child_issue
   claim_issue
   close_issue
   launch_lane
@@ -114,6 +117,24 @@ summary_next_action() {
       ;;
     *"requires --base-rev"*)
       printf 'retry with an explicit base revision: tuskd %s --repo <repo> --issue-id <issue> --base-rev main' "${command_name}"
+      ;;
+    "create_child_issue requires parent_id")
+      printf 'retry with the parent issue id: tuskd %s --repo <repo> --parent-id <issue> --title <title>' "${command_name}"
+      ;;
+    "create_child_issue requires title")
+      printf 'retry with a title: tuskd %s --repo <repo> --parent-id <issue> --title <title>' "${command_name}"
+      ;;
+    "create_child_issue requires an existing parent issue")
+      printf 'choose an existing parent issue id before retrying create-child-issue'
+      ;;
+    "create_child_issue requires a non-closed parent issue")
+      printf 'choose an open parent issue before retrying create-child-issue'
+      ;;
+    "create_child_issue could not allocate a child issue id")
+      printf 're-read the parent issue and retry once; if it repeats, inspect concurrent tracker writers'
+      ;;
+    "create_child_issue detected issue identity mismatch after create")
+      printf 'stop and inspect the returned issue id and tracker row before launching a lane from it'
       ;;
     "claim_issue requires a ready issue")
       printf 'pick a ready issue first: nix run .#bd -- ready --json or nix run .#tuskd -- operator-snapshot --repo <repo>'
@@ -2169,7 +2190,7 @@ transition_success_result() {
 
 is_action_request_kind() {
   case "${1:-}" in
-    claim_issue|close_issue|launch_lane|handoff_lane|finish_lane|archive_lane)
+    create_child_issue|claim_issue|close_issue|launch_lane|handoff_lane|finish_lane|archive_lane)
       return 0
       ;;
     *)
@@ -4886,6 +4907,28 @@ cmd_claim_issue() {
   cmd_transition_action "${repo_root}" "${socket_path}" "claim_issue" "$(jq -cn --arg issue_id "${issue_id}" '{issue_id:$issue_id}')"
 }
 
+cmd_create_child_issue() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local parent_id="$3"
+  local title="$4"
+  local description="${5:-}"
+  local issue_type="${6:-task}"
+  local priority="${7:-2}"
+  local labels="${8:-}"
+
+  cmd_transition_action "${repo_root}" "${socket_path}" "create_child_issue" "$(
+    jq -cn \
+      --arg parent_id "${parent_id}" \
+      --arg title "${title}" \
+      --arg description "${description}" \
+      --arg issue_type "${issue_type}" \
+      --arg priority "${priority}" \
+      --arg labels "${labels}" \
+      '{parent_id:$parent_id, title:$title, description:$description, issue_type:$issue_type, priority:$priority, labels:$labels}'
+  )"
+}
+
 cmd_close_issue() {
   local repo_root="$1"
   local socket_path="$2"
@@ -6122,7 +6165,13 @@ repo_arg=""
 socket_arg=""
 kind_arg=""
 request_id_arg=""
+parent_id_arg=""
 issue_id_arg=""
+title_arg=""
+description_arg=""
+type_arg=""
+priority_arg=""
+labels_arg=""
 worker_arg=""
 mode_arg=""
 reason_arg=""
@@ -6160,6 +6209,36 @@ while [ $# -gt 0 ]; do
     --issue-id)
       [ $# -ge 2 ] || fail "--issue-id requires a value"
       issue_id_arg="$2"
+      shift 2
+      ;;
+    --parent-id)
+      [ $# -ge 2 ] || fail "--parent-id requires a value"
+      parent_id_arg="$2"
+      shift 2
+      ;;
+    --title)
+      [ $# -ge 2 ] || fail "--title requires a value"
+      title_arg="$2"
+      shift 2
+      ;;
+    --description)
+      [ $# -ge 2 ] || fail "--description requires a value"
+      description_arg="$2"
+      shift 2
+      ;;
+    --type)
+      [ $# -ge 2 ] || fail "--type requires a value"
+      type_arg="$2"
+      shift 2
+      ;;
+    --priority)
+      [ $# -ge 2 ] || fail "--priority requires a value"
+      priority_arg="$2"
+      shift 2
+      ;;
+    --labels)
+      [ $# -ge 2 ] || fail "--labels requires a value"
+      labels_arg="$2"
       shift 2
       ;;
     --worker)
@@ -6274,6 +6353,11 @@ case "${command}" in
     ;;
   repair-coordinator)
     cmd_repair_coordinator "${repo_root}" "${target_rev_arg:-main}" "${note_arg}" "${plan_arg:-false}"
+    ;;
+  create-child-issue)
+    [ -n "${parent_id_arg}" ] || fail "create-child-issue requires --parent-id"
+    [ -n "${title_arg:-}" ] || fail "create-child-issue requires --title"
+    cmd_create_child_issue "${repo_root}" "${socket_path}" "${parent_id_arg}" "${title_arg}" "${description_arg:-}" "${type_arg:-task}" "${priority_arg:-2}" "${labels_arg:-}"
     ;;
   claim-issue)
     [ -n "${issue_id_arg}" ] || fail "claim-issue requires --issue-id"

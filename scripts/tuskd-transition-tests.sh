@@ -136,6 +136,27 @@ create_issue() {
   printf '%s\n' "${issue_id}"
 }
 
+create_epic_issue() {
+  local repo_root="$1"
+  local title="$2"
+  local create_json=""
+  local create_status=0
+  local issue_id=""
+
+  run_cli_json create_json create_status \
+    bd create \
+      --title "${title}" \
+      --description "Disposable parent issue for automated tuskd transition tests." \
+      --type epic \
+      --priority 2 \
+      --json
+  assert_status "${create_status}" "0" "bd create epic"
+
+  issue_id="$(jq -r 'if type == "array" then .[0].id // "" else .id // "" end' <<<"${create_json}")"
+  [ -n "${issue_id}" ] || fail "failed to extract epic issue id from create output"$'\n'"${create_json}"
+  printf '%s\n' "${issue_id}"
+}
+
 create_labeled_issue() {
   local repo_root="$1"
   local title="$2"
@@ -536,6 +557,111 @@ test_concurrent_claims() {
   assert_status "${close_status}" "0" "close concurrency issue"
 
   note "concurrency: ok"
+}
+
+test_concurrent_child_creates() {
+  local repo_root="$1"
+  local parent_id=""
+  local tmp_dir=""
+  local one_json=""
+  local two_json=""
+  local one_status=0
+  local two_status=0
+  local one_issue_id=""
+  local two_issue_id=""
+
+  note "child-create concurrency: begin"
+  parent_id="$(create_epic_issue "${repo_root}" "transition child create parent")"
+
+  tmp_dir="$(mktemp -d)"
+  (
+    tuskd create-child-issue \
+      --repo "${repo_root}" \
+      --parent-id "${parent_id}" \
+      --title "transition child create one" \
+      --description "Disposable child issue for concurrent governed-create testing." \
+      --labels "place:tusk,surface:ops,track:core" \
+      >"${tmp_dir}/one.json"
+  ) &
+  local one_pid=$!
+  (
+    tuskd create-child-issue \
+      --repo "${repo_root}" \
+      --parent-id "${parent_id}" \
+      --title "transition child create two" \
+      --description "Disposable child issue for concurrent governed-create testing." \
+      --labels "place:tusk,surface:ops,track:core" \
+      >"${tmp_dir}/two.json"
+  ) &
+  local two_pid=$!
+
+  if wait "${one_pid}"; then
+    one_status=0
+  else
+    one_status=$?
+  fi
+  if wait "${two_pid}"; then
+    two_status=0
+  else
+    two_status=$?
+  fi
+
+  one_json="$(cat "${tmp_dir}/one.json")"
+  two_json="$(cat "${tmp_dir}/two.json")"
+  rm -rf -- "${tmp_dir}"
+
+  assert_status "${one_status}" "0" "first concurrent child create"
+  assert_status "${two_status}" "0" "second concurrent child create"
+  printf '%s' "${one_json}" | jq -e . >/dev/null 2>&1 || fail "first concurrent child create did not return JSON"
+  printf '%s' "${two_json}" | jq -e . >/dev/null 2>&1 || fail "second concurrent child create did not return JSON"
+
+  one_issue_id="$(jq -r '.issue_id // .issue.id // ""' <<<"${one_json}")"
+  two_issue_id="$(jq -r '.issue_id // .issue.id // ""' <<<"${two_json}")"
+  [ -n "${one_issue_id}" ] || fail "first concurrent child create did not return issue_id"$'\n'"${one_json}"
+  [ -n "${two_issue_id}" ] || fail "second concurrent child create did not return issue_id"$'\n'"${two_json}"
+  [ "${one_issue_id}" != "${two_issue_id}" ] || fail "concurrent child creates returned the same issue id"$'\n'"${one_json}"$'\n'"${two_json}"
+
+  case "${one_issue_id}:${two_issue_id}" in
+    "${parent_id}.1:${parent_id}.2"|\
+    "${parent_id}.2:${parent_id}.1")
+      ;;
+    *)
+      fail "concurrent child creates did not allocate the expected child ids"$'\n'"${one_json}"$'\n'"${two_json}"
+      ;;
+  esac
+
+  [ "$(receipt_count "${repo_root}" "${one_issue_id}" "issue.create")" = "1" ] || fail "first child create receipt count mismatch for ${one_issue_id}"
+  [ "$(receipt_count "${repo_root}" "${two_issue_id}" "issue.create")" = "1" ] || fail "second child create receipt count mismatch for ${two_issue_id}"
+
+  note "child-create concurrency: ok"
+}
+
+test_child_create_identity_mismatch() {
+  local repo_root="$1"
+  local parent_id=""
+  local create_json=""
+  local create_status=0
+  local issue_id=""
+
+  note "child-create identity mismatch: begin"
+  parent_id="$(create_epic_issue "${repo_root}" "transition child create mismatch parent")"
+
+  run_cli_json create_json create_status \
+    env TUSKD_TEST_FAIL_PHASE=create_child_issue:tamper_identity \
+      tuskd create-child-issue \
+        --repo "${repo_root}" \
+        --parent-id "${parent_id}" \
+        --title "transition child create mismatch" \
+        --description "Disposable child issue for post-create identity verification testing." \
+        --labels "place:tusk,surface:ops,track:core"
+  assert_status "${create_status}" "1" "tampered child create should fail"
+  assert_json_value "${create_json}" '.error.message' "create_child_issue detected issue identity mismatch after create" "child create mismatch message"
+
+  issue_id="$(jq -r '.error.details.issue_id // ""' <<<"${create_json}")"
+  [ -n "${issue_id}" ] || fail "child create mismatch did not report issue_id"$'\n'"${create_json}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "issue.create")" = "0" ] || fail "identity mismatch should not append issue.create receipt for ${issue_id}"
+
+  note "child-create identity mismatch: ok"
 }
 
 test_launch_rollback() {
@@ -1234,6 +1360,8 @@ run_inner_tests() {
 
   test_lifecycle_guards "${repo_root}" "${base_rev}"
   test_concurrent_claims "${repo_root}"
+  test_concurrent_child_creates "${repo_root}"
+  test_child_create_identity_mismatch "${repo_root}"
   test_launch_rollback "${repo_root}" "${base_rev}"
   test_dispatch_lane "${repo_root}" "${base_rev}"
   test_dispatch_lane_timeout "${repo_root}" "${base_rev}"

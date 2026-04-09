@@ -1847,6 +1847,7 @@ fn load_issue_details(repo_root: &Path, issue_ids: &[String]) -> Vec<Value> {
 
 fn humanize_kind(kind: &str) -> String {
     match kind {
+        "issue.create" => "created issue".to_owned(),
         "issue.claim" => "claimed".to_owned(),
         "issue.close" => "closed".to_owned(),
         "tracker.ensure" => "refreshed runtime".to_owned(),
@@ -3066,6 +3067,7 @@ fn query_response(
 #[derive(Clone, Copy)]
 enum TransitionKind {
     Ensure,
+    CreateChildIssue,
     ClaimIssue,
     CloseIssue,
     LaunchLane,
@@ -3078,6 +3080,7 @@ impl TransitionKind {
     fn parse(kind: &str) -> Option<Self> {
         match kind {
             "ensure" => Some(Self::Ensure),
+            "create_child_issue" => Some(Self::CreateChildIssue),
             "claim_issue" => Some(Self::ClaimIssue),
             "close_issue" => Some(Self::CloseIssue),
             "launch_lane" => Some(Self::LaunchLane),
@@ -3202,6 +3205,67 @@ fn issue_snapshot_from_result(result: &Value) -> Value {
         .filter(|value| value.is_object())
         .cloned()
         .unwrap_or(Value::Null)
+}
+
+fn parent_child_dependents(issue: &Value) -> Vec<Value> {
+    issue_relation_entries(issue, "dependents")
+        .into_iter()
+        .filter(|entry| {
+            entry.get("dependency_type").and_then(Value::as_str) == Some("parent-child")
+        })
+        .collect()
+}
+
+fn next_child_issue_id(parent_issue: &Value) -> Option<String> {
+    let parent_id = issue_id(parent_issue)?;
+    let prefix = format!("{parent_id}.");
+    let next_suffix = parent_child_dependents(parent_issue)
+        .iter()
+        .filter_map(issue_id)
+        .filter_map(|child_id| child_id.strip_prefix(&prefix))
+        .filter(|suffix| suffix.chars().all(|ch| ch.is_ascii_digit()))
+        .filter_map(|suffix| suffix.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+
+    Some(format!("{parent_id}.{next_suffix}"))
+}
+
+fn nested_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_str()
+}
+
+fn issue_create_identity_metadata(request_id: &str, parent_id: &str, issue_id: &str) -> Value {
+    json!({
+        "tuskd": {
+            "transition": "create_child_issue",
+            "request_id": request_id,
+            "parent_id": parent_id,
+            "issue_id": issue_id,
+        }
+    })
+}
+
+fn issue_matches_create_identity(
+    issue: &Value,
+    parent_id: &str,
+    expected_issue_id: &str,
+    title: &str,
+    request_id: &str,
+) -> bool {
+    !issue.is_null()
+        && issue_id(issue) == Some(expected_issue_id)
+        && issue.get("parent").and_then(Value::as_str) == Some(parent_id)
+        && issue.get("title").and_then(Value::as_str) == Some(title)
+        && nested_string(issue, &["metadata", "tuskd", "transition"]) == Some("create_child_issue")
+        && nested_string(issue, &["metadata", "tuskd", "request_id"]) == Some(request_id)
+        && nested_string(issue, &["metadata", "tuskd", "parent_id"]) == Some(parent_id)
+        && nested_string(issue, &["metadata", "tuskd", "issue_id"]) == Some(expected_issue_id)
 }
 
 fn resolve_revision_commit(repo_root: &Path, revision: &str) -> Result<Value, String> {
@@ -3353,9 +3417,27 @@ impl TransitionEnvelope {
         payload_string(&self.proposal().payload, field)
     }
 
+    fn request_id(&self) -> &str {
+        self.carrier
+            .get("repo")
+            .and_then(|repo| repo.get("request_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    }
+
     fn set_field(&mut self, field: &str, value: Value) {
         if let Some(object) = self.carrier.as_object_mut() {
             object.insert(field.to_string(), value);
+        }
+    }
+
+    fn set_intent_payload(&mut self, payload: Value) {
+        if let Some(intent) = self
+            .carrier
+            .get_mut("intent")
+            .and_then(Value::as_object_mut)
+        {
+            intent.insert("payload".to_string(), payload);
         }
     }
 
@@ -3503,6 +3585,145 @@ fn payload_string(payload: &Value, field: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string()
+}
+
+fn build_create_child_issue_carrier(
+    repo_root: &Path,
+    socket_path: &Path,
+    payload: &Value,
+) -> Result<TransitionEnvelope, String> {
+    let parent_id = payload_string(payload, "parent_id");
+    let title = payload_string(payload, "title");
+    let description = payload_string(payload, "description");
+    let issue_type = {
+        let value = payload_string(payload, "issue_type");
+        if value.is_empty() {
+            "task".to_string()
+        } else {
+            value
+        }
+    };
+    let priority = {
+        let value = payload_string(payload, "priority");
+        if value.is_empty() {
+            "2".to_string()
+        } else {
+            value
+        }
+    };
+    let labels = payload_string(payload, "labels");
+    let mut carrier = TransitionEnvelope::new(
+        repo_root,
+        "create_child_issue",
+        json!({
+            "parent_id": parent_id,
+            "title": title,
+            "description": description,
+            "issue_type": issue_type,
+            "priority": priority,
+            "labels": labels,
+        }),
+    );
+    carrier.set_service(transition_service_snapshot(repo_root, socket_path));
+    carrier.set_receipt_refs(issue_receipt_refs(repo_root, &parent_id));
+
+    let parent_show_result = if parent_id.is_empty() {
+        Value::Null
+    } else {
+        run_tracker_json_command_in_repo(
+            repo_root,
+            "tracker_issue_show",
+            ["issue", "show", parent_id.as_str()],
+        )?
+    };
+
+    carrier.set_tracker(json!({ "parent_show": parent_show_result }));
+
+    let parent_issue =
+        issue_snapshot_from_result(carrier.get("tracker").unwrap().get("parent_show").unwrap());
+    let parent_exists = !parent_issue.is_null();
+    let parent_status = parent_issue
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let parent_open = parent_exists && is_open_status(&parent_status);
+    let child_issue_id = if parent_exists {
+        next_child_issue_id(&parent_issue).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let identity_metadata = if child_issue_id.is_empty() {
+        Value::Null
+    } else {
+        issue_create_identity_metadata(carrier.request_id(), &parent_id, &child_issue_id)
+    };
+
+    carrier.set_intent_payload(json!({
+        "parent_id": parent_id,
+        "issue_id": child_issue_id,
+        "title": title,
+        "description": description,
+        "issue_type": issue_type,
+        "priority": priority,
+        "labels": labels,
+        "identity_metadata": identity_metadata,
+    }));
+    if parent_exists {
+        carrier.set_issue(parent_issue.clone());
+    }
+
+    carrier.add_witness(
+        "parent_id",
+        !parent_id.is_empty(),
+        "parent_id is required",
+        json!({ "parent_id": parent_id }),
+    );
+    carrier.add_witness(
+        "title",
+        !title.is_empty(),
+        "title is required",
+        json!({ "title": title }),
+    );
+    carrier.add_witness(
+        "parent_exists",
+        parent_exists,
+        "parent issue must exist",
+        json!({ "issue": parent_issue }),
+    );
+    carrier.add_witness(
+        "parent_open",
+        parent_open,
+        "parent issue must be open before child creation",
+        json!({ "status": parent_status }),
+    );
+    carrier.add_witness(
+        "child_issue_id",
+        !child_issue_id.is_empty(),
+        "child issue id must be allocatable",
+        json!({ "parent_id": parent_id, "issue_id": child_issue_id }),
+    );
+
+    let reason = if parent_id.is_empty() {
+        Some("create_child_issue requires parent_id")
+    } else if title.is_empty() {
+        Some("create_child_issue requires title")
+    } else if !parent_exists {
+        Some("create_child_issue requires an existing parent issue")
+    } else if !parent_open {
+        Some("create_child_issue requires a non-closed parent issue")
+    } else if child_issue_id.is_empty() {
+        Some("create_child_issue could not allocate a child issue id")
+    } else {
+        None
+    };
+
+    carrier.set_admission(
+        reason.is_none(),
+        reason,
+        &["structural", "authority", "runtime"],
+    );
+    Ok(carrier)
 }
 
 fn build_claim_issue_carrier(
@@ -4192,6 +4413,9 @@ fn build_transition_carrier(
 ) -> Result<TransitionEnvelope, String> {
     match transition_kind {
         TransitionKind::Ensure => build_ensure_carrier(repo_root, socket_path, payload),
+        TransitionKind::CreateChildIssue => {
+            build_create_child_issue_carrier(repo_root, socket_path, payload)
+        }
         TransitionKind::ClaimIssue => build_claim_issue_carrier(repo_root, socket_path, payload),
         TransitionKind::CloseIssue => build_close_issue_carrier(repo_root, socket_path, payload),
         TransitionKind::LaunchLane => build_launch_lane_carrier(repo_root, socket_path, payload),
@@ -4432,6 +4656,156 @@ fn realize_ensure_transition(
     envelope.set_emitted_receipt(receipt);
 
     Ok(transition_success_result(envelope, ensured.record))
+}
+
+fn realize_create_child_issue_transition(
+    repo_root: &Path,
+    socket_path: &Path,
+    mut envelope: TransitionEnvelope,
+) -> Result<Value, String> {
+    let parent_id = envelope.payload_string("parent_id");
+    let issue_id = envelope.payload_string("issue_id");
+    let title = envelope.payload_string("title");
+    let description = envelope.payload_string("description");
+    let issue_type = envelope.payload_string("issue_type");
+    let priority = envelope.payload_string("priority");
+    let labels = envelope.payload_string("labels");
+    let mut identity_metadata = envelope
+        .proposal()
+        .payload
+        .get("identity_metadata")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let metadata_json = if identity_metadata.is_null() {
+        String::new()
+    } else {
+        serde_json::to_string(&identity_metadata)
+            .map_err(|err| format!("failed to encode create_child_issue metadata: {err}"))?
+    };
+
+    let mut args: Vec<OsString> = vec![
+        "issue".into(),
+        "create-child".into(),
+        parent_id.clone().into(),
+        "--issue-id".into(),
+        issue_id.clone().into(),
+        "--title".into(),
+        title.clone().into(),
+        "--type".into(),
+        issue_type.clone().into(),
+        "--priority".into(),
+        priority.clone().into(),
+    ];
+    if !description.is_empty() {
+        args.push("--description".into());
+        args.push(description.into());
+    }
+    if !labels.is_empty() {
+        args.push("--labels".into());
+        args.push(labels.into());
+    }
+    if !metadata_json.is_empty() {
+        args.push("--metadata".into());
+        args.push(metadata_json.clone().into());
+    }
+
+    let create_result =
+        run_tracker_json_command_in_repo(repo_root, "tracker_issue_create_child", args)?;
+    let create_issue = issue_output_from_result(&create_result).unwrap_or(Value::Null);
+    if create_result.get("ok").and_then(Value::as_bool) != Some(true) || create_issue.is_null() {
+        envelope.set_application(json!({
+            "kind": "create_child_issue",
+            "parent_id": parent_id,
+            "issue_id": issue_id,
+            "tracker": create_result,
+        }));
+        return Ok(transition_failure_result(
+            envelope,
+            "tracker child issue create failed",
+            json!({ "parent_id": parent_id, "issue_id": issue_id, "tracker": create_result }),
+        ));
+    }
+
+    if env::var("TUSKD_TEST_FAIL_PHASE").ok().as_deref()
+        == Some("create_child_issue:tamper_identity")
+    {
+        if let Some(tuskd_metadata) = identity_metadata
+            .get_mut("tuskd")
+            .and_then(Value::as_object_mut)
+        {
+            tuskd_metadata.insert(
+                "request_id".to_string(),
+                Value::String("tampered-request-id".to_string()),
+            );
+        }
+    }
+
+    let reread_result = run_tracker_json_command_in_repo(
+        repo_root,
+        "tracker_issue_show",
+        ["issue", "show", issue_id.as_str()],
+    )?;
+    let reread_issue = issue_output_from_result(&reread_result).unwrap_or(Value::Null);
+    let request_id = nested_string(&identity_metadata, &["tuskd", "request_id"])
+        .unwrap_or("")
+        .to_string();
+    if reread_result.get("ok").and_then(Value::as_bool) != Some(true)
+        || !issue_matches_create_identity(&reread_issue, &parent_id, &issue_id, &title, &request_id)
+    {
+        envelope.set_application(json!({
+            "kind": "create_child_issue",
+            "parent_id": parent_id,
+            "issue_id": issue_id,
+            "create": create_result,
+            "reread": reread_result,
+            "expected_identity": identity_metadata,
+        }));
+        return Ok(transition_failure_result(
+            envelope,
+            "create_child_issue detected issue identity mismatch after create",
+            json!({
+                "parent_id": parent_id,
+                "issue_id": issue_id,
+                "expected_identity": identity_metadata,
+                "create": create_result,
+                "reread": reread_result,
+            }),
+        ));
+    }
+
+    envelope.set_issue(reread_issue.clone());
+    envelope.set_application(json!({
+        "kind": "create_child_issue",
+        "parent_id": parent_id,
+        "issue_id": issue_id,
+        "create": create_result,
+        "reread": reread_result,
+    }));
+
+    let board = refresh_transition_board(repo_root, socket_path)?;
+    let board_summary = board.get("summary").cloned().unwrap_or(Value::Null);
+    let receipt = append_receipt(
+        repo_root,
+        "issue.create",
+        json!({
+            "parent_id": parent_id,
+            "issue_id": issue_id,
+            "issue": reread_issue,
+            "board_summary": board_summary,
+        }),
+    )?;
+    envelope.set_emitted_receipt(receipt);
+
+    Ok(transition_success_result(
+        envelope,
+        json!({
+            "repo_root": repo_root.to_string_lossy().into_owned(),
+            "parent_id": parent_id,
+            "issue_id": issue_id,
+            "issue": reread_issue,
+            "board_summary": board_summary,
+        }),
+    ))
 }
 
 fn realize_claim_issue_transition(
@@ -4988,6 +5362,9 @@ fn realize_transition(
     match admitted.kind {
         TransitionKind::Ensure => {
             realize_ensure_transition(repo_root, socket_path, admitted.envelope)
+        }
+        TransitionKind::CreateChildIssue => {
+            realize_create_child_issue_transition(repo_root, socket_path, admitted.envelope)
         }
         TransitionKind::ClaimIssue => {
             realize_claim_issue_transition(repo_root, socket_path, admitted.envelope)
@@ -5949,7 +6326,8 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        current_pid, lane_state_upsert, merge_backend_observation, now_iso8601,
+        current_pid, issue_create_identity_metadata, issue_matches_create_identity,
+        lane_state_upsert, merge_backend_observation, next_child_issue_id, now_iso8601,
         parse_dolt_sql_server_port, session_observed_status, session_state_upsert,
         sessions_status_projection,
     };
@@ -5988,6 +6366,62 @@ mod tests {
     #[test]
     fn ignores_non_dolt_commands() {
         assert_eq!(parse_dolt_sql_server_port("python -P 32642"), None);
+    }
+
+    #[test]
+    fn allocates_next_child_issue_id_from_parent_dependents() {
+        let parent = json!({
+            "id": "tusk-asy.2",
+            "dependents": [
+                {
+                    "id": "tusk-asy.2.1",
+                    "dependency_type": "parent-child",
+                },
+                {
+                    "id": "tusk-asy.2.9",
+                    "dependency_type": "parent-child",
+                },
+                {
+                    "id": "tusk-asy.2.12",
+                    "dependency_type": "parent-child",
+                },
+                {
+                    "id": "tusk-asy.2.4.1",
+                    "dependency_type": "blocks",
+                }
+            ],
+        });
+
+        assert_eq!(
+            next_child_issue_id(&parent).as_deref(),
+            Some("tusk-asy.2.13")
+        );
+    }
+
+    #[test]
+    fn matches_created_issue_against_tuskd_identity_metadata() {
+        let metadata = issue_create_identity_metadata("req-123", "tusk-asy.2", "tusk-asy.2.23");
+        let issue = json!({
+            "id": "tusk-asy.2.23",
+            "parent": "tusk-asy.2",
+            "title": "typed kernel recast",
+            "metadata": metadata,
+        });
+
+        assert!(issue_matches_create_identity(
+            &issue,
+            "tusk-asy.2",
+            "tusk-asy.2.23",
+            "typed kernel recast",
+            "req-123",
+        ));
+        assert!(!issue_matches_create_identity(
+            &issue,
+            "tusk-asy.2",
+            "tusk-asy.2.23",
+            "typed kernel recast",
+            "req-999",
+        ));
     }
 
     #[test]

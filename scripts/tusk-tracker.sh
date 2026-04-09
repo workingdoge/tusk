@@ -13,6 +13,7 @@ Usage:
   tusk-tracker ready [--repo PATH]
   tusk-tracker status [--repo PATH]
   tusk-tracker issue show ISSUE_ID [--repo PATH]
+  tusk-tracker issue create-child PARENT_ID --issue-id ISSUE_ID --title TITLE [--description TEXT] [--type TYPE] [--priority PRIORITY] [--labels CSV] [--metadata JSON] [--repo PATH]
   tusk-tracker issue claim ISSUE_ID [--repo PATH]
   tusk-tracker issue close ISSUE_ID --reason REASON [--repo PATH]
   tusk-tracker issues board [--repo PATH]
@@ -26,6 +27,7 @@ Commands:
   ready              Print the current ready issue set as JSON.
   status             Print the current tracker status summary as JSON.
   issue show         Show one issue and print the issue JSON.
+  issue create-child Create one child issue with an explicit child id and print the issue JSON.
   issue claim        Claim one issue and print the updated issue JSON.
   issue close        Close one issue and print the updated issue JSON.
   issues board       Print machine-readable board issue buckets as JSON.
@@ -82,6 +84,44 @@ cmd_issue_claim() {
 
   [ -n "${issue_id}" ] || fail "issue claim requires ISSUE_ID"
   run_in_repo "${repo_root}" "${real_bd}" update "${issue_id}" --claim --json
+}
+
+cmd_issue_create_child() {
+  local repo_root="$1"
+  local parent_id="${2:-}"
+  local issue_id="${3:-}"
+  local title="${4:-}"
+  local description="${5:-}"
+  local issue_type="${6:-task}"
+  local priority="${7:-2}"
+  local labels="${8:-}"
+  local metadata="${9:-}"
+  local -a args=()
+
+  [ -n "${parent_id}" ] || fail "issue create-child requires PARENT_ID"
+  [ -n "${issue_id}" ] || fail "issue create-child requires --issue-id"
+  [ -n "${title}" ] || fail "issue create-child requires --title"
+
+  args=(
+    create
+    --id "${issue_id}"
+    --title "${title}"
+    --type "${issue_type}"
+    --priority "${priority}"
+    --deps "parent-child:${parent_id}"
+    --json
+  )
+  if [ -n "${description}" ]; then
+    args+=(--description "${description}")
+  fi
+  if [ -n "${labels}" ]; then
+    args+=(--labels "${labels}")
+  fi
+  if [ -n "${metadata}" ]; then
+    args+=(--metadata "${metadata}")
+  fi
+
+  run_in_repo "${repo_root}" "${real_bd}" "${args[@]}"
 }
 
 cmd_issue_close() {
@@ -250,6 +290,65 @@ main() {
           issue_id="${1:-}"
           [ "$#" -eq 1 ] || fail "issue show requires exactly one ISSUE_ID"
           cmd_issue_show "${repo_root}" "${issue_id}"
+          ;;
+        create-child)
+          local parent_id=""
+          local child_issue_id=""
+          local title=""
+          local description=""
+          local issue_type="task"
+          local priority="2"
+          local labels=""
+          local metadata=""
+
+          parent_id="${1:-}"
+          shift
+          [ -n "${parent_id}" ] || fail "issue create-child requires PARENT_ID"
+
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              --issue-id)
+                [ "$#" -ge 2 ] || fail "issue create-child requires a value for --issue-id"
+                child_issue_id="$2"
+                shift 2
+                ;;
+              --title)
+                [ "$#" -ge 2 ] || fail "issue create-child requires a value for --title"
+                title="$2"
+                shift 2
+                ;;
+              --description)
+                [ "$#" -ge 2 ] || fail "issue create-child requires a value for --description"
+                description="$2"
+                shift 2
+                ;;
+              --type)
+                [ "$#" -ge 2 ] || fail "issue create-child requires a value for --type"
+                issue_type="$2"
+                shift 2
+                ;;
+              --priority)
+                [ "$#" -ge 2 ] || fail "issue create-child requires a value for --priority"
+                priority="$2"
+                shift 2
+                ;;
+              --labels)
+                [ "$#" -ge 2 ] || fail "issue create-child requires a value for --labels"
+                labels="$2"
+                shift 2
+                ;;
+              --metadata)
+                [ "$#" -ge 2 ] || fail "issue create-child requires a value for --metadata"
+                metadata="$2"
+                shift 2
+                ;;
+              *)
+                fail "unknown issue create-child argument: $1"
+                ;;
+            esac
+          done
+
+          cmd_issue_create_child "${repo_root}" "${parent_id}" "${child_issue_id}" "${title}" "${description}" "${issue_type}" "${priority}" "${labels}" "${metadata}"
           ;;
         claim)
           issue_id="${1:-}"
