@@ -365,6 +365,10 @@ for the adapter map beneath that kernel.
 
 If this boundary becomes blurry, `tusk` will collapse back into tool wrappers.
 
+See also [`design/tusk-paid-http-protocol-boundary.md`](./tusk-paid-http-protocol-boundary.md)
+for the first incubation-boundary example that separates reusable paid-request
+protocol artifacts from consumer-local mode policy and wallet-local execution.
+
 ## First Useful Slice For This Repo
 
 The first repo-local slice should still stay small.
