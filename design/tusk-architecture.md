@@ -367,7 +367,9 @@ If this boundary becomes blurry, `tusk` will collapse back into tool wrappers.
 
 See also [`design/tusk-paid-http-protocol-boundary.md`](./tusk-paid-http-protocol-boundary.md)
 for the first incubation-boundary example that separates reusable paid-request
-protocol artifacts from consumer-local mode policy and wallet-local execution.
+protocol artifacts from consumer-local mode policy and wallet-local execution,
+plus [`design/tusk-paid-http-executor-contract.md`](./tusk-paid-http-executor-contract.md)
+for the wallet-agnostic settlement seam beneath the paid-http kernel.
 
 ## First Useful Slice For This Repo
 

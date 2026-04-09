@@ -17,6 +17,8 @@ Current scope:
 - family-safe retry header encoding
 - a generic probe/retry flow that depends on an external adapter result
 - discovery normalization for optional `openapi.json` metadata
+- settlement-attempt and settlement-result normalization for consumer-local
+  executors
 
 Deliberately out of scope:
 
@@ -32,6 +34,13 @@ The intended layering is:
 2. `tusk-asy.6.2`: reusable paid-request kernel
 3. `tusk-asy.6.3`: wallet / settlement executor contract
 4. downstream consumers wire their own provider policy and funded executors
+
+The executor contract is intentionally narrow:
+
+- the kernel builds one normalized settlement attempt
+- a consumer-local executor returns either protocol-shaped retry material or a
+  classified failure
+- the kernel stays wallet-agnostic
 
 Run tests with a Node host:
 

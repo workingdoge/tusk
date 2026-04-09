@@ -10,6 +10,11 @@ export {
   selectPaymentAdapter
 } from "./kernel.js";
 export {
+  buildSettlementAttempt,
+  normalizeSettlementFailure,
+  normalizeSettlementSuccess
+} from "./executor.js";
+export {
   encodePaymentCredential,
   parsePaymentChallenges,
   parsePaymentReceipt
