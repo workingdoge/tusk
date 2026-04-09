@@ -5,6 +5,10 @@ These instructions apply to the canonical `tusk` repo checkout.
 ## Workflow
 
 - Use `nix develop --no-pure-eval path:.` or `direnv allow` before tracker or workflow work.
+- Treat the canonical checkout as the coordinator/control-plane workspace, not the default edit surface for tracked work.
+- For any repo change, use the `tusk` workflow first: preflight the tracker, create or claim a `bd` issue, then launch an issue-scoped lane with `tuskd` or the repo's lane wrapper before editing files.
+- If the issue does not exist yet, shape or create it before making the repo change; do not freelance code or doc edits in the default workspace and try to track them afterward.
+- Do code and doc edits inside the issue lane checkout, keep `bd` mutations rooted at the canonical tracker root, and use `tusk-codex --checkout <workspace>` or `tusk-claude --checkout <workspace>` when launching an agent into that lane.
 - The dev shell provides a flake-owned `bd` wrapper, `tusk-flake-ref`, `tusk-tracker`, `tusk-claude`, `tusk-codex`, `tusk-skill-contract-check`, `tusk-skill-loop`, `dolt`, `jj`, `deadnix`, `statix`, `nil`, `nixd`, `nix-tree`, `nix-output-monitor`, `nixfmt`, `codex`, `tuskd`, `glistix`, `gleam`, `erl`, `rebar3`, a `rust-overlay` toolchain for `cargo`/`rustc`/`rustfmt`, and `rust-analyzer`.
 - Run `devenv up` inside the dev shell to ensure repo-scoped tracker services when `.beads/` exists. `tuskd ensure` owns backend reuse and host-local coordination; shells must not stop Dolt on exit.
 - Bootstrap fresh trackers for `tuskd` with `bd init --server`; embedded Dolt mode is not a valid `tuskd` substrate.
