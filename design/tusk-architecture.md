@@ -242,6 +242,8 @@ tusk.realizations.update-flake-lock = {
 
 The semantic center stays upstream.
 Realization is deliberately downstream of intent and admission.
+For repo-placement rules across `fish`, `kurma`, and `tusk`, see
+[`design/tusk-upstream-boundary.md`](./tusk-upstream-boundary.md).
 
 ### 7. Receipts
 

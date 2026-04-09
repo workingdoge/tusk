@@ -79,6 +79,55 @@ Invariants:
 - issue state answers "what work exists?"
 - issue state does **not** answer "is a worker currently running?"
 
+### Issue Facets
+
+Issue labels should carry the orthogonal facets that the core issue schema does
+not express directly.
+
+The first required facet families for framework work are:
+
+- `track:*`
+- `place:*`
+- `surface:*`
+
+These labels are not freeform tags.
+They are coordinates over the issue graph.
+
+Current intended meanings:
+
+- `track:*`: where the issue sits in the framework program
+  e.g. `track:core`, `track:platform`, `track:proof`, `track:incubation`
+- `place:*`: where the work semantically belongs
+  e.g. `place:tusk`, `place:boundary`, `place:consumer`, `place:home`,
+  `place:aac`, `place:kurma`, `place:fish`
+- `surface:*`: which surface the issue is about
+  e.g. `surface:ops`, `surface:composition`, `surface:isolation`,
+  `surface:adoption`, `surface:paid-http`
+
+For framework issues, each issue should normally carry exactly one label from
+each of those three families.
+
+The important invariant is:
+
+- parent/child and dependency edges still express workflow shape
+- statuses still express lifecycle
+- facet labels express orthogonal projections over the same issue graph
+
+### Bundle-Style Reading
+
+It is useful to read the tracker in a bundle-style way.
+
+The base space is the issue/dependency graph.
+The fiber over each issue is the small set of orthogonal facet coordinates such
+as `track`, `place`, and `surface`.
+
+That analogy is helpful because it lets operator views project the same work by
+different axes without inventing a second source of truth.
+
+But this is only a projection model.
+`bd` should remain a typed workflow graph with labels, not a literal simplicial
+or fiber-bundle substrate.
+
 ### 2. Dependency Edge
 
 A dependency edge expresses workflow shape between issues.

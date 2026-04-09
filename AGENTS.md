@@ -113,6 +113,9 @@ nix run .#tusk-ui -- --help
 ## Change Rules
 
 - Keep `tusk` core generic. Consumer-specific runtime bindings and tracker wrappers belong in the consuming repo until they clearly generalize.
+- Keep `tusk` as an external operational adapter. `fish` owns normative meaning, `kurma` owns carrier/runtime/compiler surfaces, and `tusk` owns orchestration around realized artifacts.
+- When placing new work, ask: does it define meaning, carry meaning, or operate around meaning? Only the last class belongs in `tusk`.
+- For framework-tracker issues, add one `track:*`, one `place:*`, and one `surface:*` label so board views can project the same issue graph by program track, semantic location, and surface area.
 - Keep consumer-context skills in the consuming repo; do not centralize them in `tusk` unless they are intentionally becoming shared infrastructure.
 - Import `devenvModules.codex` exactly once in a consumer flake, then compose `devenvModules.consumer` or explicit skill modules on top.
 - Keep the shared scratch module focused on generic environment redirection; repo-specific cleanup choices still belong in the consuming repo.
