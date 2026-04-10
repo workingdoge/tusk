@@ -4,12 +4,14 @@ description: >
   Use this skill when Codex needs to design, inspect, compare, or debug a
   Nix-native operational pipeline: CI/CD topology, verified checks, admissible
   effects, Hercules CI, hercules-ci-effects, forge workflow generators such as
-  actions.nix, caches, deploy surfaces, and the boundary between pure
-  evaluation and effectful realization. Trigger it for questions about what
-  should remain pure CI, what should become effectful CD, how to place
-  secrets/state, how to compare Hercules against generated forge workflows, or
-  how to operationalize a flake without collapsing into generic devops. Prefer
-  local flake inspection and official-source docs first.
+  actions.nix, caches, deploy surfaces, local container/microvm attachment,
+  and the boundary between pure evaluation and effectful realization. Trigger
+  it for questions about what should remain pure CI, what should become
+  effectful CD, how to place secrets/state, how to compare Hercules against
+  generated forge workflows, how a local isolation probe should attach to the
+  control plane, or how to operationalize a flake without collapsing into
+  generic devops. Prefer local flake inspection and official-source docs
+  first.
 ---
 
 # Ops
@@ -22,6 +24,8 @@ deployments, caches, and the transport layer that carries them.
 
 Read:
 - `references/PIPELINE-SHAPE.md` for the bundle-shaped operational model
+- `references/LOCAL-ISOLATION.md` for lane-scoped local probes and later
+  executor-family promotion
 - `references/PLATFORMS.md` for Hercules vs actions.nix vs adjacent tools
 - `references/TOOLING.md` for local inspection and validation commands
 
@@ -30,16 +34,19 @@ Default order:
 
 1. inspect the local flake and current automation surface,
 2. identify the pure verified base,
-3. identify the admissible effects above that base,
-4. identify the secrets/state boundary,
-5. only then compare operational platforms,
-6. propose the smallest useful slice.
+3. identify the admissible effects or local runtime attachments above that
+   base,
+4. identify the secrets/state and authority boundary,
+5. distinguish lane-scoped proof from reusable executor-family promotion,
+6. only then compare operational platforms,
+7. propose the smallest useful slice.
 
 The skill exists because Nix-native operations are not one flat problem:
 - `git-hooks-nix` is local and check-oriented
 - `actions.nix` is forge workflow generation
 - Hercules effects are a separate effect layer over successful jobs
 - deployment and cache tooling live further out at the realization edge
+- local isolation is a bounded runtime attachment, not a second semantic center
 
 ## Run this first
 Before reading platform docs:
@@ -102,14 +109,44 @@ Default moves:
 Goal:
 Find the first user-owned operational boundary that explains the failure.
 
+### 4) Local isolation attachment
+Use when the user asks:
+- should this container or microvm work live in `tusk`?
+- is this a lane-scoped local probe or a reusable executor family?
+- how should a local Hermes-style runtime attach to the control plane?
+- what crosses the guest boundary as explicit mounts, env, network, and
+  receipts?
+
+Default moves:
+1. inspect the existing lane, workflow, and runtime surfaces
+2. read `references/LOCAL-ISOLATION.md`
+3. classify the slice as a lane-scoped local probe or an admitted realization
+4. name the constructor inputs explicitly:
+   - mounts
+   - environment policy
+   - network mode
+   - receipt sink
+   - reattach mode
+5. keep payload, credentials, and product policy outside `tusk`
+
+Goal:
+Choose one bounded local proof path without widening into a general
+agent-runtime framework.
+
 ## Local-first rules
 - Prefer local flake inspection before platform comparison.
 - Prefer the smallest check or effect boundary over whole-system reasoning.
 - Prefer official-source docs after the local shape is known.
 - Treat secrets/state as a separate layer, not as an implementation detail.
 - Keep the semantic center on validated sections plus admissible effects.
+- Prefer lane-scoped local probes before reusable executor families.
+- Treat mounts, env policy, network policy, receipt sinks, and reattach mode as
+  explicit contract fields, not ambient shell inheritance.
+- Keep Hermes/bootstrap commands, credentials, and product policy downstream of
+  the `tusk` attachment boundary.
 
 ## References
 - Read `references/PIPELINE-SHAPE.md` for the operational model.
+- Read `references/LOCAL-ISOLATION.md` for local isolation attachment.
 - Read `references/PLATFORMS.md` for official-source platform positioning.
 - Read `references/TOOLING.md` for concrete command order.
