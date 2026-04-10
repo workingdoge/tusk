@@ -88,6 +88,27 @@ Sequence it as:
 
 Do not collapse all three into one lane.
 
+## Isolation rule
+
+For container and microvm work, use this split:
+
+- shared lane-scoped runtime attachment, admission boundary, and receipt
+  contract: `tusk`
+- engine-specific implementation details only if they remain generic
+  operational infra and reusable across more than one proof: `tusk`
+- agent-specific payloads, bootstrap commands, credentials, and product policy:
+  downstream repo or a separate runtime context
+
+Sequence it as:
+
+1. `tusk` attachment contract
+2. one lane-scoped local probe
+3. only then promotion into a reusable executor family if the constructor
+   actually stabilizes
+
+Do not start with a general agent-runtime framework when the real first wire is
+one bounded local probe.
+
 ## Wire contract
 
 Every consequential issue should declare one main wire:
