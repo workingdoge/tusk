@@ -96,7 +96,9 @@ nix run .#tusk-ui -- --help
 - `scripts/tusk-paths.sh` centralizes checkout-root vs tracker-root resolution for flake-owned wrappers and local control-plane scripts.
 - `lib.nix` contains the generic `tusk` normalization and validation logic.
 - `flake-module.nix` contains the reusable Nix module surface for `tusk`.
-- `design/` contains architecture and workflow notes that belong to `tusk` itself.
+- `design/specs/` contains the normative kernel spec series for repo-local workflow law.
+- `design/notes/` contains repo-scoped explanatory and adapter notes that inform `tusk` without redefining the kernel.
+- `design/migration-candidates/` contains explicitly staged notes that remain visible here temporarily but are expected to move to a more appropriate context later; do not treat them as kernel authority.
 - `.agents/skills/tusk/` contains the repo-local source of truth for the `tusk` workflow skill.
 - `.agents/skills/ops/` contains the repo-local source of truth for the shared `ops` skill.
 - `.agents/skills/nix/` contains the repo-local source of truth for the shared `nix` skill.

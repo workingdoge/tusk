@@ -204,7 +204,7 @@ The important invariant is:
   visible repo state it produced
 
 For the attachment contract, see
-[`design/tusk-isolation-attachment.md`](./tusk-isolation-attachment.md).
+[`design/tusk-isolation-attachment.md`](../tusk-isolation-attachment.md).
 
 ### 4. Service
 
@@ -221,7 +221,7 @@ Current authority:
 Today:
 
 - health and bootstrap are handled by repo-local scripts like
-  [`bd-tracker-ensure`](../scripts/bd-tracker-ensure.sh)
+  [`bd-tracker-ensure`](../../scripts/bd-tracker-ensure.sh)
 - there is no first-class service state record yet
 
 Target authority:
@@ -272,7 +272,7 @@ Current authorities:
 
 Current examples:
 
-- lane launch receipt in [`scripts/bd-lane.sh`](../scripts/bd-lane.sh)
+- lane launch receipt in [`scripts/bd-lane.sh`](../../scripts/bd-lane.sh)
 - tracker health repair note on issues
 
 Target shape:

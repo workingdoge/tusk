@@ -121,10 +121,10 @@ upstream surface exists to consume.
 ## Relationship To Other Tusk Notes
 
 This note is narrower than
-[`design/tusk-architecture.md`](./tusk-architecture.md).
+[`design/notes/tusk-architecture.md`](../notes/tusk-architecture.md).
 That note defines the operational calculus inside `tusk`.
 
 This note is also narrower than
-[`design/tusk-transition-carrier.md`](./tusk-transition-carrier.md).
+[`design/notes/tusk-transition-carrier.md`](../notes/tusk-transition-carrier.md).
 That note defines how `tusk` should carry one local workflow transition once
 the repo boundary has already been chosen.

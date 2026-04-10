@@ -322,7 +322,7 @@ It should first define:
 - one lane-scoped receipt-bearing probe path
 - and one promotion rule for when that probe becomes a reusable executor family
 
-See [`design/tusk-isolation-attachment.md`](./tusk-isolation-attachment.md).
+See [`design/tusk-isolation-attachment.md`](../tusk-isolation-attachment.md).
 
 Why here:
 - isolation only makes sense once witness, admission, executor, driver, and

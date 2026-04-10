@@ -250,7 +250,7 @@ Proceed as if:
 - and settlement remains downstream of a clean protocol boundary
 
 The first extracted kernel for this boundary now lives under
-[`tools/paid-http-kernel`](../tools/paid-http-kernel/README.md).
+[`tools/paid-http-kernel`](../../tools/paid-http-kernel/README.md).
 
 The settlement seam beneath that kernel now lives in
 [`design/tusk-paid-http-executor-contract.md`](./tusk-paid-http-executor-contract.md).

@@ -243,7 +243,7 @@ tusk.realizations.update-flake-lock = {
 The semantic center stays upstream.
 Realization is deliberately downstream of intent and admission.
 For repo-placement rules across `fish`, `kurma`, and `tusk`, see
-[`design/tusk-upstream-boundary.md`](./tusk-upstream-boundary.md).
+[`design/migration-candidates/tusk-upstream-boundary.md`](../migration-candidates/tusk-upstream-boundary.md).
 
 ### 7. Receipts
 
@@ -365,10 +365,10 @@ for the adapter map beneath that kernel.
 
 If this boundary becomes blurry, `tusk` will collapse back into tool wrappers.
 
-See also [`design/tusk-paid-http-protocol-boundary.md`](./tusk-paid-http-protocol-boundary.md)
+See also [`design/migration-candidates/tusk-paid-http-protocol-boundary.md`](../migration-candidates/tusk-paid-http-protocol-boundary.md)
 for the first incubation-boundary example that separates reusable paid-request
 protocol artifacts from consumer-local mode policy and wallet-local execution,
-plus [`design/tusk-paid-http-executor-contract.md`](./tusk-paid-http-executor-contract.md)
+plus [`design/migration-candidates/tusk-paid-http-executor-contract.md`](../migration-candidates/tusk-paid-http-executor-contract.md)
 for the wallet-agnostic settlement seam beneath the paid-http kernel.
 
 ## First Useful Slice For This Repo

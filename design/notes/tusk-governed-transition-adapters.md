@@ -83,7 +83,7 @@ It should not own:
 Current implementation:
 
 - logical seam: `TrackerStore`
-- current wrapper: [`scripts/tusk-tracker.sh`](../scripts/tusk-tracker.sh)
+- current wrapper: [`scripts/tusk-tracker.sh`](../../scripts/tusk-tracker.sh)
 - current upstream authority: `bd`
 
 Important nuance:
@@ -133,7 +133,7 @@ Current implementation:
 - logical seam: `WorkspaceOps`
 - current code: `resolve_revision_commit`, workspace observation helpers, and
   `jj workspace ...` / `jj describe` calls in `crates/tuskd-core/src/main.rs`
-- compatibility shell path still exists in [`scripts/tuskd.sh`](../scripts/tuskd.sh)
+- compatibility shell path still exists in [`scripts/tuskd.sh`](../../scripts/tuskd.sh)
 
 ### 4. `BackendRuntime`
 
