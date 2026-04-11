@@ -42,6 +42,11 @@ Read the series in this order:
 
 `TUSK-0004` is the binding engineering surface.
 
+## Companion docs
+
+- `TUSK-0004-conformance-matrix.md` — current implementation, receipt, and
+  test mapping for the first governed transition family
+
 ## What the series buys
 
 If this series is respected, Tusk gains five things:

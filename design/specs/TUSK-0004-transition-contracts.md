@@ -14,6 +14,9 @@ This spec is the engineering surface. Each transition gets an exact contract
 that is explicit enough to drive implementation, tests, receipts, and UI
 behavior.
 
+See `TUSK-0004-conformance-matrix.md` for the current implementation and test
+mapping of this contract surface.
+
 ## Contract schema
 
 Every governed transition SHOULD answer the following questions:
