@@ -13,6 +13,13 @@ bind implementation, tests, projections, and future adapters.
 Normative keywords such as **SHALL**, **SHOULD**, and **MAY** are used in their
 usual specification sense.
 
+## Repo Ownership
+
+These files are repo-owned and authoritative for this checkout.
+
+See `PROVENANCE.md` for the import note, current repo status, and the rule that
+future kernel edits happen here rather than in out-of-tree spec bundles.
+
 ## Series map
 
 - `TUSK-0000` — Identity and Boundary

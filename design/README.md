@@ -8,6 +8,8 @@ This directory is organized by authority and placement, not by topic.
   - Normative kernel specs.
   - This is the only design surface that defines what Tusk is allowed to own
     and what the first governed transition family must do.
+  - Once imported here, these repo files are authoritative over any exported
+    spec bundle that was used to stage them.
   - New kernel law belongs here first.
 - `notes/`
   - Repo-scoped explanatory and adapter notes that help implement or interpret
@@ -32,3 +34,6 @@ This directory is organized by authority and placement, not by topic.
 
 Tusk stays scoped by keeping the kernel small and making migration candidates
 explicit instead of letting them sit at peer level with the control-plane law.
+
+See `design/specs/PROVENANCE.md` for the current import and status note for the
+kernel series.
