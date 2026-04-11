@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/bridge/v0.2/adapter/authorize.request.schema.json",
+  "title": "Bridge Adapter Authorize Request",
+  "description": "External request accepted by the bridge adapter. Caller-supplied values are limited to the witness and call facts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "witness",
+    "call"
+  ],
+  "properties": {
+    "version": {
+      "const": "0.2"
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "witness": {
+      "$ref": "https://example.org/bridge/v0.2/adapter/witness.schema.json"
+    },
+    "call": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested_tool",
+        "requested_resource",
+        "source_domain",
+        "session_nonce",
+        "pop_proof",
+        "rp_initiated"
+      ],
+      "properties": {
+        "requested_tool": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "requested_resource": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "source_domain": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,255}$"
+        },
+        "destination_domain": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,255}$"
+        },
+        "cross_domain": {
+          "type": "boolean"
+        },
+        "payload_hash": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 256
+        },
+        "session_nonce": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 256
+        },
+        "rp_initiated": {
+          "type": "boolean"
+        },
+        "pop_proof": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "verified"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "signed-nonce",
+                "mtls-exporter",
+                "dpop",
+                "attestation-bound"
+              ]
+            },
+            "verified": {
+              "type": "boolean"
+            },
+            "nonce": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 256
+            },
+            "proof_value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          }
+        },
+        "transport": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mtls_client_id": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,255}$"
+            },
+            "remote_addr": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 256
+            },
+            "protocol": {
+              "type": "string",
+              "enum": [
+                "https",
+                "grpc",
+                "unix-socket",
+                "stdio"
+              ]
+            }
+          }
+        },
+        "client_context": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "trace_parent": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 256
+            },
+            "ui_surface": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "user_intent_summary": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          }
+        }
+      }
+    }
+  }
+}

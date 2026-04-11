@@ -1,0 +1,621 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/bridge/v0.2/adapter/witness.schema.json",
+  "title": "Bridge Witness v0.2",
+  "description": "Schema for authority witnesses and controlled-release witnesses used by the sheaf-secured bridge.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "witness_type",
+    "version",
+    "iss",
+    "sub",
+    "domain",
+    "purpose",
+    "tool",
+    "resource",
+    "conf_label",
+    "integ_label",
+    "audience",
+    "nbf",
+    "exp",
+    "ttl_s",
+    "jti",
+    "trace",
+    "pop_key",
+    "posture_digest",
+    "egress_policy",
+    "output_policy",
+    "approval_mode",
+    "issuer_alg",
+    "sig"
+  ],
+  "properties": {
+    "witness_type": {
+      "type": "string",
+      "enum": [
+        "authority",
+        "controlled-release"
+      ],
+      "description": "Authority witnesses authorize a bounded action; controlled-release witnesses authorize a cross-domain release."
+    },
+    "version": {
+      "const": "0.2"
+    },
+    "iss": {
+      "$ref": "#/$defs/idToken"
+    },
+    "sub": {
+      "$ref": "#/$defs/idToken"
+    },
+    "act_for": {
+      "$ref": "#/$defs/idToken"
+    },
+    "domain": {
+      "$ref": "#/$defs/idToken"
+    },
+    "purpose": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "tool": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "resource": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "conf_label": {
+      "$ref": "#/$defs/securityLabel"
+    },
+    "integ_label": {
+      "$ref": "#/$defs/securityLabel"
+    },
+    "audience": {
+      "$ref": "#/$defs/idToken"
+    },
+    "nbf": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "exp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ttl_s": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 86400
+    },
+    "jti": {
+      "$ref": "#/$defs/tokenId"
+    },
+    "trace": {
+      "$ref": "#/$defs/tokenId"
+    },
+    "pop_key": {
+      "$ref": "#/$defs/popKeyBinding"
+    },
+    "posture_digest": {
+      "$ref": "#/$defs/digestRef"
+    },
+    "model_digest": {
+      "$ref": "#/$defs/digestRef"
+    },
+    "connector_digest": {
+      "$ref": "#/$defs/digestRef"
+    },
+    "constraints": {
+      "$ref": "#/$defs/constraintSet"
+    },
+    "egress_policy": {
+      "$ref": "#/$defs/egressPolicy"
+    },
+    "output_policy": {
+      "$ref": "#/$defs/outputPolicy"
+    },
+    "approval_mode": {
+      "type": "string",
+      "enum": [
+        "none",
+        "single",
+        "dual"
+      ]
+    },
+    "approval_evidence": {
+      "$ref": "#/$defs/approvalEvidence"
+    },
+    "release": {
+      "$ref": "#/$defs/releaseEnvelope"
+    },
+    "issuer_alg": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "sig": {
+      "$ref": "#/$defs/signatureEnvelope"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "witness_type": {
+            "const": "controlled-release"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "release"
+        ],
+        "properties": {
+          "approval_mode": {
+            "enum": [
+              "single",
+              "dual"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "witness_type": {
+            "const": "authority"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "release"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "approval_mode": {
+            "enum": [
+              "single",
+              "dual"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "approval_evidence"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "idToken": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,255}$"
+    },
+    "tokenId": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "securityLabel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "level"
+      ],
+      "properties": {
+        "level": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "compartments": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          }
+        },
+        "tags": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          }
+        },
+        "marking": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "digestRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alg",
+        "value"
+      ],
+      "properties": {
+        "alg": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "value": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 512
+        },
+        "issued_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "popKeyBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding",
+        "proof_method",
+        "kid",
+        "value"
+      ],
+      "properties": {
+        "binding": {
+          "type": "string",
+          "enum": [
+            "jwk-thumbprint",
+            "spki-sha256",
+            "mtls-cert-sha256",
+            "ed25519-pub",
+            "p256-pub"
+          ]
+        },
+        "proof_method": {
+          "type": "string",
+          "enum": [
+            "mtls",
+            "dpop",
+            "signed-nonce",
+            "local-attestation"
+          ]
+        },
+        "kid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "value": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 1024
+        },
+        "nonce": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 256
+        }
+      }
+    },
+    "constraintSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "verb_class": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "release",
+            "admin"
+          ]
+        },
+        "single_use": {
+          "type": "boolean"
+        },
+        "rows_max": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000000
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824
+        },
+        "rate_per_min": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "write_scope": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "allowed_networks": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "human_review_required": {
+          "type": "boolean"
+        },
+        "max_secret_materializations": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        }
+      }
+    },
+    "egressPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allowlist"
+          ]
+        },
+        "destinations": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "allowlist"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "destinations"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "deny"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "destinations"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "outputPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "redaction_profile",
+        "max_response_bytes",
+        "allow_secrets_in_output",
+        "return_to_model"
+      ],
+      "properties": {
+        "redaction_profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "max_response_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824
+        },
+        "allow_secrets_in_output": {
+          "const": false
+        },
+        "return_to_model": {
+          "type": "boolean"
+        },
+        "strip_html": {
+          "type": "boolean"
+        },
+        "classify_output": {
+          "type": "boolean"
+        }
+      }
+    },
+    "approverRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "role",
+        "time"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/idToken"
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "time": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "signature_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "approvalEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "quorum",
+        "ticket",
+        "approvers"
+      ],
+      "properties": {
+        "quorum": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "ticket": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "approvers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/approverRef"
+          }
+        }
+      }
+    },
+    "releaseEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_domain",
+        "destination_domain",
+        "release_basis",
+        "reviewer_ids",
+        "content_binding"
+      ],
+      "properties": {
+        "source_domain": {
+          "$ref": "#/$defs/idToken"
+        },
+        "destination_domain": {
+          "$ref": "#/$defs/idToken"
+        },
+        "release_basis": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "reviewer_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/idToken"
+          }
+        },
+        "chain_of_custody_refs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "content_binding": {
+          "$ref": "#/$defs/digestRef"
+        },
+        "automated_releaser_id": {
+          "$ref": "#/$defs/idToken"
+        },
+        "human_review_required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "signatureEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alg",
+        "key_id",
+        "key_epoch",
+        "value"
+      ],
+      "properties": {
+        "alg": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "key_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "key_epoch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "value": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 8192
+        }
+      }
+    }
+  }
+}

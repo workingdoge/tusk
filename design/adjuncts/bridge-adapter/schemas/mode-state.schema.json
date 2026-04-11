@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/bridge/v0.2/adapter/mode-state.schema.json",
+  "title": "Bridge Mode State",
+  "description": "Current bridge-wide mode and the most recent burn/restore transition metadata.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "current_mode",
+    "updated_at",
+    "epoch"
+  ],
+  "properties": {
+    "version": {
+      "const": "0.2"
+    },
+    "current_mode": {
+      "type": "string",
+      "enum": [
+        "normal",
+        "degraded",
+        "safe",
+        "burn",
+        "restoring"
+      ]
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "epoch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "last_command_id": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "cut_set": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "uniqueItems": true
+    }
+  }
+}

@@ -1,0 +1,300 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/bridge/v0.2/adapter/decision.schema.json",
+  "title": "Bridge Decision Envelope",
+  "description": "Decision returned by the policy engine after evaluating assembled policy input.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "effect",
+    "allow",
+    "burn",
+    "trace",
+    "jti",
+    "deny_reasons",
+    "burn_reasons",
+    "effective_authority"
+  ],
+  "properties": {
+    "effect": {
+      "type": "string",
+      "enum": [
+        "accept",
+        "deny",
+        "burn"
+      ]
+    },
+    "allow": {
+      "type": "boolean"
+    },
+    "burn": {
+      "type": "boolean"
+    },
+    "trace": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "jti": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "deny_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "uniqueItems": true
+    },
+    "burn_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "uniqueItems": true
+    },
+    "effective_authority": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "resource",
+            "conf_label",
+            "integ_label",
+            "ttl_s",
+            "egress_policy",
+            "output_policy",
+            "approval_mode",
+            "constraints"
+          ],
+          "properties": {
+            "tool": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "resource": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "conf_label": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "level"
+              ],
+              "properties": {
+                "level": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "compartments": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  }
+                },
+                "tags": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  }
+                },
+                "marking": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              }
+            },
+            "integ_label": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "level"
+              ],
+              "properties": {
+                "level": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "compartments": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  }
+                },
+                "tags": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  }
+                },
+                "marking": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              }
+            },
+            "ttl_s": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400
+            },
+            "egress_policy": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode"
+              ],
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "deny",
+                    "allowlist"
+                  ]
+                },
+                "destinations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "uniqueItems": true
+                }
+              }
+            },
+            "output_policy": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "redaction_profile",
+                "max_response_bytes",
+                "allow_secrets_in_output",
+                "return_to_model",
+                "strip_html",
+                "classify_output"
+              ],
+              "properties": {
+                "redaction_profile": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "max_response_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1073741824
+                },
+                "allow_secrets_in_output": {
+                  "const": false
+                },
+                "return_to_model": {
+                  "type": "boolean"
+                },
+                "strip_html": {
+                  "type": "boolean"
+                },
+                "classify_output": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "approval_mode": {
+              "type": "string",
+              "enum": [
+                "none",
+                "single",
+                "dual"
+              ]
+            },
+            "constraints": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "verb_class",
+                "rows_max",
+                "max_bytes",
+                "rate_per_min",
+                "single_use",
+                "human_review_required",
+                "max_secret_materializations"
+              ],
+              "properties": {
+                "verb_class": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "write",
+                    "release",
+                    "admin"
+                  ]
+                },
+                "rows_max": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100000000
+                },
+                "max_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1073741824
+                },
+                "rate_per_min": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000
+                },
+                "single_use": {
+                  "type": "boolean"
+                },
+                "human_review_required": {
+                  "type": "boolean"
+                },
+                "max_secret_materializations": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1024
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

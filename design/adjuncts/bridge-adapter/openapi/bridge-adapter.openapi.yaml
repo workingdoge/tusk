@@ -1,0 +1,68 @@
+openapi: 3.1.0
+info:
+  title: Bridge Adapter API
+  version: "0.2"
+  summary: Local or sidecar API for assembling and evaluating bridge authorization requests.
+servers:
+  - url: https://bridge.local
+paths:
+  /v1/authorize:
+    post:
+      summary: Evaluate a witness-bound authorization request
+      operationId: authorize
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../schemas/authorize.request.schema.json
+      responses:
+        '200':
+          description: Authorization decision
+          content:
+            application/json:
+              schema:
+                $ref: ../schemas/decision.schema.json
+        '400':
+          description: Request or witness shape invalid
+        '409':
+          description: Burn mode or policy burn decision
+        '503':
+          description: Required authoritative provider unavailable
+  /v1/state/mode:
+    get:
+      summary: Read current bridge mode
+      operationId: getMode
+      responses:
+        '200':
+          description: Current mode state
+          content:
+            application/json:
+              schema:
+                $ref: ../schemas/mode-state.schema.json
+  /v1/admin/burn:
+    post:
+      summary: Issue a burn command
+      operationId: burn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../schemas/mode-command.schema.json
+      responses:
+        '202':
+          description: Burn command accepted
+  /v1/admin/restore:
+    post:
+      summary: Issue a restore command
+      operationId: restore
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../schemas/mode-command.schema.json
+      responses:
+        '202':
+          description: Restore command accepted

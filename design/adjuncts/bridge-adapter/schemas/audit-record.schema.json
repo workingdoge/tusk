@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/bridge/v0.2/adapter/audit-record.schema.json",
+  "title": "Bridge Audit Record",
+  "description": "Minimal durable audit record emitted by the adapter around authorization, burn, restore, and controlled-release decisions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "record_type",
+    "event_time",
+    "authoritative_time_source",
+    "trace",
+    "jti",
+    "effect",
+    "subject",
+    "domain",
+    "tool",
+    "resource",
+    "current_mode",
+    "witness_sha256",
+    "policy_input_sha256"
+  ],
+  "properties": {
+    "version": {
+      "const": "0.2"
+    },
+    "record_type": {
+      "type": "string",
+      "enum": [
+        "authorize",
+        "burn",
+        "restore",
+        "controlled-release"
+      ]
+    },
+    "event_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "authoritative_time_source": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "trace": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "jti": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "effect": {
+      "type": "string",
+      "enum": [
+        "accept",
+        "deny",
+        "burn",
+        "restore",
+        "error"
+      ]
+    },
+    "subject": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,255}$"
+    },
+    "act_for": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,255}$"
+    },
+    "domain": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,255}$"
+    },
+    "source_domain": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,255}$"
+    },
+    "destination_domain": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,255}$"
+    },
+    "tool": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "resource": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "current_mode": {
+      "type": "string",
+      "enum": [
+        "normal",
+        "degraded",
+        "safe",
+        "burn",
+        "restoring"
+      ]
+    },
+    "witness_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "policy_input_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "decision_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "deny_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "uniqueItems": true
+    },
+    "burn_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "uniqueItems": true
+    },
+    "approvers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "role",
+          "approved_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,255}$"
+          },
+          "role": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "approved_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "authn_strength": {
+            "type": "string",
+            "enum": [
+              "aal2",
+              "aal3",
+              "hardware",
+              "service"
+            ]
+          }
+        }
+      },
+      "uniqueItems": true
+    },
+    "labels": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "conf_label": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "level"
+          ],
+          "properties": {
+            "level": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "compartments": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              }
+            },
+            "tags": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              }
+            },
+            "marking": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        },
+        "integ_label": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "level"
+          ],
+          "properties": {
+            "level": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "compartments": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              }
+            },
+            "tags": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              }
+            },
+            "marking": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        }
+      }
+    }
+  }
+}

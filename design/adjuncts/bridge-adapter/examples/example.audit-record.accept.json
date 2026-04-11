@@ -1,0 +1,41 @@
+{
+  "version": "0.2",
+  "record_type": "authorize",
+  "event_time": "2026-04-11T14:00:30Z",
+  "authoritative_time_source": "time-authority://core/ntp-primary",
+  "trace": "ca14e9e0-1c8c-40bd-bc53-5d01e4876de8",
+  "jti": "464e6650-b1b0-41f9-89da-47b9b43e8c2b",
+  "effect": "accept",
+  "subject": "spiffe://acme/agents/reporting-worker",
+  "act_for": "user:alice@example.com",
+  "domain": "acme.prod.analytics",
+  "source_domain": "acme.prod.analytics",
+  "destination_domain": "acme.prod.analytics",
+  "tool": "db.query.readonly",
+  "resource": "postgres://analytics/reporting",
+  "current_mode": "normal",
+  "witness_sha256": "c0b1d797c172bc978a4765720303d5d5d58ddbed4fed16aeb206f16893797aa5",
+  "policy_input_sha256": "c6adf326bb0ee583184228f0e42b586412222bec4d33a068a38667ea8e8def14",
+  "decision_sha256": "55f194f1398a36ce713e0392b6fb9d9ff550439034da2e72faa684d7483fb47e",
+  "deny_reasons": [],
+  "burn_reasons": [],
+  "labels": {
+    "conf_label": {
+      "level": "restricted",
+      "compartments": [
+        "finance"
+      ],
+      "tags": [
+        "reporting"
+      ],
+      "marking": "internal-need-to-know"
+    },
+    "integ_label": {
+      "level": "attested",
+      "tags": [
+        "signed",
+        "measured-boot"
+      ]
+    }
+  }
+}

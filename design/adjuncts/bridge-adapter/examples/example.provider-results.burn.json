@@ -1,0 +1,71 @@
+{
+  "version": "0.2",
+  "preflight": {
+    "schema_valid": true,
+    "signature_valid": true,
+    "issuer_not_revoked": true,
+    "jti_not_revoked": true,
+    "replay_cache_absent": true,
+    "pop_valid": true,
+    "posture_match": true,
+    "subject_allowed": true,
+    "delegated_actor_allowed": true,
+    "materialize_only_at_execution_leaf": true,
+    "evidence_emit_ok": true,
+    "release_basis_allowed": true,
+    "release_review_chain_complete": true
+  },
+  "runtime": {
+    "authoritative_now": "2026-04-11T14:00:30Z",
+    "verifier_id": "tusk-broker://us-east-1/bridge",
+    "time_source_ok": true,
+    "current_mode": "safe",
+    "attestation_snapshot": {
+      "digest": "99887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbbaa",
+      "issued_at": "2026-04-11T13:59:40Z"
+    },
+    "revocation_snapshot": {
+      "issuers": [],
+      "jtis": []
+    },
+    "resource_policy": {
+      "allowed_destination_domains": [],
+      "egress_mode": "allowlist",
+      "egress_allowlist": [
+        "postgres://analytics/reporting"
+      ],
+      "max_ttl_s": 180,
+      "required_approval_mode": "none",
+      "required_conf_level": "internal",
+      "required_compartments": [
+        "finance"
+      ],
+      "required_tags": [
+        "reporting"
+      ],
+      "required_integ_level": "asserted",
+      "required_integ_tags": [
+        "signed"
+      ],
+      "required_redaction_profile": "finance-summary-v1",
+      "return_to_model_allowed": true,
+      "rows_max": 1000,
+      "rate_per_min": 5,
+      "max_bytes": 65536,
+      "max_response_bytes": 65536,
+      "max_secret_materializations": 1,
+      "classify_output": true,
+      "strip_html": true,
+      "human_review_required": false,
+      "require_single_use": false
+    }
+  },
+  "events": {
+    "bridge_host_attestation_failed": false,
+    "issuer_compromise_detected": false,
+    "audit_tamper_detected": true,
+    "canary_or_honey_credential_activated": false,
+    "controlled_release_policy_bypass_detected": false,
+    "policy_hash_mismatch": false
+  }
+}

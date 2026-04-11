@@ -1,0 +1,169 @@
+{
+  "witness": {
+    "witness_type": "authority",
+    "version": "0.2",
+    "iss": "bridge-issuer.core",
+    "sub": "spiffe://acme/agents/reporting-worker",
+    "act_for": "user:alice@example.com",
+    "domain": "acme.prod.analytics",
+    "purpose": "weekly revenue summary",
+    "tool": "db.query.readonly",
+    "resource": "postgres://analytics/reporting",
+    "conf_label": {
+      "level": "restricted",
+      "compartments": [
+        "finance"
+      ],
+      "tags": [
+        "reporting"
+      ],
+      "marking": "internal-need-to-know"
+    },
+    "integ_label": {
+      "level": "attested",
+      "tags": [
+        "signed",
+        "measured-boot"
+      ]
+    },
+    "audience": "tusk-broker://us-east-1/bridge",
+    "nbf": "2026-04-11T14:00:00Z",
+    "exp": "2026-04-11T14:02:00Z",
+    "ttl_s": 120,
+    "jti": "464e6650-b1b0-41f9-89da-47b9b43e8c2b",
+    "trace": "ca14e9e0-1c8c-40bd-bc53-5d01e4876de8",
+    "pop_key": {
+      "binding": "spki-sha256",
+      "proof_method": "signed-nonce",
+      "kid": "run-2026-04-11-001",
+      "value": "sha256-2d3e4f5a6b7c8d9e00112233445566778899aabbccddeeff0011223344556677",
+      "nonce": "n-9Q4zprA7XCeM2sL"
+    },
+    "posture_digest": {
+      "alg": "sha-256",
+      "value": "99887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbbaa",
+      "issued_at": "2026-04-11T13:59:40Z"
+    },
+    "model_digest": {
+      "alg": "sha-256",
+      "value": "8be4a6073ef1f3e3e9b9ce2e5a4cf8a2761ed01b2adca99ec53b8f0bd8d9f111"
+    },
+    "connector_digest": {
+      "alg": "sha-256",
+      "value": "beadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbead"
+    },
+    "constraints": {
+      "verb_class": "read",
+      "single_use": true,
+      "rows_max": 5000,
+      "max_bytes": 1048576,
+      "rate_per_min": 10,
+      "human_review_required": false,
+      "max_secret_materializations": 1
+    },
+    "egress_policy": {
+      "mode": "allowlist",
+      "destinations": [
+        "postgres://analytics/reporting"
+      ]
+    },
+    "output_policy": {
+      "redaction_profile": "finance-summary-v1",
+      "max_response_bytes": 65536,
+      "allow_secrets_in_output": false,
+      "return_to_model": true,
+      "strip_html": true,
+      "classify_output": true
+    },
+    "approval_mode": "none",
+    "issuer_alg": "EdDSA",
+    "sig": {
+      "alg": "EdDSA",
+      "key_id": "bridge-issuer-2026-q2",
+      "key_epoch": "2026Q2",
+      "value": "dGVzdC1zaWduYXR1cmUtYmFzZTY0dXJsLXN0dWI"
+    }
+  },
+  "preflight": {
+    "schema_valid": true,
+    "signature_valid": true,
+    "issuer_not_revoked": true,
+    "jti_not_revoked": true,
+    "replay_cache_absent": true,
+    "pop_valid": true,
+    "posture_match": true,
+    "subject_allowed": true,
+    "delegated_actor_allowed": true,
+    "materialize_only_at_execution_leaf": true,
+    "evidence_emit_ok": true,
+    "release_basis_allowed": true,
+    "release_review_chain_complete": true
+  },
+  "events": {
+    "bridge_host_attestation_failed": false,
+    "issuer_compromise_detected": false,
+    "audit_tamper_detected": true,
+    "canary_or_honey_credential_activated": false,
+    "controlled_release_policy_bypass_detected": false,
+    "policy_hash_mismatch": false
+  },
+  "runtime_request": {
+    "attestation_snapshot": {
+      "digest": "99887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbbaa",
+      "issued_at": "2026-04-11T13:59:40Z"
+    },
+    "cross_domain": false,
+    "current_mode": "safe",
+    "destination_domain": "acme.prod.analytics",
+    "now": "2026-04-11T14:00:30Z",
+    "payload_hash": "",
+    "pop_proof": {
+      "kind": "signed-nonce",
+      "verified": true,
+      "nonce": "n-9Q4zprA7XCeM2sL",
+      "proof_value": "base64url-proof-placeholder"
+    },
+    "requested_resource": "postgres://analytics/reporting",
+    "requested_tool": "db.query.readonly",
+    "resource_policy": {
+      "allowed_destination_domains": [],
+      "egress_mode": "allowlist",
+      "egress_allowlist": [
+        "postgres://analytics/reporting"
+      ],
+      "max_ttl_s": 180,
+      "required_approval_mode": "none",
+      "required_conf_level": "internal",
+      "required_compartments": [
+        "finance"
+      ],
+      "required_tags": [
+        "reporting"
+      ],
+      "required_integ_level": "asserted",
+      "required_integ_tags": [
+        "signed"
+      ],
+      "required_redaction_profile": "finance-summary-v1",
+      "return_to_model_allowed": true,
+      "rows_max": 1000,
+      "rate_per_min": 5,
+      "max_bytes": 65536,
+      "max_response_bytes": 65536,
+      "max_secret_materializations": 1,
+      "classify_output": true,
+      "strip_html": true,
+      "human_review_required": false,
+      "require_single_use": false
+    },
+    "revocation_snapshot": {
+      "issuers": [],
+      "jtis": []
+    },
+    "rp_initiated": true,
+    "session_nonce": "n-9Q4zprA7XCeM2sL",
+    "source_domain": "acme.prod.analytics",
+    "time_source_ok": true,
+    "verifier_id": "tusk-broker://us-east-1/bridge"
+  }
+}

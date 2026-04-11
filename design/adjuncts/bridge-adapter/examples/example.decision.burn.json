@@ -1,0 +1,56 @@
+{
+  "effect": "burn",
+  "allow": false,
+  "burn": true,
+  "trace": "ca14e9e0-1c8c-40bd-bc53-5d01e4876de8",
+  "jti": "464e6650-b1b0-41f9-89da-47b9b43e8c2b",
+  "deny_reasons": [],
+  "burn_reasons": [
+    "AUDIT_TAMPER_DETECTED"
+  ],
+  "effective_authority": {
+    "tool": "db.query.readonly",
+    "resource": "postgres://analytics/reporting",
+    "conf_label": {
+      "level": "restricted",
+      "compartments": [
+        "finance"
+      ],
+      "tags": [
+        "reporting"
+      ],
+      "marking": "internal-need-to-know"
+    },
+    "integ_label": {
+      "level": "asserted",
+      "tags": [
+        "signed"
+      ]
+    },
+    "ttl_s": 120,
+    "egress_policy": {
+      "mode": "allowlist",
+      "destinations": [
+        "postgres://analytics/reporting"
+      ]
+    },
+    "output_policy": {
+      "redaction_profile": "finance-summary-v1",
+      "max_response_bytes": 65536,
+      "allow_secrets_in_output": false,
+      "return_to_model": true,
+      "strip_html": true,
+      "classify_output": true
+    },
+    "approval_mode": "none",
+    "constraints": {
+      "verb_class": "read",
+      "rows_max": 1000,
+      "max_bytes": 65536,
+      "rate_per_min": 5,
+      "single_use": true,
+      "human_review_required": false,
+      "max_secret_materializations": 1
+    }
+  }
+}

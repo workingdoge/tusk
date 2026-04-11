@@ -1,0 +1,33 @@
+{
+  "version": "0.2",
+  "operation": "burn",
+  "command_id": "cmd-burn-2026-04-11-0001",
+  "trace": "trace-burn-2026-04-11-0001",
+  "requested_by": "user:security-operator@example.com",
+  "reason_code": "AUDIT_TAMPER_DETECTED",
+  "cut_set": [
+    "domain:acme.prod.analytics",
+    "issuer:bridge-issuer-2026-q2"
+  ],
+  "approval_mode": "dual",
+  "approval_evidence": {
+    "quorum": 2,
+    "approvers": [
+      {
+        "id": "user:alice@example.com",
+        "role": "security_officer",
+        "approved_at": "2026-04-11T14:01:00Z",
+        "authn_strength": "aal3"
+      },
+      {
+        "id": "user:bob@example.com",
+        "role": "ops_lead",
+        "approved_at": "2026-04-11T14:01:10Z",
+        "authn_strength": "aal3"
+      }
+    ],
+    "ticket": "INC-2026-0411-17",
+    "basis": "audit tamper trigger"
+  },
+  "ticket": "INC-2026-0411-17"
+}

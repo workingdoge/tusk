@@ -1,0 +1,76 @@
+version: '0.2'
+document: Adapter-to-policy-input field mapping
+providers:
+  schema_validator:
+    outputs:
+      preflight.schema_valid: Validate witness against witness.schema.json and request
+        shape against authorize.request.schema.json.
+  signature_verifier:
+    outputs:
+      preflight.signature_valid: Verify detached witness signature over a canonical
+        witness payload.
+  revocation_service:
+    outputs:
+      preflight.issuer_not_revoked: Issuer key epoch is not revoked.
+      preflight.jti_not_revoked: Witness jti is not revoked.
+      runtime.revocation_snapshot: Point-in-time revocation snapshot used for evidence
+        and forensics.
+  replay_cache:
+    outputs:
+      preflight.replay_cache_absent: No prior redemption for a replay-sensitive witness/context.
+  pop_verifier:
+    outputs:
+      preflight.pop_valid: Proof-of-possession validates against witness.pop_key and
+        call.pop_proof.
+  subject_resolver:
+    outputs:
+      preflight.subject_allowed: Subject is permitted to request the declared tool/resource
+        pair.
+      preflight.delegated_actor_allowed: act_for delegation is permitted for the resolved
+        subject.
+  attestation_verifier:
+    outputs:
+      preflight.posture_match: Runtime posture and witness posture digest are compatible.
+      runtime.attestation_snapshot: Authoritative attestation digest and issue time.
+  resource_registry:
+    outputs:
+      runtime.resource_policy: Canonical resource policy for requested_tool + requested_resource.
+  time_authority:
+    outputs:
+      runtime.authoritative_now: Current authoritative timestamp.
+      runtime.time_source_ok: Authoritative time source is available and trusted.
+  mode_controller:
+    outputs:
+      runtime.current_mode: Current bridge mode.
+      events.bridge_host_attestation_failed: Burn trigger from bridge host attestation
+        failure.
+      events.issuer_compromise_detected: Burn trigger from issuer compromise.
+      events.audit_tamper_detected: Burn trigger from audit tamper detection.
+      events.canary_or_honey_credential_activated: Burn trigger from honey-token activation.
+      events.controlled_release_policy_bypass_detected: Burn trigger from cross-domain
+        release bypass detection.
+      events.policy_hash_mismatch: Burn trigger from policy digest mismatch.
+  evidence_sink:
+    outputs:
+      preflight.evidence_emit_ok: Durable audit sink is reachable or safely queueing.
+  release_reviewer:
+    outputs:
+      preflight.release_basis_allowed: Release basis is valid for a controlled-release
+        witness.
+      preflight.release_review_chain_complete: Required release review chain is complete.
+  materialization_guard:
+    outputs:
+      preflight.materialize_only_at_execution_leaf: No nonlocal secret materialization
+        is requested or implied.
+assembly_rules:
+- Caller-supplied time SHALL be ignored. runtime_request.now comes only from runtime.authoritative_now.
+- Caller-supplied mode SHALL be ignored. runtime_request.current_mode comes only from
+  the mode controller.
+- Caller-supplied resource policy SHALL be ignored. runtime_request.resource_policy
+  comes only from the resource registry.
+- cross_domain SHALL be computed as call.cross_domain when explicitly present, otherwise
+  source_domain != destination_domain.
+- destination_domain defaults to source_domain when omitted.
+- payload_hash defaults to empty string when omitted.
+- Verifier MUST canonicalize requested_resource before policy lookup and before scope
+  comparison.
