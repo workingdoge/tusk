@@ -513,6 +513,23 @@
           exec bash ${./scripts/tusk-self-host.sh} "$@"
         '';
       };
+      tuskHermesProbePackage = pkgs.writeShellApplication {
+        name = "tusk-hermes-probe";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.git
+          pkgs.jq
+          pkgs.podman
+          tuskdCorePackage
+        ];
+        text = ''
+          export JQ_BIN=${pkgs.jq}/bin/jq
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+          export TUSKD_CORE_BIN=${tuskdCorePackage}/bin/tuskd-core
+          export TUSK_HERMES_PROBE_CONTAINER_SH=${./scripts/tusk-hermes-probe-container.sh}
+          exec bash ${./scripts/tusk-hermes-probe.sh} "$@"
+        '';
+      };
       tuskdPackage = pkgs.writeShellApplication {
         name = "tuskd";
         runtimeInputs = [
@@ -827,15 +844,16 @@
             pkgs.nixfmt
             pkgs.rebar3
             pkgs.ripgrep
-            pkgs.rust-analyzer
-            pkgs.socat
-            pkgs.statix
-            repoCodex
-            tuskSkillContractCheck
-            tuskSkillLoopPackage
-            tuskClean
-            tuskFlakeRefPackage
-            tuskTrackerPackage
+          pkgs.rust-analyzer
+          pkgs.socat
+          pkgs.statix
+          repoCodex
+          tuskHermesProbePackage
+          tuskSkillContractCheck
+          tuskSkillLoopPackage
+          tuskClean
+          tuskFlakeRefPackage
+          tuskTrackerPackage
             tuskdPackage
             tuskdTransitionTestsPackage
             rustToolchain
@@ -864,6 +882,7 @@
             echo "  glistix --help"
             echo "  cargo --version"
             echo "  tusk-flake-ref --json"
+            echo "  tusk-hermes-probe --help"
             echo "  tusk-tracker --help"
             echo "  tuskd --help"
             echo "  tuskd core-seam --json"
@@ -1068,6 +1087,7 @@
         radicle-flake-wasm-resolver = radicleFlakeWasmResolverPackage;
         tusk-clean = tuskClean;
         tusk-flake-ref = tuskFlakeRefPackage;
+        tusk-hermes-probe = tuskHermesProbePackage;
         tusk-self-host = tuskSelfHostPackage;
         tusk-trace-executor = tuskTraceExecutorPackage;
         tusk-tracker = tuskTrackerPackage;
@@ -1125,6 +1145,10 @@
         tusk-flake-ref = {
           type = "app";
           program = "${tuskFlakeRefPackage}/bin/tusk-flake-ref";
+        };
+        tusk-hermes-probe = {
+          type = "app";
+          program = "${tuskHermesProbePackage}/bin/tusk-hermes-probe";
         };
         tusk-self-host = {
           type = "app";
