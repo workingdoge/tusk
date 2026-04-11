@@ -43,7 +43,7 @@ let
     else
       throw "Skill `${name}` is missing required files: ${concatStringsSep ", " missing}";
 
-  validateCodexSkillSource =
+  validateOpenAISkillSource =
     {
       name,
       src,
@@ -55,6 +55,10 @@ let
     validateSkillSource {
       inherit name src requiredFiles;
     };
+
+  # Keep the older name as a compatibility alias while making the strict
+  # OpenAI-only boundary explicit at new call sites.
+  validateCodexSkillSource = args: validateOpenAISkillSource args;
 
   mkSkillPackage =
     {
@@ -74,20 +78,24 @@ let
       chmod -R u+w "$out"
     '';
 
-  mkCodexSkillPackage =
+  mkOpenAISkillPackage =
     {
       pkgs,
       name,
       src,
     }:
     let
-      checkedSource = validateCodexSkillSource { inherit name src; };
+      checkedSource = validateOpenAISkillSource { inherit name src; };
     in
     pkgs.runCommand "${name}-openai-skill" { } ''
       mkdir -p "$out"
       cp -R ${checkedSource}/. "$out/"
       chmod -R u+w "$out"
     '';
+
+  # Compatibility alias for older callers. The explicit OpenAI name is the
+  # canonical strict export/package surface.
+  mkCodexSkillPackage = args: mkOpenAISkillPackage args;
 
   mkDevenvSkillEntries =
     {
@@ -122,10 +130,6 @@ let
     }:
     mkDevenvSkillEntries {
       inherit pkgs name src root;
-      requiredFiles = [
-        "SKILL.md"
-        "agents/openai.yaml"
-      ];
     };
 
   resolveId = value: fallback: if value != null then value else fallback;
@@ -491,6 +495,7 @@ in
 {
   inherit
     mkDevenvSkillEntries
+    mkOpenAISkillPackage
     mkCodexSkillPackage
     mkDevenvCodexSkillEntries
     mkSkillPackage
@@ -504,6 +509,7 @@ in
     normalize
     renderValidationError
     validateSkillSource
+    validateOpenAISkillSource
     validateCodexSkillSource
     ;
 }

@@ -80,7 +80,7 @@
           devenvTopologyClaudeSkillModule
         ];
       };
-      tuskSkillBundle = tuskLib.mkCodexSkillPackage {
+      tuskOpenaiSkillBundle = tuskLib.mkOpenAISkillPackage {
         inherit pkgs;
         name = "tusk";
         src = skillSources.tusk;
@@ -799,7 +799,7 @@
 
           mkdir -p "$target_root"
           rm -rf "$target_dir"
-          cp -R ${tuskSkillBundle} "$target_dir"
+          cp -R ${tuskOpenaiSkillBundle} "$target_dir"
 
           echo "Installed tusk skill to $target_dir"
         '';
@@ -1107,7 +1107,7 @@
         tuskd-core = tuskdCorePackage;
         tuskd-transition-tests = tuskdTransitionTestsPackage;
         tusk-ui = tuskUiPackage;
-        tusk-openai-skill = tuskSkillBundle;
+        tusk-openai-skill = tuskOpenaiSkillBundle;
       };
 
       apps.${system} = {

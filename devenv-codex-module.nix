@@ -124,7 +124,7 @@ in
 
     skills = mkOption {
       default = { };
-      description = "Codex/OpenAI skills to project into the developer environment.";
+      description = "Portable skills to project into the local Codex developer environment.";
       type = types.attrsOf (
         types.submodule (
           { ... }:
@@ -132,7 +132,7 @@ in
             options = {
               source = mkOption {
                 type = types.path;
-                description = "Path to the skill directory that contains SKILL.md.";
+                description = "Path to the portable skill directory that contains SKILL.md.";
               };
 
               runtimePath = mkOption {
