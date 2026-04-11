@@ -185,6 +185,27 @@ Invariants:
 - a lane is attached to an issue, but is not the same thing as issue status
 - an issue may be `in_progress` with no live lane
 
+### Lane-Scoped Isolation
+
+Some lane work may run inside a bounded local isolation surface such as a
+container or microvm.
+
+That runtime is not a new issue object.
+Treat it as:
+
+- a lane-attached execution path when it is short-lived and probe-like
+- or a service/lease participant if it becomes long-lived shared runtime
+
+The important invariant is:
+
+- the lane remains the workflow context
+- the isolation runtime is only one bounded way that lane work may execute
+- and the resulting run still has to reattach through explicit receipts and any
+  visible repo state it produced
+
+For the attachment contract, see
+[`design/tusk-isolation-attachment.md`](./tusk-isolation-attachment.md).
+
 ### 4. Service
 
 A service is shared runtime infrastructure needed by lanes.
@@ -441,6 +462,16 @@ We should prefer adding projections over inventing new hidden state.
 The missing runtime seam is therefore not "another board view." It is one
 transition carrier that can move between issue, lane, service, and receipt
 authorities without collapsing them.
+
+Isolation work fits under that seam.
+It should attach either as:
+
+- one lane-scoped runtime attempt beneath the workflow topology
+- or, once stabilized, one admitted executor surface beneath the semantic
+  spine
+
+It should not introduce a second workflow truth distinct from issue, lane,
+service, lease, and receipt objects.
 
 ## Phased Implementation
 

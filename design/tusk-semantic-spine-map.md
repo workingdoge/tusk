@@ -311,6 +311,25 @@ Status:
 - follow-on work should now widen admission law and later remote executors,
   not rediscover the first trace path
 
+### 5. Attach Isolation Downstream Of The Spine
+
+The next isolation-facing slice should not invent a second center for
+containers or microvms.
+
+It should first define:
+
+- one normalized local runtime-constructor request
+- one lane-scoped receipt-bearing probe path
+- and one promotion rule for when that probe becomes a reusable executor family
+
+See [`design/tusk-isolation-attachment.md`](./tusk-isolation-attachment.md).
+
+Why here:
+- isolation only makes sense once witness, admission, executor, driver, and
+  receipt boundaries already exist
+- the first Hermes-style probe needs a bounded local runtime contract, not a
+  universal virtualization framework
+
 ## Dependency Read
 
 This map implies the following order:
@@ -324,6 +343,9 @@ This map implies the following order:
    export one concrete repo-local witness graph for `tusk` itself
 4. later executor / driver slices
    likely a trace/null local path first, then remote drivers or executors
+5. local isolation attachment
+   one lane-scoped constructor and receipt path first, then optional promotion
+   into a reusable executor family
 
 That keeps composition, isolation, and paid-HTTP work downstream of an explicit
 semantic center instead of rediscovering it ad hoc.
