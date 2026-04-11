@@ -5,8 +5,8 @@ usage() {
   cat <<'EOF'
 Usage: tusk-skill-contract-check [--repo PATH]
 
-Validate repo-authored skill structure, repo-owned OpenAI metadata, and the
-repo-local Codex plus Claude skill projection contract.
+Validate repo-authored portable skill structure, optional OpenAI overlays, and
+the repo-local Codex plus Claude skill projection contract.
 EOF
 }
 
@@ -54,6 +54,16 @@ extract_frontmatter() {
   ' "$1"
 }
 
+check_openai_overlay() {
+  local skill_name="$1"
+  local openai_yaml="$2"
+
+  grep -Eq '^interface:$' "$openai_yaml"
+  grep -Eq '^  display_name: .+$' "$openai_yaml"
+  grep -Eq '^  short_description: .+$' "$openai_yaml"
+  grep -Eq '^  default_prompt: .+\$'"${skill_name}"'.*$' "$openai_yaml"
+}
+
 check_skill_source() {
   local skill_name="$1"
   local skill_root=".agents/skills/$skill_name"
@@ -63,17 +73,15 @@ check_skill_source() {
 
   test -d "$skill_root"
   test -f "$skill_md"
-  test -f "$openai_yaml"
 
   frontmatter="$(extract_frontmatter "$skill_md")"
   test -n "$frontmatter"
   printf '%s\n' "$frontmatter" | grep -Eq "^name: ${skill_name}\$"
   printf '%s\n' "$frontmatter" | grep -Eq '^description:'
 
-  grep -Eq '^interface:$' "$openai_yaml"
-  grep -Eq '^  display_name: .+$' "$openai_yaml"
-  grep -Eq '^  short_description: .+$' "$openai_yaml"
-  grep -Eq '^  default_prompt: .+\$'"${skill_name}"'.*$' "$openai_yaml"
+  if [ -f "$openai_yaml" ]; then
+    check_openai_overlay "$skill_name" "$openai_yaml"
+  fi
 }
 
 skill_names=()

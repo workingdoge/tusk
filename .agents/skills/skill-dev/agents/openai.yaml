@@ -1,4 +1,4 @@
 interface:
   display_name: "Skill Dev"
   short_description: "Author repo-local shared skills in tusk"
-  default_prompt: "Use $skill-dev to create or evolve this repo's shared skills, keep `.agents/skills/*` authoritative, and validate with the repo-owned authoring loop."
+  default_prompt: "Use $skill-dev to author portable `.agents/skills/*` bundles, keep runtime overlays such as `agents/openai.yaml` adapter-specific, and validate with the repo-owned authoring loop."
