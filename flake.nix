@@ -542,6 +542,23 @@
           exec bash ${./scripts/tusk-hermes-probe.sh} "$@"
         '';
       };
+      tuskHermesRuntimePackage = pkgs.writeShellApplication {
+        name = "tusk-hermes-runtime";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.git
+          pkgs.jq
+          pkgs.podman
+          tuskdCorePackage
+        ];
+        text = ''
+          export JQ_BIN=${pkgs.jq}/bin/jq
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+          export TUSKD_CORE_BIN=${tuskdCorePackage}/bin/tuskd-core
+          export TUSK_HERMES_RUNTIME_CONTAINER_SH=${./scripts/tusk-hermes-runtime-container.sh}
+          exec bash ${./scripts/tusk-hermes-runtime.sh} "$@"
+        '';
+      };
       tuskdPackage = pkgs.writeShellApplication {
         name = "tuskd";
         runtimeInputs = [
@@ -875,6 +892,7 @@
           pkgs.statix
           repoCodex
           tuskHermesProbePackage
+          tuskHermesRuntimePackage
           tuskSkillContractCheck
           tuskSkillLoopPackage
           tuskClean
@@ -909,6 +927,7 @@
             echo "  cargo --version"
             echo "  tusk-flake-ref --json"
             echo "  tusk-hermes-probe --help"
+            echo "  tusk-hermes-runtime --help"
             echo "  tusk-tracker --help"
             echo "  tuskd --help"
             echo "  tuskd core-seam --json"
@@ -1115,6 +1134,7 @@
         tusk-clean = tuskClean;
         tusk-flake-ref = tuskFlakeRefPackage;
         tusk-hermes-probe = tuskHermesProbePackage;
+        tusk-hermes-runtime = tuskHermesRuntimePackage;
         tusk-self-host = tuskSelfHostPackage;
         tusk-trace-executor = tuskTraceExecutorPackage;
         tusk-tracker = tuskTrackerPackage;
@@ -1177,6 +1197,10 @@
         tusk-hermes-probe = {
           type = "app";
           program = "${tuskHermesProbePackage}/bin/tusk-hermes-probe";
+        };
+        tusk-hermes-runtime = {
+          type = "app";
+          program = "${tuskHermesRuntimePackage}/bin/tusk-hermes-runtime";
         };
         tusk-self-host = {
           type = "app";

@@ -207,6 +207,14 @@ It should not start as:
 If that first probe repeats cleanly across hosts and repos, then promotion into
 a first-class executor family becomes justified.
 
+The next step after that proof should still stay bounded:
+
+- keep one receipt-bearing probe surface as the reproducibility check
+- add one reusable local runtime surface that reuses the same constructor
+- let operators enter that runtime with an explicit command or shell path
+- and keep artifacts, forwarded env, mounts, and network policy explicit
+  instead of treating the runtime as ambient host state
+
 ## Recommendation
 
 Proceed as if:

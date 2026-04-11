@@ -9,7 +9,7 @@ These instructions apply to the canonical `tusk` repo checkout.
 - For any repo change, use the `tusk` workflow first: preflight the tracker, create or claim a `bd` issue, then launch an issue-scoped lane with `tuskd` or the repo's lane wrapper before editing files.
 - If the issue does not exist yet, shape or create it before making the repo change; do not freelance code or doc edits in the default workspace and try to track them afterward.
 - Do code and doc edits inside the issue lane checkout, keep `bd` mutations rooted at the canonical tracker root, and use `tusk-codex --checkout <workspace>` or `tusk-claude --checkout <workspace>` when launching an agent into that lane.
-- The dev shell provides a flake-owned `bd` wrapper, `tusk-flake-ref`, `tusk-hermes-probe`, `tusk-tracker`, `tusk-claude`, `tusk-codex`, `tusk-skill-contract-check`, `tusk-skill-loop`, `dolt`, `jj`, `deadnix`, `statix`, `nil`, `nixd`, `nix-tree`, `nix-output-monitor`, `nixfmt`, `codex`, `tuskd`, `glistix`, `gleam`, `erl`, `rebar3`, a `rust-overlay` toolchain for `cargo`/`rustc`/`rustfmt`, and `rust-analyzer`.
+- The dev shell provides a flake-owned `bd` wrapper, `tusk-flake-ref`, `tusk-hermes-probe`, `tusk-hermes-runtime`, `tusk-tracker`, `tusk-claude`, `tusk-codex`, `tusk-skill-contract-check`, `tusk-skill-loop`, `dolt`, `jj`, `deadnix`, `statix`, `nil`, `nixd`, `nix-tree`, `nix-output-monitor`, `nixfmt`, `codex`, `tuskd`, `glistix`, `gleam`, `erl`, `rebar3`, a `rust-overlay` toolchain for `cargo`/`rustc`/`rustfmt`, and `rust-analyzer`.
 - Run `devenv up` inside the dev shell to ensure repo-scoped tracker services when `.beads/` exists. `tuskd ensure` owns backend reuse and host-local coordination; shells must not stop Dolt on exit.
 - Bootstrap fresh trackers for `tuskd` with `bd init --server`; embedded Dolt mode is not a valid `tuskd` substrate.
 - Use this repo to develop `tusk` as a standalone flake and skill/tooling home; keep consumer-specific `bd-*` wrappers in the consuming repo unless they are intentionally promoted.
@@ -42,6 +42,7 @@ nix build .#tusk-openai-skill
 nix run .#stage-tusk-openai-skill
 nix run .#tusk-flake-ref -- --json
 nix run .#tusk-hermes-probe -- --help
+nix run .#tusk-hermes-runtime -- --help
 nix run .#tusk-radicle -- status
 nix eval --raw path:.#packages.aarch64-darwin.rust-toolchain.name
 nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "not callable"' path:.#lib.crane.buildDepsOnly
@@ -73,7 +74,7 @@ nix run .#tusk-ui -- --help
 ## Repo Shape
 
 - `flake.nix` exports `lib.{tusk,crane,mkRepoShell,mkDarwinSystem,mkNixosSystem,mkHomeConfiguration}`, `flakeModules.tusk`, the development shell, `tusk-tracker`, `tuskd`, `tusk-ui`, the OpenAI skill bundle plus `stage-tusk-openai-skill`, and `devenvModules.{codex,scratch,consumer,dogfood,tusk-skill,ops-skill,nix-skill,skill-dev-skill,topology-skill}`.
-- `flake.nix` also exports `tusk-claude`, `tusk-codex`, `tusk-hermes-probe`, `tusk-skill-contract-check`, and `tusk-skill-loop` as the repo-owned launcher, validation surface, and fast-restart authoring loop for shared skills.
+- `flake.nix` also exports `tusk-claude`, `tusk-codex`, `tusk-hermes-probe`, `tusk-hermes-runtime`, `tusk-skill-contract-check`, and `tusk-skill-loop` as the repo-owned launcher, validation surface, and fast-restart authoring loop for shared skills.
 - `main` is the intended moving bookmark for flake consumers; once exported to Git and pushed, consumers can pin the repo with `?ref=main` and optionally a specific revision.
 - `flake.nix` also exports a flake-owned `bd`/`beads` wrapper app so raw-shell `nix run` calls reuse repo-scoped tracker state instead of ambient host Beads configuration.
 - `flake.nix` also exports `tusk-flake-ref`, which prints the canonical `path:`, `git+file:`, and remote `git+...?...ref=` forms for this repo and reports when no publish remote is configured.
@@ -93,6 +94,9 @@ nix run .#tusk-ui -- --help
 - `scripts/tusk-radicle.sh` contains the hybrid GitHub/Radicle pilot helper for attaching the existing RID and inspecting local wiring.
 - `scripts/tusk-hermes-probe.sh` contains the lane-scoped Hermes local-isolation launcher and receipt-emitting host control path.
 - `scripts/tusk-hermes-probe-container.sh` contains the container-side Hermes bootstrap and probe entrypoint copied into the local run root before execution.
+- `scripts/tusk-hermes-runtime.sh` contains the reusable Hermes local-runtime launcher for bounded command or shell entry.
+- `scripts/tusk-hermes-runtime-container.sh` contains the container-side Hermes bootstrap and runtime entrypoint copied into the local run root before execution.
+- Use `tusk-hermes-probe` when you want the repeatable verification primitive; use `tusk-hermes-runtime` when you want operator command or shell entry on the same bounded constructor.
 - `scripts/tusk-paths.sh` centralizes checkout-root vs tracker-root resolution for flake-owned wrappers and local control-plane scripts.
 - `lib.nix` contains the generic `tusk` normalization and validation logic.
 - `flake-module.nix` contains the reusable Nix module surface for `tusk`.
@@ -149,6 +153,7 @@ nix run .#tusk-ui -- --help
 - `nix run .#stage-tusk-openai-skill`
 - `nix run .#tusk-flake-ref -- --repo "$PWD" --json`
 - `nix run .#tusk-hermes-probe -- --help`
+- `nix run .#tusk-hermes-runtime -- --help`
 - `nix run .#tusk-radicle -- status`
 - `nix run .#tusk-tracker -- status --repo "$PWD"`
 - `nix run .#tusk-tracker -- issues board --repo "$PWD"`
