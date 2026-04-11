@@ -788,8 +788,8 @@
             -c sh -lc "export TUSK_CHECKOUT_ROOT=\"$TUSK_CHECKOUT_ROOT\"; export TUSK_TRACKER_ROOT=\"$TUSK_TRACKER_ROOT\"; export DEVENV_ROOT=\"$TUSK_CHECKOUT_ROOT\"; export BEADS_WORKSPACE_ROOT=\"$TUSK_TRACKER_ROOT\"; $check_cmd"
         '';
       };
-      installTuskOpenaiSkill = pkgs.writeShellApplication {
-        name = "install-tusk-openai-skill";
+      stageTuskOpenaiSkill = pkgs.writeShellApplication {
+        name = "stage-tusk-openai-skill";
         runtimeInputs = [ pkgs.coreutils ];
         text = ''
           set -euo pipefail
@@ -801,7 +801,7 @@
           rm -rf "$target_dir"
           cp -R ${tuskOpenaiSkillBundle} "$target_dir"
 
-          echo "Installed tusk skill to $target_dir"
+          echo "Staged tusk OpenAI skill at $target_dir"
         '';
       };
       dogfoodModule =
@@ -836,7 +836,7 @@
           packages = [
             codexNixCheck
             glistixPkg
-            installTuskOpenaiSkill
+            stageTuskOpenaiSkill
             repoBeads
             repoTuskClaude
             repoTuskCodex
@@ -904,7 +904,7 @@
             echo "  nix run path:.#tusk-ui -- --help"
             echo "  nix eval path:.#packages.${system}.rust-toolchain.name"
             echo "  nix eval --apply 'x: if builtins.isFunction x || builtins.hasAttr \"__functor\" x then \"ok\" else throw \"not callable\"' path:.#lib.crane.buildDepsOnly"
-            echo "  install-tusk-openai-skill"
+            echo "  stage-tusk-openai-skill"
             echo "  nix develop --no-pure-eval path:. -c sh -lc 'cd \"$DEVENV_ROOT\" && bd version && jj --version && dolt version'"
           '';
 
@@ -1147,9 +1147,9 @@
           type = "app";
           program = "${radicleFlakeWasmResolverPackage}/bin/radicle-flake-wasm-resolver";
         };
-        install-tusk-openai-skill = {
+        stage-tusk-openai-skill = {
           type = "app";
-          program = "${installTuskOpenaiSkill}/bin/install-tusk-openai-skill";
+          program = "${stageTuskOpenaiSkill}/bin/stage-tusk-openai-skill";
         };
         tusk-clean = {
           type = "app";

@@ -10,9 +10,9 @@ skill in `tusk`.
   `assets/`.
 - Runtime overlays: optional `agents/openai.yaml` and future vendor/distribution
   metadata.
-- Use upstream `skill-creator` when you need generic bootstrap or helper
-  patterns. Use upstream `skill-installer` when the job is external skill
-  ingress or runtime staging.
+- If upstream helper behavior is worth keeping, absorb the relevant bootstrap
+  or validation pattern into repo-owned docs or scripts instead of teaching a
+  separate peer workflow.
 
 ## Source selection
 - Edit `SKILL.md` when the change is about trigger conditions, the narrow
@@ -23,8 +23,8 @@ skill in `tusk`.
 - Add `scripts/` when the same deterministic sequence would otherwise be copied
   into prompts repeatedly, or when correctness depends on code instead of prose.
 - Add `assets/` when the skill needs bundled files rather than more context.
-- Update `agents/openai.yaml` when the human-facing skill name, summary, or
-  default invocation prompt for OpenAI/Codex surfaces would become stale.
+- Update `agents/openai.yaml` when the OpenAI/Codex-facing skill name, summary,
+  or default invocation prompt would become stale.
 
 ## Repo loop
 1. edit the authored source under `.agents/skills/<name>/...`
@@ -38,6 +38,16 @@ skill in `tusk`.
 The loop validates before restart. If validation fails, fix the authored source
 and save again. Do not pretend the running Codex or Claude process can rescan
 skills in-place.
+
+## Runtime adapters
+- Keep one canonical shared-skill authoring loop here. If upstream
+  `skill-creator` behavior is worth keeping, absorb it into repo-owned
+  `SKILL.md`, `references/`, or `scripts/` instead of teaching a separate peer
+  flow.
+- Treat staging, publishing, mounting, and attachment as runtime-specific
+  adapter operations, not a generic installer concept.
+- Use explicit verbs for runtime helpers. `stage-tusk-openai-skill` is honest
+  about what it does; a universal `skill-installer` name is not.
 
 ## Projection and wiring
 When adding a new shared skill, update all of these together:

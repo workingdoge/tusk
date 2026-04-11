@@ -39,7 +39,7 @@ nix run .#tusk-tracker -- backend show --repo "$PWD"
 nix run .#bd -- status --json
 jj st
 nix build .#tusk-openai-skill
-nix run .#install-tusk-openai-skill
+nix run .#stage-tusk-openai-skill
 nix run .#tusk-flake-ref -- --json
 nix run .#tusk-hermes-probe -- --help
 nix run .#tusk-radicle -- status
@@ -72,7 +72,7 @@ nix run .#tusk-ui -- --help
 
 ## Repo Shape
 
-- `flake.nix` exports `lib.{tusk,crane,mkRepoShell,mkDarwinSystem,mkNixosSystem,mkHomeConfiguration}`, `flakeModules.tusk`, the development shell, `tusk-tracker`, `tuskd`, `tusk-ui`, the installable OpenAI/Codex skill bundle, and `devenvModules.{codex,scratch,consumer,dogfood,tusk-skill,ops-skill,nix-skill,skill-dev-skill,topology-skill}`.
+- `flake.nix` exports `lib.{tusk,crane,mkRepoShell,mkDarwinSystem,mkNixosSystem,mkHomeConfiguration}`, `flakeModules.tusk`, the development shell, `tusk-tracker`, `tuskd`, `tusk-ui`, the OpenAI skill bundle plus `stage-tusk-openai-skill`, and `devenvModules.{codex,scratch,consumer,dogfood,tusk-skill,ops-skill,nix-skill,skill-dev-skill,topology-skill}`.
 - `flake.nix` also exports `tusk-claude`, `tusk-codex`, `tusk-hermes-probe`, `tusk-skill-contract-check`, and `tusk-skill-loop` as the repo-owned launcher, validation surface, and fast-restart authoring loop for shared skills.
 - `main` is the intended moving bookmark for flake consumers; once exported to Git and pushed, consumers can pin the repo with `?ref=main` and optionally a specific revision.
 - `flake.nix` also exports a flake-owned `bd`/`beads` wrapper app so raw-shell `nix run` calls reuse repo-scoped tracker state instead of ambient host Beads configuration.
@@ -140,7 +140,7 @@ nix run .#tusk-ui -- --help
 - `tusk-skill-contract-check`
 - `nix run .#tusk-skill-loop -- --watch-help`
 - `nix build .#tusk-openai-skill`
-- `nix run .#install-tusk-openai-skill`
+- `nix run .#stage-tusk-openai-skill`
 - `nix run .#tusk-flake-ref -- --repo "$PWD" --json`
 - `nix run .#tusk-hermes-probe -- --help`
 - `nix run .#tusk-radicle -- status`

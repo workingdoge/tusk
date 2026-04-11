@@ -5,12 +5,12 @@ description: >
   repo-authored shared skill inside `tusk`, especially when the work is to
   define the portable `SKILL.md` plus bundled-resources core, align or
   regenerate runtime-specific overlays such as `agents/openai.yaml`, fold
-  upstream `skill-creator` or `skill-installer` behavior into the repo-owned
-  authoring loop, or wire a new shared skill into the repo's dogfood runtime.
-  Prefer editing `.agents/skills/*`, keeping the portable bundle canonical,
-  validating with `tusk-skill-contract-check`, and using `tusk-codex`,
-  `tusk-claude`, or `tusk-skill-loop` only after the authored source is
-  coherent.
+  useful upstream creator patterns into the repo-owned authoring loop, or wire
+  a new shared skill into the repo's dogfood runtime or an adapter-specific
+  runtime helper in the flake surface. Prefer editing `.agents/skills/*`,
+  keeping the portable bundle canonical, validating with
+  `tusk-skill-contract-check`, and using `tusk-codex`, `tusk-claude`, or
+  `tusk-skill-loop` only after the authored source is coherent.
 ---
 
 # skill-dev
@@ -20,13 +20,16 @@ This is the repo-local authoring guide for shared `tusk` skills.
 
 The canonical authored object is a portable skill bundle centered on
 `SKILL.md`. OpenAI/Codex local behavior, hosted upload/versioning semantics,
-installer flows, and future runtime quirks are adapter concerns layered on top
+staging or publish flows, and future runtime quirks are adapter concerns layered on top
 of that bundle.
 
-It is not a generic prompt-engineering essay. It also does not replace the
-upstream `skill-creator` or `skill-installer` skills; it tells `tusk` how to
-use those native helpers without letting them define the repo's canonical
-contract.
+It is not a generic prompt-engineering essay. It is the first-class shared
+skill authoring surface in this repo.
+
+Absorb useful upstream `skill-creator` patterns here when they help, but do not
+present `skill-creator` as a peer workflow. Do not treat `skill-installer` as
+a generic authoring concept. Staging, publishing, mounting, or attaching a
+skill are runtime-specific adapter operations.
 
 ## Authoring contract
 Treat these paths as the portable core:
@@ -43,14 +46,11 @@ Do not edit `.codex/skills/*` or `.claude/skills/*` directly. That is
 projected runtime state.
 
 ## Upstream helpers
-- Use `skill-creator` for upstream bundle/bootstrap patterns, portable
-  frontmatter expectations, and helper ideas such as YAML generation or quick
-  validation.
-- Use `skill-installer` when the task is to ingest or stage external skills
-  into a runtime, not when authoring the canonical shared skill source in this
-  repo.
-- Normalize anything borrowed from upstream back into
-  `.agents/skills/<name>/...` so `tusk` remains the source of truth.
+- Borrow upstream bootstrap or validation ideas when they help, but normalize
+  anything useful back into `.agents/skills/<name>/...` so `tusk` remains the
+  source of truth.
+- Do not teach separate peer workflows for `skill-creator` or
+  `skill-installer` inside this repo-owned authoring surface.
 
 ## Use this order
 1. inspect the target skill under `.agents/skills/*`
@@ -76,8 +76,9 @@ overlay, and adapter split spelled out.
 - Put repeatable or fragile deterministic behavior in `scripts/`.
 - Put bundled output resources in `assets/` when the skill needs files rather
   than more prose.
-- Keep `agents/openai.yaml` aligned when the OpenAI/Codex UI surface is part of
-  the task, but do not treat it as the canonical semantic core.
+- Keep `agents/openai.yaml` aligned when the OpenAI/Codex-facing metadata or
+  adapter behavior would otherwise become stale, but do not treat it as the
+  canonical semantic core.
 
 Default stance:
 - `SKILL.md` should stay short.
@@ -96,9 +97,12 @@ Default stance:
   sync.
 - `tusk-skill-contract-check` validates the portable core for every authored
   skill and validates `agents/openai.yaml` only when that overlay is present.
-- Keep publish/install/runtime policy in adapters. The portable bundle
+- Keep staging/publish/runtime policy in adapters. The portable bundle
   describes the skill; OpenAI-hosted versioning, Codex local discovery, and
   plugin packaging do not belong in the semantic core.
+- Name runtime-specific helpers for the runtime verb they perform. Prefer
+  `stage-*`, `publish-*`, or `attach-*` over a fake universal `install-*`
+  surface.
 - The Codex runtime contract is fast restart, not hot reload. Do not claim
   otherwise in docs or metadata.
 - The Claude runtime contract is repo-local project-skill projection plus a
@@ -112,6 +116,7 @@ When finishing a shared-skill change, report:
 3. validation results for `tusk-skill-contract-check`
 4. whether the change expects `tusk-codex`, `tusk-claude`,
    `tusk-skill-loop`, or some combination
+5. which runtime-specific staging or publish helpers changed, if any
 
 ## References
 - Read `references/repo-authoring-loop.md` for the concrete command loop and
