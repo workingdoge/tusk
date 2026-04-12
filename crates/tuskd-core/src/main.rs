@@ -1616,6 +1616,25 @@ fn compact_receipt_projection(receipt: &Value) -> Value {
     let issue_id = payload
         .get("issue_id")
         .and_then(Value::as_str)
+        .or_else(|| receipt.get("issue_id").and_then(Value::as_str))
+        .or_else(|| {
+            receipt
+                .get("issue")
+                .and_then(|value| value.get("id"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            receipt
+                .get("lane")
+                .and_then(|value| value.get("issue_id"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            receipt
+                .get("transition")
+                .and_then(|value| value.get("issue_id"))
+                .and_then(Value::as_str)
+        })
         .or_else(|| {
             payload
                 .get("issue")
@@ -1634,20 +1653,55 @@ fn compact_receipt_projection(receipt: &Value) -> Value {
                 .and_then(|value| value.get("issue_id"))
                 .and_then(Value::as_str)
         });
+    let existing_details = receipt.get("details").and_then(Value::as_object);
 
     let mut details = Map::new();
     for (key, value) in [
-        ("revision", payload.get("revision")),
-        ("reason", payload.get("reason")),
-        ("note", payload.get("note")),
-        ("outcome", payload.get("outcome")),
-        ("mode", payload.get("mode")),
-        ("status", payload.get("status")),
+        (
+            "revision",
+            existing_details
+                .and_then(|details| details.get("revision"))
+                .or_else(|| payload.get("revision")),
+        ),
+        (
+            "reason",
+            existing_details
+                .and_then(|details| details.get("reason"))
+                .or_else(|| payload.get("reason")),
+        ),
+        (
+            "note",
+            existing_details
+                .and_then(|details| details.get("note"))
+                .or_else(|| payload.get("note")),
+        ),
+        (
+            "outcome",
+            existing_details
+                .and_then(|details| details.get("outcome"))
+                .or_else(|| payload.get("outcome")),
+        ),
+        (
+            "mode",
+            existing_details
+                .and_then(|details| details.get("mode"))
+                .or_else(|| payload.get("mode")),
+        ),
+        (
+            "status",
+            existing_details
+                .and_then(|details| details.get("status"))
+                .or_else(|| payload.get("status")),
+        ),
         (
             "realization",
-            payload
-                .get("realization_id")
-                .or_else(|| payload.get("realization").and_then(|value| value.get("id"))),
+            existing_details
+                .and_then(|details| details.get("realization"))
+                .or_else(|| {
+                    payload
+                        .get("realization_id")
+                        .or_else(|| payload.get("realization").and_then(|value| value.get("id")))
+                }),
         ),
     ] {
         if let Some(value) = value.filter(|value| !value.is_null()) {
@@ -1655,12 +1709,87 @@ fn compact_receipt_projection(receipt: &Value) -> Value {
         }
     }
 
+    let contexts =
+        compact_receipt_contexts(receipt.get("contexts").or_else(|| payload.get("contexts")));
+    let witness =
+        compact_receipt_witness(receipt.get("witness").or_else(|| payload.get("witness")));
+    let epoch = compact_receipt_epoch(receipt.get("epoch").or_else(|| payload.get("epoch")));
+
     json!({
         "timestamp": receipt.get("timestamp").cloned().unwrap_or(Value::Null),
         "kind": receipt.get("kind").cloned().unwrap_or(Value::Null),
         "issue_id": issue_id,
         "details": if details.is_empty() { Value::Null } else { Value::Object(details) },
+        "contexts": contexts,
+        "witness": witness,
+        "epoch": epoch,
     })
+}
+
+fn compact_receipt_contexts(contexts: Option<&Value>) -> Value {
+    let Some(contexts) = contexts.and_then(Value::as_object) else {
+        return Value::Null;
+    };
+
+    let mut summary = Map::new();
+    for key in ["count", "kinds"] {
+        if let Some(value) = contexts.get(key).filter(|value| !value.is_null()) {
+            summary.insert(key.to_string(), value.clone());
+        }
+    }
+
+    if summary.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(summary)
+    }
+}
+
+fn compact_receipt_witness(witness: Option<&Value>) -> Value {
+    let Some(witness) = witness.and_then(Value::as_object) else {
+        return Value::Null;
+    };
+
+    let mut summary = Map::new();
+    for key in [
+        "proposal_ref",
+        "support_ref",
+        "witness_ref",
+        "epoch_binding_ref",
+        "apply_token_ref",
+        "section_refs",
+        "section_count",
+        "concern_kinds",
+    ] {
+        if let Some(value) = witness.get(key).filter(|value| !value.is_null()) {
+            summary.insert(key.to_string(), value.clone());
+        }
+    }
+
+    if summary.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(summary)
+    }
+}
+
+fn compact_receipt_epoch(epoch: Option<&Value>) -> Value {
+    let Some(epoch) = epoch.and_then(Value::as_object) else {
+        return Value::Null;
+    };
+
+    let mut summary = Map::new();
+    for key in ["binding_ref", "observed_at", "fresh_until"] {
+        if let Some(value) = epoch.get(key).filter(|value| !value.is_null()) {
+            summary.insert(key.to_string(), value.clone());
+        }
+    }
+
+    if summary.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(summary)
+    }
 }
 
 fn compact_issue_relation_projection(issue: &Value) -> Value {
@@ -1910,8 +2039,43 @@ fn humanize_receipt(receipt: &Value) -> String {
         })
         .map(|value| format!(" ({value})"))
         .unwrap_or_default();
+    let summary = compact_receipt_summary_suffix(receipt);
 
-    format!("{timestamp}: {kind}{issue}{detail}")
+    format!("{timestamp}: {kind}{issue}{detail}{summary}")
+}
+
+fn compact_receipt_summary_suffix(receipt: &Value) -> String {
+    let mut fragments = Vec::new();
+
+    if let Some(count) = receipt
+        .get("contexts")
+        .and_then(|value| value.get("count"))
+        .and_then(Value::as_u64)
+    {
+        fragments.push(format!("{count} contexts"));
+    }
+
+    if let Some(count) = receipt
+        .get("witness")
+        .and_then(|value| value.get("section_count"))
+        .and_then(Value::as_u64)
+    {
+        fragments.push(format!("{count} checks"));
+    }
+
+    if let Some(fresh_until) = receipt
+        .get("epoch")
+        .and_then(|value| value.get("fresh_until"))
+        .and_then(Value::as_str)
+    {
+        fragments.push(format!("fresh through {fresh_until}"));
+    }
+
+    if fragments.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", fragments.join(" | "))
+    }
 }
 
 fn build_issue_recommendation(
@@ -2878,7 +3042,7 @@ fn receipts_status_projection(repo_root: &Path) -> Result<Value, String> {
         let start = lines.len().saturating_sub(20);
         for line in &lines[start..] {
             match serde_json::from_str::<Value>(line) {
-                Ok(value) => receipts.push(value),
+                Ok(value) => receipts.push(compact_receipt_projection(&value)),
                 Err(_) => receipts.push(json!({ "invalid_line": line })),
             }
         }
@@ -4850,10 +5014,43 @@ fn realize_ensure_transition(
     let ensured = perform_ensure(repo_root, socket_path)?;
     let apply_token = build_ensure_apply_token(&envelope, repo_root, socket_path);
     let proposal_ref = ensure_proposal_ref(&envelope);
-    let support_ref = object_id(&envelope.kernel_field("support"));
-    let witness_ref = object_id(&envelope.kernel_field("witness_bundle"));
-    let epoch_binding_ref = object_id(&envelope.kernel_field("epoch_binding"));
+    let support = envelope.kernel_field("support");
+    let concern_sections = envelope.kernel_field("concern_sections");
+    let witness_bundle = envelope.kernel_field("witness_bundle");
+    let epoch_binding = envelope.kernel_field("epoch_binding");
+    let support_ref = object_id(&support);
+    let witness_ref = object_id(&witness_bundle);
+    let epoch_binding_ref = object_id(&epoch_binding);
     let apply_token_ref = object_id(&apply_token);
+    let context_kinds = support
+        .get("vertices")
+        .and_then(Value::as_array)
+        .map(|vertices| {
+            vertices
+                .iter()
+                .filter_map(|vertex| vertex.get("kind").and_then(Value::as_str))
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let concern_kinds = concern_sections
+        .as_array()
+        .map(|sections| {
+            sections
+                .iter()
+                .filter_map(|section| section.get("concern_kind").and_then(Value::as_str))
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let section_refs = witness_bundle
+        .get("section_refs")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let section_count = section_refs
+        .as_array()
+        .map(|sections| u64::try_from(sections.len()).unwrap_or(0))
+        .unwrap_or(0);
 
     envelope.set_service(json!({
         "socket_path": socket_path.to_string_lossy().into_owned(),
@@ -4880,15 +5077,28 @@ fn realize_ensure_transition(
         json!({
             "service": ensured.record.clone(),
             "health": ensured.health.clone(),
+            "contexts": {
+                "count": context_kinds.len(),
+                "kinds": context_kinds,
+            },
             "witness": {
                 "proposal_ref": proposal_ref,
                 "support_ref": support_ref,
                 "witness_ref": witness_ref,
                 "epoch_binding_ref": epoch_binding_ref,
                 "apply_token_ref": apply_token_ref,
-                "section_refs": envelope
-                    .kernel_field("witness_bundle")
-                    .get("section_refs")
+                "section_refs": section_refs,
+                "section_count": section_count,
+                "concern_kinds": concern_kinds,
+            },
+            "epoch": {
+                "binding_ref": epoch_binding_ref,
+                "observed_at": epoch_binding
+                    .get("observed_at")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "fresh_until": epoch_binding
+                    .get("fresh_until")
                     .cloned()
                     .unwrap_or(Value::Null),
             },

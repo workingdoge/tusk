@@ -182,8 +182,45 @@ pub(crate) struct ReceiptsStatus {
 pub(crate) struct ReceiptEntry {
     pub(crate) timestamp: Option<String>,
     pub(crate) kind: Option<String>,
-    pub(crate) payload: Option<Value>,
+    pub(crate) issue_id: Option<String>,
+    pub(crate) details: Option<Value>,
+    #[serde(default)]
+    pub(crate) contexts: Option<ReceiptContextsSummary>,
+    #[serde(default)]
+    pub(crate) witness: Option<ReceiptWitnessSummary>,
+    #[serde(default)]
+    pub(crate) epoch: Option<ReceiptEpochSummary>,
     pub(crate) invalid_line: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ReceiptContextsSummary {
+    pub(crate) count: Option<u64>,
+    #[serde(default)]
+    pub(crate) kinds: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ReceiptWitnessSummary {
+    pub(crate) proposal_ref: Option<String>,
+    pub(crate) support_ref: Option<String>,
+    pub(crate) witness_ref: Option<String>,
+    pub(crate) epoch_binding_ref: Option<String>,
+    pub(crate) apply_token_ref: Option<String>,
+    #[serde(default)]
+    pub(crate) section_refs: Vec<String>,
+    pub(crate) section_count: Option<u64>,
+    #[serde(default)]
+    pub(crate) concern_kinds: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ReceiptEpochSummary {
+    pub(crate) binding_ref: Option<String>,
+    pub(crate) observed_at: Option<String>,
+    pub(crate) fresh_until: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -355,6 +392,12 @@ pub(crate) struct OperatorReceipt {
     pub(crate) kind: Option<String>,
     pub(crate) issue_id: Option<String>,
     pub(crate) details: Option<Value>,
+    #[serde(default)]
+    pub(crate) contexts: Option<ReceiptContextsSummary>,
+    #[serde(default)]
+    pub(crate) witness: Option<ReceiptWitnessSummary>,
+    #[serde(default)]
+    pub(crate) epoch: Option<ReceiptEpochSummary>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -509,7 +552,11 @@ mod tests {
         );
         assert_eq!(snapshot.sessions.summary.total_sessions, 3);
         assert_eq!(
-            snapshot.sessions.rows.first().map(|row| row.status.as_str()),
+            snapshot
+                .sessions
+                .rows
+                .first()
+                .map(|row| row.status.as_str()),
             Some("stale")
         );
     }

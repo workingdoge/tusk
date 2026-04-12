@@ -5,8 +5,9 @@ use serde_json::Value;
 use crate::types::{
     BoardIssue, BoardStatus, BoardSummary, InspectLane, IssueInspection, LaneEntry,
     OperatorFocusIssue, OperatorHistory, OperatorIssueRef, OperatorLane, OperatorReceipt,
-    OperatorRecommendation, OperatorSnapshot, ReceiptEntry, ReceiptsStatus, SessionRow,
-    SessionSummary, TrackerStatus, WorkspaceEntry,
+    OperatorRecommendation, OperatorSnapshot, ReceiptContextsSummary, ReceiptEntry,
+    ReceiptEpochSummary, ReceiptWitnessSummary, ReceiptsStatus, SessionRow, SessionSummary,
+    TrackerStatus, WorkspaceEntry,
 };
 
 #[allow(dead_code)]
@@ -251,6 +252,7 @@ pub(crate) struct BoardViewModel {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReceiptItem {
     pub(crate) label: String,
+    pub(crate) details: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -502,6 +504,7 @@ pub(crate) fn receipts_viewmodel(
             .take(10)
             .map(|receipt| ReceiptItem {
                 label: receipt_label(receipt),
+                details: receipt_details(receipt),
             })
             .collect(),
     }
@@ -896,7 +899,13 @@ fn lane_matches_filter(lane: &LaneEntry, filter: Option<&str>) -> bool {
 }
 
 fn receipt_matches_filter(receipt: &ReceiptEntry, filter: Option<&str>) -> bool {
-    contains_filter(&receipt_label(receipt), filter)
+    let mut haystack = receipt_label(receipt);
+    let details = receipt_details(receipt);
+    if !details.is_empty() {
+        haystack.push(' ');
+        haystack.push_str(&details.join(" "));
+    }
+    contains_filter(&haystack, filter)
 }
 
 fn lane_item_from_operator_lane(lane: &OperatorLane, selected: bool) -> LaneItem {
@@ -994,19 +1003,18 @@ fn receipt_label(receipt: &ReceiptEntry) -> String {
         .kind
         .clone()
         .unwrap_or_else(|| "unknown-kind".to_owned());
-    let payload_hint = receipt
-        .payload
-        .as_ref()
-        .and_then(|payload| payload.as_object())
-        .map(|object| {
-            format!(
-                " ({})",
-                object.keys().cloned().collect::<Vec<_>>().join(",")
-            )
-        })
+    let issue = receipt
+        .issue_id
+        .clone()
+        .map(|value| format!(" {value}"))
         .unwrap_or_default();
+    let summary = receipt_summary_suffix(
+        receipt.contexts.as_ref(),
+        receipt.witness.as_ref(),
+        receipt.epoch.as_ref(),
+    );
 
-    format!("{timestamp} {kind}{payload_hint}")
+    format!("{timestamp} {kind}{issue}{summary}")
 }
 
 fn operator_receipt_label(receipt: &OperatorReceipt) -> String {
@@ -1023,8 +1031,103 @@ fn operator_receipt_label(receipt: &OperatorReceipt) -> String {
         .clone()
         .map(|value| format!(" {value}"))
         .unwrap_or_default();
+    let summary = receipt_summary_suffix(
+        receipt.contexts.as_ref(),
+        receipt.witness.as_ref(),
+        receipt.epoch.as_ref(),
+    );
 
-    format!("{timestamp} {kind}{issue}")
+    format!("{timestamp} {kind}{issue}{summary}")
+}
+
+fn receipt_summary_suffix(
+    contexts: Option<&ReceiptContextsSummary>,
+    witness: Option<&ReceiptWitnessSummary>,
+    epoch: Option<&ReceiptEpochSummary>,
+) -> String {
+    let mut fragments = Vec::new();
+
+    if let Some(count) = contexts.and_then(|contexts| contexts.count) {
+        fragments.push(format!("contexts {count}"));
+    }
+
+    if let Some(count) = witness.and_then(|witness| witness.section_count) {
+        fragments.push(format!("checks {count}"));
+    }
+
+    if let Some(fresh_until) = epoch.and_then(|epoch| epoch.fresh_until.as_deref()) {
+        fragments.push(format!("fresh through {fresh_until}"));
+    }
+
+    if fragments.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", fragments.join(" | "))
+    }
+}
+
+fn receipt_details(receipt: &ReceiptEntry) -> Vec<String> {
+    let mut details = Vec::new();
+
+    if let Some(contexts) = &receipt.contexts {
+        let count = contexts
+            .count
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| contexts.kinds.len().to_string());
+        let kinds = if contexts.kinds.is_empty() {
+            "unknown".to_owned()
+        } else {
+            contexts.kinds.join(", ")
+        };
+        details.push(format!("contexts: {count} ({kinds})"));
+    }
+
+    if let Some(witness) = &receipt.witness {
+        let count = witness
+            .section_count
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| witness.concern_kinds.len().to_string());
+        let concerns = if witness.concern_kinds.is_empty() {
+            "unknown".to_owned()
+        } else {
+            witness.concern_kinds.join(", ")
+        };
+        details.push(format!("checks: {count} ({concerns})"));
+        if let Some(witness_ref) = &witness.witness_ref {
+            details.push(format!("witness: {witness_ref}"));
+        }
+        if let Some(apply_token_ref) = &witness.apply_token_ref {
+            details.push(format!("apply: {apply_token_ref}"));
+        }
+    }
+
+    if let Some(epoch) = &receipt.epoch {
+        let observed_at = epoch.observed_at.as_deref().unwrap_or("unknown");
+        let fresh_until = epoch.fresh_until.as_deref().unwrap_or("unknown");
+        details.push(format!("epoch: {observed_at} -> {fresh_until}"));
+    }
+
+    if let Some(message) = receipt
+        .details
+        .as_ref()
+        .and_then(|details| details.get("reason").and_then(Value::as_str))
+        .or_else(|| {
+            receipt
+                .details
+                .as_ref()
+                .and_then(|details| details.get("note").and_then(Value::as_str))
+        })
+        .or_else(|| {
+            receipt
+                .details
+                .as_ref()
+                .and_then(|details| details.get("outcome").and_then(Value::as_str))
+        })
+    {
+        details.push(format!("detail: {message}"));
+    }
+
+    details
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1055,7 +1158,8 @@ mod tests {
         workers_viewmodel,
     };
     use crate::types::{
-        BoardIssue, BoardStatus, LaneEntry, ReceiptEntry, ReceiptsStatus, golden_issue_inspection,
+        BoardIssue, BoardStatus, LaneEntry, ReceiptContextsSummary, ReceiptEntry,
+        ReceiptEpochSummary, ReceiptWitnessSummary, ReceiptsStatus, golden_issue_inspection,
         golden_operator_snapshot,
     };
 
@@ -1267,13 +1371,21 @@ mod tests {
                 ReceiptEntry {
                     timestamp: Some("2026-04-07T19:59:00Z".to_owned()),
                     kind: Some("issue.claim".to_owned()),
-                    payload: None,
+                    issue_id: Some("tusk-claim".to_owned()),
+                    details: None,
+                    contexts: None,
+                    witness: None,
+                    epoch: None,
                     invalid_line: None,
                 },
                 ReceiptEntry {
                     timestamp: Some("2026-04-07T20:00:00Z".to_owned()),
                     kind: Some("lane.launch".to_owned()),
-                    payload: None,
+                    issue_id: Some("tusk-lane".to_owned()),
+                    details: None,
+                    contexts: None,
+                    witness: None,
+                    epoch: None,
                     invalid_line: None,
                 },
             ],
@@ -1283,5 +1395,50 @@ mod tests {
 
         assert_eq!(model.receipts.len(), 1);
         assert!(model.receipts[0].label.contains("lane.launch"));
+    }
+
+    #[test]
+    fn receipts_viewmodel_filters_by_witness_details() {
+        let receipts = ReceiptsStatus {
+            repo_root: "/tmp/repo".to_owned(),
+            generated_at: "2026-04-07T20:00:00Z".to_owned(),
+            receipts_path: "/tmp/repo/.beads/tuskd/receipts.jsonl".to_owned(),
+            receipts: vec![ReceiptEntry {
+                timestamp: Some("2026-04-07T20:00:00Z".to_owned()),
+                kind: Some("tracker.ensure".to_owned()),
+                issue_id: None,
+                details: None,
+                contexts: Some(ReceiptContextsSummary {
+                    count: Some(2),
+                    kinds: vec!["service.runtime".to_owned(), "audit.sink".to_owned()],
+                }),
+                witness: Some(ReceiptWitnessSummary {
+                    proposal_ref: None,
+                    support_ref: None,
+                    witness_ref: Some("proposal:tracker.ensure:demo:witness".to_owned()),
+                    epoch_binding_ref: None,
+                    apply_token_ref: Some("proposal:tracker.ensure:demo:apply".to_owned()),
+                    section_refs: vec![],
+                    section_count: Some(2),
+                    concern_kinds: vec!["authority".to_owned(), "audit".to_owned()],
+                }),
+                epoch: Some(ReceiptEpochSummary {
+                    binding_ref: Some("proposal:tracker.ensure:demo:epoch".to_owned()),
+                    observed_at: Some("2026-04-07T20:00:00Z".to_owned()),
+                    fresh_until: Some("2026-04-07T20:00:00Z".to_owned()),
+                }),
+                invalid_line: None,
+            }],
+        };
+
+        let model = receipts_viewmodel(&receipts, Some("authority"));
+
+        assert_eq!(model.receipts.len(), 1);
+        assert!(
+            model.receipts[0]
+                .details
+                .iter()
+                .any(|line| line.contains("checks: 2"))
+        );
     }
 }

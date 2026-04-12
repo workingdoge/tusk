@@ -46,19 +46,26 @@ pub(crate) fn receipt_lines(
         return lines;
     }
 
-    lines.extend(
-        receipts
-            .receipts
-            .iter()
-            .map(|receipt| Line::from(receipt.label.clone())),
-    );
+    lines.extend(receipts.receipts.iter().flat_map(|receipt| {
+        let mut item_lines = vec![Line::from(receipt.label.clone())];
+        item_lines.extend(
+            receipt
+                .details
+                .iter()
+                .map(|detail| Line::from(format!("  {detail}"))),
+        );
+        item_lines
+    }));
 
     lines
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::types::{ReceiptEntry, ReceiptsStatus};
+    use crate::types::{
+        ReceiptContextsSummary, ReceiptEntry, ReceiptEpochSummary, ReceiptWitnessSummary,
+        ReceiptsStatus,
+    };
 
     #[test]
     fn receipt_items_include_kind() {
@@ -69,18 +76,42 @@ mod tests {
             receipts: vec![ReceiptEntry {
                 timestamp: Some("2026-03-26T00:00:00Z".to_owned()),
                 kind: Some("tracker.ensure".to_owned()),
-                payload: Some(serde_json::json!({"service": {"mode": "idle"}})),
+                issue_id: None,
+                details: None,
+                contexts: Some(ReceiptContextsSummary {
+                    count: Some(2),
+                    kinds: vec!["service.runtime".to_owned(), "audit.sink".to_owned()],
+                }),
+                witness: Some(ReceiptWitnessSummary {
+                    proposal_ref: None,
+                    support_ref: None,
+                    witness_ref: Some("proposal:tracker.ensure:demo:witness".to_owned()),
+                    epoch_binding_ref: None,
+                    apply_token_ref: Some("proposal:tracker.ensure:demo:apply".to_owned()),
+                    section_refs: vec![],
+                    section_count: Some(2),
+                    concern_kinds: vec!["authority".to_owned(), "audit".to_owned()],
+                }),
+                epoch: Some(ReceiptEpochSummary {
+                    binding_ref: Some("proposal:tracker.ensure:demo:epoch".to_owned()),
+                    observed_at: Some("2026-03-26T00:00:00Z".to_owned()),
+                    fresh_until: Some("2026-03-26T00:00:00Z".to_owned()),
+                }),
                 invalid_line: None,
             }],
         };
 
-        let rendered = crate::viewmodel::receipts_viewmodel(&receipts, None)
-            .receipts
+        let model = crate::viewmodel::receipts_viewmodel(&receipts, None);
+        let mut panel = crate::app::PanelState::default();
+        panel.apply_result(Ok(receipts));
+        let rendered = super::receipt_lines(&model, &panel)
             .into_iter()
-            .map(|item| item.label)
+            .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
 
         assert!(rendered.contains("tracker.ensure"));
+        assert!(rendered.contains("contexts: 2"));
+        assert!(rendered.contains("checks: 2"));
     }
 }
