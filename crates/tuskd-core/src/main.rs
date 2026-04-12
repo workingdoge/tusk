@@ -519,6 +519,8 @@ where
     let output = Command::new(program)
         .args(args)
         .current_dir(repo_root)
+        .env("TUSK_CHECKOUT_ROOT", repo_root)
+        .env("TUSK_TRACKER_ROOT", repo_root)
         .env("BEADS_WORKSPACE_ROOT", repo_root)
         .env("DEVENV_ROOT", repo_root)
         .stdout(Stdio::piped())

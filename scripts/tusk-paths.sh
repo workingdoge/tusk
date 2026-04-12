@@ -40,6 +40,39 @@ tusk__git_root_from() {
   )
 }
 
+tusk__pwd_checkout_root() {
+  if tusk__find_flake_root_from "${PWD}" >/dev/null 2>&1; then
+    tusk__find_flake_root_from "${PWD}"
+    return 0
+  fi
+
+  tusk__git_root_from "${PWD}"
+}
+
+tusk__pwd_tracker_root() {
+  local current_root=""
+  local workspace_suffix=""
+  local canonical_root=""
+
+  current_root="$(tusk__pwd_checkout_root)"
+
+  if [ -d "${current_root}/.beads" ]; then
+    printf '%s\n' "${current_root}"
+    return 0
+  fi
+
+  workspace_suffix="/.jj-workspaces/"
+  if [ "${current_root#*"${workspace_suffix}"}" != "${current_root}" ]; then
+    canonical_root="${current_root%%${workspace_suffix}*}"
+    if [ -n "${canonical_root}" ] && [ -d "${canonical_root}/.beads" ]; then
+      printf '%s\n' "${canonical_root}"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 tusk_resolve_checkout_root() {
   local repo_arg="${1:-}"
   local candidate=""
@@ -55,6 +88,11 @@ tusk_resolve_checkout_root() {
     return
   fi
 
+  if tusk__pwd_checkout_root >/dev/null 2>&1; then
+    tusk__pwd_checkout_root
+    return
+  fi
+
   if [ -n "${TUSK_CHECKOUT_ROOT:-}" ]; then
     candidate_dir="$(tusk__path_to_dir "${TUSK_CHECKOUT_ROOT}")"
     if tusk__find_flake_root_from "${candidate_dir}" >/dev/null 2>&1; then
@@ -62,11 +100,6 @@ tusk_resolve_checkout_root() {
     else
       tusk__git_root_from "${candidate_dir}"
     fi
-    return
-  fi
-
-  if tusk__find_flake_root_from "${PWD}" >/dev/null 2>&1; then
-    tusk__find_flake_root_from "${PWD}"
     return
   fi
 
@@ -93,8 +126,17 @@ tusk_resolve_tracker_root() {
   local repo_arg="${1:-}"
   local candidate=""
 
+  if [ -n "${repo_arg}" ]; then
+    tusk__git_root_from "$(tusk__path_to_dir "${repo_arg}")"
+    return
+  fi
+
+  if tusk__pwd_tracker_root >/dev/null 2>&1; then
+    tusk__pwd_tracker_root
+    return
+  fi
+
   for candidate in \
-    "${repo_arg}" \
     "${TUSK_TRACKER_ROOT:-}" \
     "${BEADS_WORKSPACE_ROOT:-}" \
     "${DEVENV_ROOT:-}" \

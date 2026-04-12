@@ -664,6 +664,64 @@ test_child_create_identity_mismatch() {
   note "child-create identity mismatch: ok"
 }
 
+test_stale_env_root_override() {
+  local repo_root="$1"
+  local parent_id=""
+  local stale_root=""
+  local ready_json=""
+  local ready_status=0
+  local show_json=""
+  local show_status=0
+  local create_json=""
+  local create_status=0
+  local child_issue_id=""
+
+  note "stale env root override: begin"
+  parent_id="$(create_epic_issue "${repo_root}" "transition stale env parent")"
+  stale_root="$(mktemp -d)"
+  printf '{ description = "stale-root"; }\n' >"${stale_root}/flake.nix"
+
+  run_cli_json ready_json ready_status \
+    env \
+      TUSK_CHECKOUT_ROOT="${stale_root}" \
+      TUSK_TRACKER_ROOT="${stale_root}" \
+      DEVENV_ROOT="${stale_root}" \
+      BEADS_WORKSPACE_ROOT="${stale_root}" \
+      bd ready --json
+  assert_status "${ready_status}" "0" "bd ready with stale env roots"
+
+  run_cli_json show_json show_status \
+    env \
+      TUSK_CHECKOUT_ROOT="${stale_root}" \
+      TUSK_TRACKER_ROOT="${stale_root}" \
+      DEVENV_ROOT="${stale_root}" \
+      BEADS_WORKSPACE_ROOT="${stale_root}" \
+      bd show "${parent_id}" --json
+  assert_status "${show_status}" "0" "bd show with stale env roots"
+  assert_json_value "${show_json}" '.[0].id' "${parent_id}" "bd show stale env parent id"
+
+  run_cli_json create_json create_status \
+    env \
+      TUSK_CHECKOUT_ROOT="${stale_root}" \
+      TUSK_TRACKER_ROOT="${stale_root}" \
+      DEVENV_ROOT="${stale_root}" \
+      BEADS_WORKSPACE_ROOT="${stale_root}" \
+      tuskd create-child-issue \
+        --repo "${repo_root}" \
+        --parent-id "${parent_id}" \
+        --title "transition stale env child" \
+        --description "Disposable child issue for stale-root override testing." \
+        --labels "place:tusk,surface:ops,track:core"
+  assert_status "${create_status}" "0" "create-child-issue with stale env roots"
+
+  child_issue_id="$(jq -r '.issue_id // .issue.id // ""' <<<"${create_json}")"
+  [ -n "${child_issue_id}" ] || fail "stale env child create did not return issue_id"$'\n'"${create_json}"
+  [ "$(receipt_count "${repo_root}" "${child_issue_id}" "issue.create")" = "1" ] || fail "stale env child create receipt count mismatch for ${child_issue_id}"
+
+  rm -rf -- "${stale_root}"
+  note "stale env root override: ok"
+}
+
 test_launch_rollback() {
   local repo_root="$1"
   local base_rev="$2"
@@ -1362,6 +1420,7 @@ run_inner_tests() {
   test_concurrent_claims "${repo_root}"
   test_concurrent_child_creates "${repo_root}"
   test_child_create_identity_mismatch "${repo_root}"
+  test_stale_env_root_override "${repo_root}"
   test_launch_rollback "${repo_root}" "${base_rev}"
   test_dispatch_lane "${repo_root}" "${base_rev}"
   test_dispatch_lane_timeout "${repo_root}" "${base_rev}"
