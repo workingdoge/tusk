@@ -18,9 +18,11 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
 2. Preflight the tracker before relying on `bd` mutations.
    - Run one read command such as `bd ready --json` or `bd show <id> --json` from the tracker root.
    - Check `bd dolt status` when the tracker uses Dolt server mode.
+   - If the repo uses `tuskd`, also probe the coordinator checkout with `tuskd coordinator-status --repo "$tracker_root"` before new lane work. If it reports drift, decide whether the default checkout is merely stale or is already carrying old issue work.
    - If the repo uses `tuskd`, treat server-mode Dolt as part of the contract. Fresh trackers should be initialized with `bd init --server`; embedded mode is a migration or unblocker task, not normal lane work.
    - If the repo documents a wrapper, dev shell, or service supervisor, use that before ad hoc recovery. Some repos require entering a managed shell and keeping a long-lived service session alive before `bd` is healthy.
    - If the repo uses `devenv up` or a similar interactive supervisor, keep it running in a PTY-backed coordinator session for the duration of tracker-dependent work instead of pushing that ownership into the worker lane.
+   - Use `tuskd repair-coordinator --repo "$tracker_root" --target-rev main` when the canonical checkout drifted off `main`, but remember that repair rebases the current default working copy. It is not a cleanup command and it will preserve whatever the coordinator checkout is already carrying.
    - If tracker health is bad, fix that first or downgrade the worker brief so `codex exec` does code work only and leaves issue mutation to the outer shell.
 3. Pick and claim exactly one issue for the lane.
    - Use `bd ready --json`, `bd show <id>`, and `bd update <id> --claim --json`.
@@ -70,6 +72,7 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
 - Use `jj describe` while shaping the lane. Use `jj commit` when you want to cut the final reviewable commit and open a fresh working-copy change.
 - Create bookmarks only when publishing or when the repo's landing flow explicitly needs them.
 - Keep the default workspace as the coordinator/control plane when possible, not the main place where issue work accumulates.
+- If the default workspace is already carrying old issue work, move or park that work intentionally instead of expecting coordinator repair to empty it.
 
 ## Publish and Landing
 

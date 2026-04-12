@@ -33,6 +33,19 @@ Use this reference when the lane does not simply end at "one visible commit and 
 
 ## Recovery Patterns
 
+### Coordinator drifted off `main`
+
+```bash
+cd "$tracker_root"
+tuskd coordinator-status --repo "$tracker_root"
+tuskd repair-coordinator --repo "$tracker_root" --target-rev main
+```
+
+- Use this when the canonical checkout stopped tracking current `main` but should remain the coordinator shell.
+- `repair-coordinator` rebases the current default working copy onto the target revision. It is not a cleanup command, and it will preserve whatever work the coordinator checkout is already carrying.
+- If the default checkout still holds old issue work after repair, move or park that work in a dedicated lane before starting more tracked work from the coordinator.
+- If the canonical repo home moved, for example from `/Users/arj/dev/...` to `/Users/arj/irai/...`, expect stale session or workspace observations from the old root until they are cleaned up. Treat that as secondary noise, not the primary cause of carried coordinator work.
+
 ### Base moved before landing
 
 ```bash
