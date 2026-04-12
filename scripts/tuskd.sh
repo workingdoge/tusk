@@ -1956,6 +1956,239 @@ resolve_git_ref_commit() {
     }'
 }
 
+commit_descends_from() {
+  local repo_root="$1"
+  local descendant_commit="$2"
+  local ancestor_commit="$3"
+  local lookup_output=""
+  local lookup_exit=0
+  local resolved=""
+
+  [ -n "${descendant_commit}" ] || return 1
+  [ -n "${ancestor_commit}" ] || return 1
+
+  if lookup_output="$(run_in_repo_capture "${repo_root}" jj --repository "${repo_root}" log -r "${ancestor_commit}::${descendant_commit} & ${descendant_commit}" --no-graph -T 'commit_id ++ "\n"')"; then
+    lookup_exit=0
+  else
+    lookup_exit=$?
+  fi
+
+  resolved="$(printf '%s' "${lookup_output}" | awk 'NF { print; exit }')"
+  [ "${lookup_exit}" -eq 0 ] && [ -n "${resolved}" ]
+}
+
+duplicate_revision_onto_main() {
+  local repo_root="$1"
+  local revision="$2"
+  local duplicate_output=""
+  local duplicate_exit=0
+  local duplicate_change_id=""
+  local duplicate_lookup='{"ok":false,"commit":null}'
+  local duplicate_commit=""
+
+  if duplicate_output="$(run_in_repo_capture "${repo_root}" jj --ignore-working-copy duplicate "${revision}" -o main)"; then
+    duplicate_exit=0
+  else
+    duplicate_exit=$?
+  fi
+
+  duplicate_change_id="$(
+    awk '
+      /^Duplicated / {
+        for (i = 1; i <= NF; i++) {
+          if ($i == "as" && (i + 1) <= NF) {
+            print $(i + 1)
+            exit
+          }
+        }
+      }
+    ' <<<"${duplicate_output}"
+  )"
+
+  if [ "${duplicate_exit}" -eq 0 ] && [ -n "${duplicate_change_id}" ]; then
+    duplicate_lookup="$(resolve_revision_commit "${repo_root}" "${duplicate_change_id}")"
+  fi
+  duplicate_commit="$(jq -r '.commit // ""' <<<"${duplicate_lookup}")"
+
+  jq -cn \
+    --arg revision "${revision}" \
+    --arg output "${duplicate_output}" \
+    --arg change_id "${duplicate_change_id}" \
+    --arg commit "${duplicate_commit}" \
+    --argjson lookup "${duplicate_lookup}" \
+    --argjson ok "$([ "${duplicate_exit}" -eq 0 ] && [ -n "${duplicate_change_id}" ] && [ -n "${duplicate_commit}" ] && echo true || echo false)" \
+    '{
+      ok: $ok,
+      revision: $revision,
+      output: (if ($output | length) > 0 then $output else null end),
+      change_id: (if ($change_id | length) > 0 then $change_id else null end),
+      commit: (if ($commit | length) > 0 then $commit else null end),
+      lookup: $lookup
+    }'
+}
+
+resolve_issue_id_for_handoff_revision() {
+  local repo_root="$1"
+  local revision="$2"
+  local path
+
+  path="$(receipts_path "${repo_root}")"
+  if [ ! -f "${path}" ]; then
+    printf '{"issue_ids":[],"issue_id":null}\n'
+    return
+  fi
+
+  jq -Rsc \
+    --arg revision "${revision}" \
+    '
+      split("\n")
+      | map(select(length > 0) | fromjson?)
+      | map(
+          select(.kind == "lane.handoff")
+          | select((.payload.revision // "") == $revision)
+          | (.payload.issue_id // empty)
+        )
+      | unique as $issue_ids
+      | {
+          issue_ids: $issue_ids,
+          issue_id: (if ($issue_ids | length) == 1 then $issue_ids[0] else null end)
+        }
+    ' <"${path}"
+}
+
+append_landed_revision_issue_note() {
+  local repo_root="$1"
+  local source_commit="$2"
+  local target_commit="$3"
+  local main_before_commit="$4"
+  local landing_mode="$5"
+  local issue_resolution='{"issue_ids":[],"issue_id":null}'
+  local issue_id=""
+  local note_text=""
+  local issue_show='{"ok":false,"output":[]}'
+  local existing_notes=""
+  local update_result='{"ok":false,"output":[]}'
+  local updated_issue="null"
+  local receipt_payload=""
+  local receipt_json=""
+
+  if [ -z "${source_commit}" ] || [ -z "${target_commit}" ] || [ "${source_commit}" = "${target_commit}" ]; then
+    jq -cn '{status:"not_needed"}'
+    return
+  fi
+
+  issue_resolution="$(resolve_issue_id_for_handoff_revision "${repo_root}" "${source_commit}")"
+  issue_id="$(jq -r '.issue_id // ""' <<<"${issue_resolution}")"
+  if [ -z "${issue_id}" ]; then
+    jq -cn \
+      --arg source_commit "${source_commit}" \
+      --arg target_commit "${target_commit}" \
+      --arg landing_mode "${landing_mode}" \
+      --argjson resolution "${issue_resolution}" \
+      '{
+        status: "skipped_unresolved",
+        source_commit: $source_commit,
+        target_commit: $target_commit,
+        landing_mode: $landing_mode,
+        resolution: $resolution
+      }'
+    return
+  fi
+
+  note_text="Landed on main as ${target_commit} after duplicating visible handoff commit ${source_commit} onto then-current main ${main_before_commit} to avoid rewinding main."
+  issue_show="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_issue_show" issue show "${issue_id}")"
+  existing_notes="$(jq -r 'if .ok and ((.output | type) == "array") and ((.output | length) > 0) then (.output[0].notes // "") else "" end' <<<"${issue_show}")"
+  if [ -n "${existing_notes}" ] && grep -F -- "${note_text}" >/dev/null <<<"${existing_notes}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg note "${note_text}" \
+      --arg landing_mode "${landing_mode}" \
+      --argjson resolution "${issue_resolution}" \
+      '{
+        status: "already_recorded",
+        issue_id: $issue_id,
+        note: $note,
+        landing_mode: $landing_mode,
+        resolution: $resolution
+      }'
+    return
+  fi
+
+  update_result="$(run_tracker_json_command_in_repo "${repo_root}" "tracker_issue_append_notes" issue append-notes "${issue_id}" --text "${note_text}")"
+  if ! jq -e --arg issue_id "${issue_id}" '
+      .ok and
+      ((.output | type) == "array") and
+      ((.output | length) > 0) and
+      ((.output[0].id // "") == $issue_id)
+    ' >/dev/null <<<"${update_result}"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg note "${note_text}" \
+      --arg landing_mode "${landing_mode}" \
+      --argjson resolution "${issue_resolution}" \
+      --argjson tracker "${update_result}" \
+      '{
+        status: "update_failed",
+        issue_id: $issue_id,
+        note: $note,
+        landing_mode: $landing_mode,
+        resolution: $resolution,
+        tracker: $tracker
+      }'
+    return
+  fi
+
+  updated_issue="$(jq -c '.output[0]' <<<"${update_result}")"
+  receipt_payload="$(jq -cn \
+    --arg issue_id "${issue_id}" \
+    --arg source_commit "${source_commit}" \
+    --arg target_commit "${target_commit}" \
+    --arg main_before_commit "${main_before_commit}" \
+    --arg landing_mode "${landing_mode}" \
+    --arg note "${note_text}" \
+    --argjson issue "${updated_issue}" \
+    '{
+      issue_id: $issue_id,
+      source_commit: $source_commit,
+      target_commit: $target_commit,
+      main_before_commit: $main_before_commit,
+      landing_mode: $landing_mode,
+      note: $note,
+      issue: $issue
+    }')"
+
+  if ! receipt_json="$(append_receipt_capture "${repo_root}" "issue.note" "${receipt_payload}")"; then
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg note "${note_text}" \
+      --arg landing_mode "${landing_mode}" \
+      --argjson issue "${updated_issue}" \
+      '{
+        status: "receipt_failed",
+        issue_id: $issue_id,
+        note: $note,
+        landing_mode: $landing_mode,
+        issue: $issue
+      }'
+    return
+  fi
+
+  jq -cn \
+    --arg issue_id "${issue_id}" \
+    --arg note "${note_text}" \
+    --arg landing_mode "${landing_mode}" \
+    --argjson issue "${updated_issue}" \
+    --argjson receipt "${receipt_json}" \
+    '{
+      status: "updated",
+      issue_id: $issue_id,
+      note: $note,
+      landing_mode: $landing_mode,
+      issue: $issue,
+      receipt: $receipt
+    }'
+}
+
 json_bool() {
   if [ "${1:-false}" = "true" ]; then
     printf 'true\n'
@@ -4386,9 +4619,14 @@ cmd_land_main() {
   local git_main_after=""
   local before_coordinator=""
   local after_coordinator=""
+  local source_commit=""
   local target_commit=""
   local main_before_commit=""
   local git_before_commit=""
+  local landing_mode="direct"
+  local rewrite_required=false
+  local duplicate_json='null'
+  local move_revision=""
   local move_output=""
   local move_exit=0
   local export_output=""
@@ -4397,6 +4635,7 @@ cmd_land_main() {
   local repair_status=0
   local needs_repair_after_land=false
   local landed_status=""
+  local issue_note_json='{"status":"not_needed"}'
   local receipt_payload=""
   local receipt_json=""
 
@@ -4421,11 +4660,28 @@ cmd_land_main() {
   main_lookup="$(resolve_revision_commit "${repo_root}" "main")"
   git_main_before="$(resolve_git_ref_commit "${repo_root}" "refs/heads/main")"
   before_coordinator="$(coordinator_status_payload "${repo_root}")"
-  target_commit="$(jq -r '.commit // ""' <<<"${target_lookup}")"
+  source_commit="$(jq -r '.commit // ""' <<<"${target_lookup}")"
+  target_commit="${source_commit}"
   main_before_commit="$(jq -r '.commit // ""' <<<"${main_lookup}")"
   git_before_commit="$(jq -r '.commit // ""' <<<"${git_main_before}")"
 
-  if jq -e --arg commit "${target_commit}" '.parent_commits | index($commit) != null' >/dev/null <<<"${before_coordinator}"; then
+  if [ -n "${main_before_commit}" ] && [ "${source_commit}" = "${main_before_commit}" ]; then
+    landing_mode="already_landed"
+    target_commit="${main_before_commit}"
+  elif [ -n "${main_before_commit}" ] && commit_descends_from "${repo_root}" "${source_commit}" "${main_before_commit}"; then
+    landing_mode="direct"
+  elif [ -n "${main_before_commit}" ] && commit_descends_from "${repo_root}" "${main_before_commit}" "${source_commit}"; then
+    landing_mode="already_landed"
+    target_commit="${main_before_commit}"
+  elif [ -n "${main_before_commit}" ]; then
+    landing_mode="duplicate_onto_main"
+    rewrite_required=true
+    target_commit=""
+  fi
+
+  if [ "${rewrite_required}" = "true" ]; then
+    needs_repair_after_land=true
+  elif jq -e --arg commit "${target_commit}" '.parent_commits | index($commit) != null' >/dev/null <<<"${before_coordinator}"; then
     needs_repair_after_land=false
   else
     needs_repair_after_land=true
@@ -4435,19 +4691,25 @@ cmd_land_main() {
     jq -cn \
       --arg repo_root "${repo_root}" \
       --arg revision "${revision}" \
+      --arg source_commit "${source_commit}" \
       --arg target_commit "${target_commit}" \
       --arg main_before_commit "${main_before_commit}" \
+      --arg landing_mode "${landing_mode}" \
       --arg note "${note}" \
       --argjson before_coordinator "${before_coordinator}" \
       --argjson git_main_before "${git_main_before}" \
+      --argjson rewrite_required "$(json_bool "${rewrite_required}")" \
       --argjson needs_repair_after_land "$(json_bool "${needs_repair_after_land}")" \
       '{
         ok: true,
         payload: {
           repo_root: $repo_root,
           revision: $revision,
-          target_commit: $target_commit,
+          source_commit: $source_commit,
+          target_commit: (if ($target_commit | length) > 0 then $target_commit else null end),
           main_before_commit: (if ($main_before_commit | length) > 0 then $main_before_commit else null end),
+          landing_mode: $landing_mode,
+          rewrite_required: $rewrite_required,
           note: (if ($note | length) > 0 then $note else null end),
           status: "plan",
           before: {
@@ -4455,10 +4717,18 @@ cmd_land_main() {
             git_main: $git_main_before
           },
           needs_repair_after_land: $needs_repair_after_land,
-          commands: [
-            ("jj --repository " + $repo_root + " bookmark move main --to " + $revision),
-            ("jj --repository " + $repo_root + " git export")
-          ] + (if $needs_repair_after_land then [
+          commands: (
+            if $landing_mode == "duplicate_onto_main" then [
+              ("jj --repository " + $repo_root + " duplicate " + $revision + " -o main"),
+              ("jj --repository " + $repo_root + " bookmark move main --to <duplicated-revision>"),
+              ("jj --repository " + $repo_root + " git export")
+            ] elif $landing_mode == "already_landed" then [
+              ("jj --repository " + $repo_root + " git export")
+            ] else [
+              ("jj --repository " + $repo_root + " bookmark move main --to " + $revision),
+              ("jj --repository " + $repo_root + " git export")
+            ] end
+          ) + (if $needs_repair_after_land then [
             ("tuskd repair-coordinator --repo " + $repo_root + " --target-rev main")
           ] else [] end)
         }
@@ -4472,7 +4742,9 @@ cmd_land_main() {
     jq -cn \
       --arg repo_root "${repo_root}" \
       --arg revision "${revision}" \
+      --arg source_commit "${source_commit}" \
       --arg target_commit "${target_commit}" \
+      --arg landing_mode "${landing_mode}" \
       --arg note "${note}" \
       --argjson before_coordinator "${before_coordinator}" \
       --argjson git_main_before "${git_main_before}" \
@@ -4481,7 +4753,9 @@ cmd_land_main() {
         payload: {
           repo_root: $repo_root,
           revision: $revision,
+          source_commit: $source_commit,
           target_commit: $target_commit,
+          landing_mode: $landing_mode,
           note: (if ($note | length) > 0 then $note else null end),
           status: "noop",
           before: {
@@ -4492,22 +4766,65 @@ cmd_land_main() {
             coordinator: $before_coordinator,
             git_main: $git_main_before
           },
-          repair: null
+          repair: null,
+          issue_note: null
         }
       }'
     return 0
   fi
 
-  if move_output="$(run_in_repo_capture "${repo_root}" jj --repository "${repo_root}" bookmark move main --to "${revision}")"; then
-    move_exit=0
-  else
-    move_exit=$?
+  if [ "${landing_mode}" = "duplicate_onto_main" ]; then
+    duplicate_json="$(duplicate_revision_onto_main "${repo_root}" "${revision}")"
+    if ! jq -e '.ok == true' >/dev/null <<<"${duplicate_json}"; then
+      jq -cn \
+        --arg repo_root "${repo_root}" \
+        --arg revision "${revision}" \
+        --arg source_commit "${source_commit}" \
+        --arg main_before_commit "${main_before_commit}" \
+        --arg landing_mode "${landing_mode}" \
+        --argjson duplicate "${duplicate_json}" \
+        --argjson before_coordinator "${before_coordinator}" \
+        --argjson git_main_before "${git_main_before}" \
+        '{
+          ok: false,
+          error: {
+            message: "land-main failed to duplicate the requested revision onto main"
+          },
+          payload: {
+            repo_root: $repo_root,
+            revision: $revision,
+            source_commit: $source_commit,
+            main_before_commit: (if ($main_before_commit | length) > 0 then $main_before_commit else null end),
+            landing_mode: $landing_mode,
+            before: {
+              coordinator: $before_coordinator,
+              git_main: $git_main_before
+            },
+            duplicate: $duplicate
+          }
+        }'
+      return 1
+    fi
+    target_commit="$(jq -r '.commit // ""' <<<"${duplicate_json}")"
+  fi
+
+  move_revision="${target_commit}"
+  if [ "${landing_mode}" != "already_landed" ]; then
+    if move_output="$(run_in_repo_capture "${repo_root}" jj --repository "${repo_root}" bookmark move main --to "${move_revision}")"; then
+      move_exit=0
+    else
+      move_exit=$?
+    fi
   fi
   if [ "${move_exit}" -ne 0 ]; then
     jq -cn \
       --arg repo_root "${repo_root}" \
       --arg revision "${revision}" \
+      --arg source_commit "${source_commit}" \
+      --arg main_before_commit "${main_before_commit}" \
+      --arg landing_mode "${landing_mode}" \
       --arg output "${move_output}" \
+      --argjson duplicate "${duplicate_json}" \
       --argjson before_coordinator "${before_coordinator}" \
       --argjson git_main_before "${git_main_before}" \
       '{
@@ -4518,10 +4835,14 @@ cmd_land_main() {
         payload: {
           repo_root: $repo_root,
           revision: $revision,
+          source_commit: $source_commit,
+          main_before_commit: (if ($main_before_commit | length) > 0 then $main_before_commit else null end),
+          landing_mode: $landing_mode,
           before: {
             coordinator: $before_coordinator,
             git_main: $git_main_before
           },
+          duplicate: (if $duplicate == null then null else $duplicate end),
           bookmark_move: {
             exit_code: 1,
             output: (if ($output | length) > 0 then $output else null end)
@@ -4544,12 +4865,16 @@ cmd_land_main() {
     receipt_payload="$(jq -cn \
       --arg repo_root "${repo_root}" \
       --arg revision "${revision}" \
+      --arg source_commit "${source_commit}" \
       --arg target_commit "${target_commit}" \
+      --arg main_before_commit "${main_before_commit}" \
+      --arg landing_mode "${landing_mode}" \
       --arg note "${note}" \
       --arg status "${landed_status}" \
       --arg move_output "${move_output}" \
       --arg export_output "${export_output}" \
       --argjson export_exit "${export_exit}" \
+      --argjson duplicate "${duplicate_json}" \
       --argjson before_coordinator "${before_coordinator}" \
       --argjson after_coordinator "${after_coordinator}" \
       --argjson git_main_before "${git_main_before}" \
@@ -4557,9 +4882,13 @@ cmd_land_main() {
       '{
         repo_root: $repo_root,
         revision: $revision,
+        source_commit: $source_commit,
         target_commit: $target_commit,
+        main_before_commit: (if ($main_before_commit | length) > 0 then $main_before_commit else null end),
+        landing_mode: $landing_mode,
         note: (if ($note | length) > 0 then $note else null end),
         status: $status,
+        duplicate: (if $duplicate == null then null else $duplicate end),
         bookmark_move: {
           exit_code: 0,
           output: (if ($move_output | length) > 0 then $move_output else null end)
@@ -4582,7 +4911,9 @@ cmd_land_main() {
     jq -cn \
       --arg repo_root "${repo_root}" \
       --arg revision "${revision}" \
+      --arg source_commit "${source_commit}" \
       --arg status "${landed_status}" \
+      --arg landing_mode "${landing_mode}" \
       --argjson before_coordinator "${before_coordinator}" \
       --argjson after_coordinator "${after_coordinator}" \
       --argjson git_main_before "${git_main_before}" \
@@ -4590,6 +4921,7 @@ cmd_land_main() {
       --arg move_output "${move_output}" \
       --arg export_output "${export_output}" \
       --argjson export_exit "${export_exit}" \
+      --argjson duplicate "${duplicate_json}" \
       --argjson receipt "$(if [ -n "${receipt_json}" ]; then printf '%s' "${receipt_json}"; else printf 'null'; fi)" \
       '{
         ok: false,
@@ -4599,7 +4931,10 @@ cmd_land_main() {
         payload: {
           repo_root: $repo_root,
           revision: $revision,
+          source_commit: $source_commit,
           status: $status,
+          landing_mode: $landing_mode,
+          duplicate: (if $duplicate == null then null else $duplicate end),
           bookmark_move: {
             exit_code: 0,
             output: (if ($move_output | length) > 0 then $move_output else null end)
@@ -4641,25 +4976,38 @@ cmd_land_main() {
     landed_status="landed"
   fi
 
+  if [ "${rewrite_required}" = "true" ]; then
+    issue_note_json="$(append_landed_revision_issue_note "${repo_root}" "${source_commit}" "${target_commit}" "${main_before_commit}" "${landing_mode}")"
+  fi
+
   receipt_payload="$(jq -cn \
     --arg repo_root "${repo_root}" \
     --arg revision "${revision}" \
+    --arg source_commit "${source_commit}" \
     --arg target_commit "${target_commit}" \
+    --arg main_before_commit "${main_before_commit}" \
+    --arg landing_mode "${landing_mode}" \
     --arg note "${note}" \
     --arg status "${landed_status}" \
     --arg move_output "${move_output}" \
     --arg export_output "${export_output}" \
+    --argjson duplicate "${duplicate_json}" \
     --argjson before_coordinator "${before_coordinator}" \
     --argjson after_coordinator "${after_coordinator}" \
     --argjson git_main_before "${git_main_before}" \
     --argjson git_main_after "${git_main_after}" \
     --argjson repair "${repair_json}" \
+    --argjson issue_note "${issue_note_json}" \
     '{
       repo_root: $repo_root,
       revision: $revision,
+      source_commit: $source_commit,
       target_commit: $target_commit,
+      main_before_commit: (if ($main_before_commit | length) > 0 then $main_before_commit else null end),
+      landing_mode: $landing_mode,
       note: (if ($note | length) > 0 then $note else null end),
       status: $status,
+      duplicate: (if $duplicate == null then null else $duplicate end),
       bookmark_move: {
         exit_code: 0,
         output: (if ($move_output | length) > 0 then $move_output else null end)
@@ -4672,23 +5020,28 @@ cmd_land_main() {
         coordinator: $before_coordinator,
         git_main: $git_main_before
       },
-      after: {
-        coordinator: $after_coordinator,
-        git_main: $git_main_after
-      },
-      repair: ($repair.payload // null)
-    }')"
+        after: {
+          coordinator: $after_coordinator,
+          git_main: $git_main_after
+        },
+        repair: ($repair.payload // null),
+        issue_note: (if ($issue_note.status // "not_needed") == "not_needed" then null else $issue_note end)
+      }')"
 
   if ! receipt_json="$(append_receipt_capture "${repo_root}" "land.main" "${receipt_payload}")"; then
     jq -cn \
       --arg repo_root "${repo_root}" \
       --arg revision "${revision}" \
+      --arg source_commit "${source_commit}" \
       --arg status "${landed_status}" \
+      --arg landing_mode "${landing_mode}" \
       --argjson before_coordinator "${before_coordinator}" \
       --argjson after_coordinator "${after_coordinator}" \
       --argjson git_main_before "${git_main_before}" \
       --argjson git_main_after "${git_main_after}" \
+      --argjson duplicate "${duplicate_json}" \
       --argjson repair "${repair_json}" \
+      --argjson issue_note "${issue_note_json}" \
       '{
         ok: false,
         error: {
@@ -4697,7 +5050,10 @@ cmd_land_main() {
         payload: {
           repo_root: $repo_root,
           revision: $revision,
+          source_commit: $source_commit,
           status: $status,
+          landing_mode: $landing_mode,
+          duplicate: (if $duplicate == null then null else $duplicate end),
           before: {
             coordinator: $before_coordinator,
             git_main: $git_main_before
@@ -4706,7 +5062,8 @@ cmd_land_main() {
             coordinator: $after_coordinator,
             git_main: $git_main_after
           },
-          repair: ($repair.payload // null)
+          repair: ($repair.payload // null),
+          issue_note: (if ($issue_note.status // "not_needed") == "not_needed" then null else $issue_note end)
         }
       }'
     return 1
@@ -4715,21 +5072,32 @@ cmd_land_main() {
   jq -cn \
     --arg repo_root "${repo_root}" \
     --arg revision "${revision}" \
+    --arg source_commit "${source_commit}" \
     --arg target_commit "${target_commit}" \
+    --arg main_before_commit "${main_before_commit}" \
+    --arg landing_mode "${landing_mode}" \
     --arg note "${note}" \
     --arg status "${landed_status}" \
+    --argjson rewrite_required "$(json_bool "${rewrite_required}")" \
+    --argjson duplicate "${duplicate_json}" \
     --argjson before_coordinator "${before_coordinator}" \
     --argjson after_coordinator "${after_coordinator}" \
     --argjson git_main_before "${git_main_before}" \
     --argjson git_main_after "${git_main_after}" \
     --argjson repair "${repair_json}" \
+    --argjson issue_note "${issue_note_json}" \
     --argjson receipt "${receipt_json}" \
     '{
       ok: ($status == "landed" or $status == "landed_repaired"),
       payload: {
         repo_root: $repo_root,
         revision: $revision,
+        source_commit: $source_commit,
         target_commit: $target_commit,
+        main_before_commit: (if ($main_before_commit | length) > 0 then $main_before_commit else null end),
+        landing_mode: $landing_mode,
+        rewrite_required: $rewrite_required,
+        duplicate: (if $duplicate == null then null else $duplicate end),
         note: (if ($note | length) > 0 then $note else null end),
         status: $status,
         before: {
@@ -4741,6 +5109,7 @@ cmd_land_main() {
           git_main: $git_main_after
         },
         repair: ($repair.payload // null),
+        issue_note: (if ($issue_note.status // "not_needed") == "not_needed" then null else $issue_note end),
         receipt: $receipt
       }
     }'

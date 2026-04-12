@@ -15,6 +15,7 @@ Usage:
   tusk-tracker issue show ISSUE_ID [--repo PATH]
   tusk-tracker issue create-child PARENT_ID --issue-id ISSUE_ID --title TITLE [--description TEXT] [--type TYPE] [--priority PRIORITY] [--labels CSV] [--metadata JSON] [--repo PATH]
   tusk-tracker issue claim ISSUE_ID [--repo PATH]
+  tusk-tracker issue append-notes ISSUE_ID --text TEXT [--repo PATH]
   tusk-tracker issue close ISSUE_ID --reason REASON [--repo PATH]
   tusk-tracker issues board [--repo PATH]
   tusk-tracker backend show [--repo PATH]
@@ -29,6 +30,7 @@ Commands:
   issue show         Show one issue and print the issue JSON.
   issue create-child Create one child issue with an explicit child id and print the issue JSON.
   issue claim        Claim one issue and print the updated issue JSON.
+  issue append-notes Append notes to one issue and print the updated issue JSON.
   issue close        Close one issue and print the updated issue JSON.
   issues board       Print machine-readable board issue buckets as JSON.
   backend show       Print the current tracker backend configuration as JSON.
@@ -84,6 +86,16 @@ cmd_issue_claim() {
 
   [ -n "${issue_id}" ] || fail "issue claim requires ISSUE_ID"
   run_in_repo "${repo_root}" "${real_bd}" update "${issue_id}" --claim --json
+}
+
+cmd_issue_append_notes() {
+  local repo_root="$1"
+  local issue_id="${2:-}"
+  local text="${3:-}"
+
+  [ -n "${issue_id}" ] || fail "issue append-notes requires ISSUE_ID"
+  [ -n "${text}" ] || fail "issue append-notes requires --text"
+  run_in_repo "${repo_root}" "${real_bd}" update "${issue_id}" --append-notes "${text}" --json
 }
 
 cmd_issue_create_child() {
@@ -354,6 +366,28 @@ main() {
           issue_id="${1:-}"
           [ "$#" -eq 1 ] || fail "issue claim requires exactly one ISSUE_ID"
           cmd_issue_claim "${repo_root}" "${issue_id}"
+          ;;
+        append-notes)
+          local text=""
+
+          issue_id="${1:-}"
+          shift
+          [ -n "${issue_id}" ] || fail "issue append-notes requires ISSUE_ID"
+
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              --text)
+                [ "$#" -ge 2 ] || fail "issue append-notes requires a value for --text"
+                text="$2"
+                shift 2
+                ;;
+              *)
+                fail "unknown issue append-notes argument: $1"
+                ;;
+            esac
+          done
+
+          cmd_issue_append_notes "${repo_root}" "${issue_id}" "${text}"
           ;;
         close)
           issue_id="${1:-}"

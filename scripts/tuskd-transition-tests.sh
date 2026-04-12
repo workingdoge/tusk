@@ -1194,7 +1194,13 @@ test_complete_lane() {
   local launch_json=""
   local launch_status=0
   local workspace_path=""
+  local advance_name="complete-lane-main-advance"
+  local advance_path="${repo_root}/.jj-workspaces/${advance_name}"
+  local advance_revision=""
+  local advance_land_json=""
+  local advance_land_status=0
   local landed_revision=""
+  local landed_target=""
   local plan_json=""
   local plan_status=0
   local complete_json=""
@@ -1223,6 +1229,14 @@ test_complete_lane() {
   jj --repository "${workspace_path}" commit -m "complete lane landed probe" >/dev/null
   landed_revision="$(resolve_revision "${workspace_path}" "@-")"
 
+  jj --repository "${repo_root}" workspace add "${advance_path}" --name "${advance_name}" -r main >/dev/null
+  printf 'complete lane main advance\n' > "${advance_path}/complete-lane-main-advance.txt"
+  jj --repository "${advance_path}" commit -m "complete lane main advance" >/dev/null
+  advance_revision="$(resolve_revision "${advance_path}" "@-")"
+  run_cli_json advance_land_json advance_land_status \
+    tuskd land-main --repo "${repo_root}" --revision "${advance_revision}" --note "complete lane main advance"
+  assert_status "${advance_land_status}" "0" "complete-lane advance main"
+
   run_cli_json plan_json plan_status \
     tuskd complete-lane \
       --repo "${repo_root}" \
@@ -1246,8 +1260,14 @@ test_complete_lane() {
   assert_json_value "${complete_json}" '.status' "completed" "complete-lane result"
   assert_json_value "${complete_json}" '.land.status' "landed_repaired" "complete-lane landing result"
   assert_json_value "${complete_json}" '.land.receipt.kind' "land.main" "complete-lane landing receipt"
+  assert_json_value "${complete_json}" '.land.landing_mode' "duplicate_onto_main" "complete-lane landing mode"
+  assert_json_value "${complete_json}" '.land.rewrite_required' "true" "complete-lane rewrite flag"
+  assert_json_value "${complete_json}" '.land.issue_note.status' "updated" "complete-lane issue note status"
   assert_json_value "${complete_json}" '.cleanup.effective_mode' "remove" "complete-lane cleanup mode"
   assert_json_value "${complete_json}" '.close.issue.status' "closed" "complete-lane closed issue"
+  landed_target="$(jq -r '.land.target_commit // ""' <<<"${complete_json}")"
+  [ -n "${landed_target}" ] || fail "complete-lane missing landed target commit"$'\n'"${complete_json}"
+  [ "${landed_target}" != "${landed_revision}" ] || fail "complete-lane should have rewritten sibling landing commit"
 
   assert_file_missing "${workspace_path}" "complete-lane removed workspace"
   [ "$(lane_count "${repo_root}" "${issue_id}")" = "0" ] || fail "complete-lane left lane state behind for ${issue_id}"
@@ -1256,21 +1276,25 @@ test_complete_lane() {
   [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.complete")" = "1" ] || fail "complete-lane lane.complete receipt count mismatch for ${issue_id}"
   [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.archive")" = "1" ] || fail "complete-lane lane.archive receipt count mismatch for ${issue_id}"
   [ "$(receipt_count "${repo_root}" "${issue_id}" "issue.close")" = "1" ] || fail "complete-lane issue.close receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "issue.note")" = "1" ] || fail "complete-lane issue.note receipt count mismatch for ${issue_id}"
 
   run_cli_json status_json status_exit \
     tuskd coordinator-status --repo "${repo_root}"
   assert_status "${status_exit}" "0" "coordinator-status after complete-lane"
   assert_json_value "${status_json}" '.status' "in_sync" "coordinator-status after complete-lane state"
-  assert_json_value "${status_json}" '.parent_commits[0]' "${landed_revision}" "coordinator-status after complete-lane parent"
+  assert_json_value "${status_json}" '.parent_commits[0]' "${landed_target}" "coordinator-status after complete-lane parent"
 
   git_main_commit="$(git -C "${repo_root}" rev-parse --verify refs/heads/main)"
-  [ "${git_main_commit}" = "${landed_revision}" ] || fail "complete-lane left git main at ${git_main_commit}, expected ${landed_revision}"
+  [ "${git_main_commit}" = "${landed_target}" ] || fail "complete-lane left git main at ${git_main_commit}, expected ${landed_target}"
+  [ "$(resolve_revision "${repo_root}" "${advance_revision}::main & main")" = "${landed_target}" ] || fail "complete-lane rewrote main outside the advanced line"
 
   run_cli_json show_json show_status \
     bd show "${issue_id}" --json
   assert_status "${show_status}" "0" "bd show after complete-lane"
   assert_json_value "${show_json}" '.[0].status' "closed" "complete-lane issue status"
+  assert_json_jq "${show_json}" "complete-lane issue note missing landed revision" --arg source "${landed_revision}" --arg target "${landed_target}" '.[0].notes != null and (.[0].notes | contains($source)) and (.[0].notes | contains($target))'
 
+  forget_and_remove_workspace "${repo_root}" "${advance_name}" "${advance_path}"
   note "complete-lane: ok"
 }
 
@@ -1327,22 +1351,62 @@ test_coordinator_repair() {
 
 test_land_main() {
   local repo_root="$1"
-  local landing_name="land-main-probe"
-  local landing_path="${repo_root}/.jj-workspaces/${landing_name}"
+  local issue_id=""
+  local claim_json=""
+  local claim_status=0
+  local launch_json=""
+  local launch_status=0
+  local workspace_name=""
+  local workspace_path=""
+  local handoff_json=""
+  local handoff_status=0
+  local advance_name="land-main-advance"
+  local advance_path="${repo_root}/.jj-workspaces/${advance_name}"
+  local advance_revision=""
+  local advance_land_json=""
+  local advance_land_status=0
   local landed_revision=""
+  local landed_target=""
   local plan_json=""
   local plan_status=0
   local land_json=""
   local land_status=0
   local status_json=""
   local status_exit=0
+  local show_json=""
+  local show_status=0
   local git_main_commit=""
   local land_receipt_count_before=""
   local land_receipt_count=""
 
   note "land-main: begin"
 
-  printf '\nland-main probe\n' >> "${repo_root}/AGENTS.md"
+  issue_id="$(create_issue "${repo_root}" "land-main rewrite probe")"
+  run_cli_json claim_json claim_status \
+    tuskd claim-issue --repo "${repo_root}" --issue-id "${issue_id}"
+  assert_status "${claim_status}" "0" "claim land-main issue"
+
+  run_cli_json launch_json launch_status \
+    tuskd launch-lane --repo "${repo_root}" --issue-id "${issue_id}" --base-rev main --slug land-main-probe
+  assert_status "${launch_status}" "0" "launch land-main lane"
+  workspace_name="$(jq -r '.workspace_name // ""' <<<"${launch_json}")"
+  workspace_path="$(jq -r '.workspace_path // ""' <<<"${launch_json}")"
+  [ -n "${workspace_path}" ] || fail "land-main output missing workspace_path"$'\n'"${launch_json}"
+
+  printf 'land-main landed probe\n' > "${workspace_path}/land-main-probe.txt"
+  jj --repository "${workspace_path}" commit -m "land-main landed probe" >/dev/null
+  landed_revision="$(resolve_revision "${workspace_path}" "@-")"
+  run_cli_json handoff_json handoff_status \
+    tuskd handoff-lane --repo "${repo_root}" --issue-id "${issue_id}" --revision "${landed_revision}" --note "land-main probe"
+  assert_status "${handoff_status}" "0" "handoff land-main lane"
+
+  jj --repository "${repo_root}" workspace add "${advance_path}" --name "${advance_name}" -r main >/dev/null
+  printf 'land-main advance\n' > "${advance_path}/land-main-advance.txt"
+  jj --repository "${advance_path}" commit -m "land-main advance" >/dev/null
+  advance_revision="$(resolve_revision "${advance_path}" "@-")"
+  run_cli_json advance_land_json advance_land_status \
+    tuskd land-main --repo "${repo_root}" --revision "${advance_revision}" --note "land-main advance"
+  assert_status "${advance_land_status}" "0" "land-main advance"
 
   land_receipt_count_before="$(
     jq -Rsc \
@@ -1354,35 +1418,42 @@ test_land_main() {
       ' <"$(receipts_path "${repo_root}")"
   )"
 
-  jj --repository "${repo_root}" workspace add "${landing_path}" --name "${landing_name}" -r main >/dev/null
-  printf 'land-main landed probe\n' > "${landing_path}/land-main-probe.txt"
-  jj --repository "${landing_path}" commit -m "land-main landed probe" >/dev/null
-  landed_revision="$(resolve_revision "${landing_path}" "@-")"
-
   run_cli_json plan_json plan_status \
     tuskd land-main --repo "${repo_root}" --revision "${landed_revision}" --plan
   assert_status "${plan_status}" "0" "land-main plan"
   assert_json_value "${plan_json}" '.payload.status' "plan" "land-main plan status"
-  assert_json_value "${plan_json}" '.payload.target_commit' "${landed_revision}" "land-main plan target"
+  assert_json_value "${plan_json}" '.payload.source_commit' "${landed_revision}" "land-main plan source commit"
+  assert_json_value "${plan_json}" '.payload.target_commit' "null" "land-main plan target"
+  assert_json_value "${plan_json}" '.payload.landing_mode' "duplicate_onto_main" "land-main plan mode"
+  assert_json_value "${plan_json}" '.payload.rewrite_required' "true" "land-main plan rewrite flag"
   assert_json_value "${plan_json}" '.payload.needs_repair_after_land' "true" "land-main plan repair flag"
 
   run_cli_json land_json land_status \
     tuskd land-main --repo "${repo_root}" --revision "${landed_revision}" --note "transition probe"
   assert_status "${land_status}" "0" "land-main run"
   assert_json_value "${land_json}" '.payload.status' "landed_repaired" "land-main result"
+  assert_json_value "${land_json}" '.payload.source_commit' "${landed_revision}" "land-main source commit"
+  assert_json_value "${land_json}" '.payload.landing_mode' "duplicate_onto_main" "land-main landing mode"
+  assert_json_value "${land_json}" '.payload.rewrite_required' "true" "land-main rewrite flag"
+  assert_json_value "${land_json}" '.payload.issue_note.status' "updated" "land-main issue note status"
+  assert_json_value "${land_json}" '.payload.issue_note.issue_id' "${issue_id}" "land-main issue note issue id"
+  landed_target="$(jq -r '.payload.target_commit // ""' <<<"${land_json}")"
+  [ -n "${landed_target}" ] || fail "land-main missing landed target commit"$'\n'"${land_json}"
+  [ "${landed_target}" != "${landed_revision}" ] || fail "land-main should have rewritten sibling landing commit"
   assert_json_value "${land_json}" '.payload.after.coordinator.status' "in_sync" "land-main synced coordinator"
-  assert_json_value "${land_json}" '.payload.after.coordinator.parent_commits[0]' "${landed_revision}" "land-main updated coordinator parent"
-  assert_json_value "${land_json}" '.payload.after.git_main.commit' "${landed_revision}" "land-main exported git main"
+  assert_json_value "${land_json}" '.payload.after.coordinator.parent_commits[0]' "${landed_target}" "land-main updated coordinator parent"
+  assert_json_value "${land_json}" '.payload.after.git_main.commit' "${landed_target}" "land-main exported git main"
   assert_json_value "${land_json}" '.payload.repair.status' "repaired" "land-main repair result"
 
   run_cli_json status_json status_exit \
     tuskd coordinator-status --repo "${repo_root}"
   assert_status "${status_exit}" "0" "coordinator-status after land-main"
   assert_json_value "${status_json}" '.status' "in_sync" "coordinator-status after land-main state"
-  assert_json_value "${status_json}" '.parent_commits[0]' "${landed_revision}" "coordinator-status after land-main parent"
+  assert_json_value "${status_json}" '.parent_commits[0]' "${landed_target}" "coordinator-status after land-main parent"
 
   git_main_commit="$(git -C "${repo_root}" rev-parse --verify refs/heads/main)"
-  [ "${git_main_commit}" = "${landed_revision}" ] || fail "land-main left git main at ${git_main_commit}, expected ${landed_revision}"
+  [ "${git_main_commit}" = "${landed_target}" ] || fail "land-main left git main at ${git_main_commit}, expected ${landed_target}"
+  [ "$(resolve_revision "${repo_root}" "${advance_revision}::main & main")" = "${landed_target}" ] || fail "land-main rewrote main outside the advanced line"
 
   land_receipt_count="$(
     jq -Rsc \
@@ -1394,8 +1465,15 @@ test_land_main() {
       ' <"$(receipts_path "${repo_root}")"
   )"
   [ "${land_receipt_count}" = "$((land_receipt_count_before + 1))" ] || fail "land-main receipt count mismatch: ${land_receipt_count} (before ${land_receipt_count_before})"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "issue.note")" = "1" ] || fail "land-main issue.note receipt count mismatch for ${issue_id}"
 
-  forget_and_remove_workspace "${repo_root}" "${landing_name}" "${landing_path}"
+  run_cli_json show_json show_status \
+    bd show "${issue_id}" --json
+  assert_status "${show_status}" "0" "bd show after land-main"
+  assert_json_jq "${show_json}" "land-main issue note missing landed revision" --arg source "${landed_revision}" --arg target "${landed_target}" '.[0].notes != null and (.[0].notes | contains($source)) and (.[0].notes | contains($target))'
+
+  forget_and_remove_workspace "${repo_root}" "${workspace_name}" "${workspace_path}"
+  forget_and_remove_workspace "${repo_root}" "${advance_name}" "${advance_path}"
   note "land-main: ok"
 }
 
