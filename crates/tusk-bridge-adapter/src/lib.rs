@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AuthorizeRequest {
@@ -192,10 +193,51 @@ pub struct AuthorizeOutcome {
 }
 
 #[derive(Clone, Debug)]
+struct LocalRuntimeState {
+    mode_state: ModeState,
+    active_burn_reason: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct LocalApiState {
     provider_results: ProviderResults,
-    mode_state: ModeState,
+    runtime: Arc<RwLock<LocalRuntimeState>>,
     authoritative_time_source: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ModeCommand {
+    pub version: String,
+    pub operation: String,
+    pub command_id: String,
+    pub trace: String,
+    pub requested_by: String,
+    pub reason_code: String,
+    #[serde(default)]
+    pub cut_set: Vec<String>,
+    pub approval_mode: String,
+    pub approval_evidence: ApprovalEvidence,
+    #[serde(default)]
+    pub ticket: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ApprovalEvidence {
+    pub quorum: u64,
+    pub approvers: Vec<Approver>,
+    #[serde(default)]
+    pub ticket: Option<String>,
+    #[serde(default)]
+    pub basis: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Approver {
+    pub id: String,
+    pub role: String,
+    pub approved_at: String,
+    #[serde(default)]
+    pub authn_strength: Option<String>,
 }
 
 impl Witness {
@@ -301,29 +343,92 @@ impl Witness {
 }
 
 impl LocalApiState {
+    pub fn new(
+        provider_results: ProviderResults,
+        mode_state: ModeState,
+        authoritative_time_source: String,
+    ) -> Self {
+        Self {
+            provider_results,
+            runtime: Arc::new(RwLock::new(LocalRuntimeState {
+                mode_state,
+                active_burn_reason: None,
+            })),
+            authoritative_time_source,
+        }
+    }
+
     pub fn from_files(
         provider_results_path: &Path,
         mode_state_path: &Path,
         authoritative_time_source: String,
     ) -> Result<Self, String> {
-        Ok(Self {
-            provider_results: load_json_file(provider_results_path)?,
-            mode_state: load_json_file(mode_state_path)?,
+        Ok(Self::new(
+            load_json_file(provider_results_path)?,
+            load_json_file(mode_state_path)?,
             authoritative_time_source,
-        })
+        ))
     }
 
-    pub fn mode_state(&self) -> &ModeState {
-        &self.mode_state
+    pub fn mode_state(&self) -> Result<ModeState, String> {
+        self.runtime
+            .read()
+            .map_err(|_| "local runtime state lock poisoned".to_string())
+            .map(|state| state.mode_state.clone())
     }
 
     pub fn authorize(&self, request: AuthorizeRequest) -> Result<AuthorizeOutcome, String> {
+        let runtime = self
+            .runtime
+            .read()
+            .map_err(|_| "local runtime state lock poisoned".to_string())?;
         authorize_with_state(
             request,
             &self.provider_results,
-            &self.mode_state,
+            &runtime.mode_state,
+            runtime.active_burn_reason.as_deref(),
             &self.authoritative_time_source,
         )
+    }
+
+    pub fn burn(&self, command: ModeCommand) -> Result<ModeState, String> {
+        self.apply_mode_command(command, "burn")
+    }
+
+    pub fn restore(&self, command: ModeCommand) -> Result<ModeState, String> {
+        self.apply_mode_command(command, "restore")
+    }
+
+    fn apply_mode_command(
+        &self,
+        command: ModeCommand,
+        expected_operation: &str,
+    ) -> Result<ModeState, String> {
+        validate_mode_command(&command, expected_operation)?;
+        let updated_at = command_updated_at(&command)?;
+        let mut runtime = self
+            .runtime
+            .write()
+            .map_err(|_| "local runtime state lock poisoned".to_string())?;
+
+        runtime.mode_state.updated_at = updated_at;
+        runtime.mode_state.last_command_id = Some(command.command_id.clone());
+
+        match expected_operation {
+            "burn" => {
+                runtime.mode_state.current_mode = "safe".to_string();
+                runtime.mode_state.cut_set = command.cut_set.clone();
+                runtime.active_burn_reason = Some(command.reason_code);
+            }
+            "restore" => {
+                runtime.mode_state.current_mode = "normal".to_string();
+                runtime.mode_state.cut_set.clear();
+                runtime.active_burn_reason = None;
+            }
+            _ => return Err(format!("unsupported mode operation `{expected_operation}`")),
+        }
+
+        Ok(runtime.mode_state.clone())
     }
 }
 
@@ -420,13 +525,17 @@ pub fn authorize_with_state(
     authorize_request: AuthorizeRequest,
     provider_results: &ProviderResults,
     mode_state: &ModeState,
+    active_burn_reason: Option<&str>,
     authoritative_time_source: &str,
 ) -> Result<AuthorizeOutcome, String> {
     let mut synchronized_provider_results = provider_results.clone();
     synchronized_provider_results.runtime.current_mode = mode_state.current_mode.clone();
 
     let policy_input = assemble(authorize_request, synchronized_provider_results)?;
-    let decision = decision_for_policy_input(&policy_input)?;
+    let decision = match active_burn_reason {
+        Some(reason_code) => forced_burn_decision(&policy_input, reason_code)?,
+        None => decision_for_policy_input(&policy_input)?,
+    };
     let audit_record = audit_stub(&policy_input, authoritative_time_source)?;
 
     Ok(AuthorizeOutcome {
@@ -506,39 +615,39 @@ pub fn decision_for_policy_input(policy_input: &PolicyInput) -> Result<Decision,
 
     let mut burn_reasons = Vec::new();
     if policy_input.runtime_request.current_mode == "burn" {
-        burn_reasons.push("current_mode_burn".to_string());
+        burn_reasons.push("CURRENT_MODE_BURN".to_string());
     }
     push_if_true(
         &mut burn_reasons,
         policy_input.events.bridge_host_attestation_failed,
-        "bridge_host_attestation_failed",
+        "BRIDGE_HOST_ATTESTATION_FAILED",
     );
     push_if_true(
         &mut burn_reasons,
         policy_input.events.issuer_compromise_detected,
-        "issuer_compromise_detected",
+        "ISSUER_COMPROMISE_DETECTED",
     );
     push_if_true(
         &mut burn_reasons,
         policy_input.events.audit_tamper_detected,
-        "audit_tamper_detected",
+        "AUDIT_TAMPER_DETECTED",
     );
     push_if_true(
         &mut burn_reasons,
         policy_input.events.canary_or_honey_credential_activated,
-        "canary_or_honey_credential_activated",
+        "CANARY_OR_HONEY_CREDENTIAL_ACTIVATED",
     );
     push_if_true(
         &mut burn_reasons,
         policy_input
             .events
             .controlled_release_policy_bypass_detected,
-        "controlled_release_policy_bypass_detected",
+        "CONTROLLED_RELEASE_POLICY_BYPASS_DETECTED",
     );
     push_if_true(
         &mut burn_reasons,
         policy_input.events.policy_hash_mismatch,
-        "policy_hash_mismatch",
+        "POLICY_HASH_MISMATCH",
     );
 
     let effect = if !burn_reasons.is_empty() {
@@ -557,10 +666,10 @@ pub fn decision_for_policy_input(policy_input: &PolicyInput) -> Result<Decision,
         jti: Some(policy_input.witness.jti()?),
         deny_reasons,
         burn_reasons,
-        effective_authority: if effect == "accept" {
-            Some(effective_authority_from_witness(&policy_input.witness)?)
-        } else {
+        effective_authority: if effect == "deny" {
             None
+        } else {
+            Some(effective_authority_from_policy_input(policy_input)?)
         },
     })
 }
@@ -569,21 +678,185 @@ pub fn build_router(state: LocalApiState) -> Router {
     Router::new()
         .route("/v1/authorize", post(authorize_handler))
         .route("/v1/state/mode", get(mode_state_handler))
+        .route("/v1/admin/burn", post(burn_handler))
+        .route("/v1/admin/restore", post(restore_handler))
         .with_state(state)
 }
 
-fn effective_authority_from_witness(witness: &Witness) -> Result<EffectiveAuthority, String> {
+fn effective_authority_from_policy_input(
+    policy_input: &PolicyInput,
+) -> Result<EffectiveAuthority, String> {
+    let witness_constraints = policy_input.witness.constraints()?;
+    let witness_constraints = value_object(&witness_constraints, "witness.constraints")?;
+    let resource_policy = value_object(
+        &policy_input.runtime_request.resource_policy,
+        "runtime_request.resource_policy",
+    )?;
+
+    let mut integ_label = serde_json::Map::new();
+    integ_label.insert(
+        "level".to_string(),
+        Value::String(object_string(resource_policy, "required_integ_level")?),
+    );
+    let integ_tags = object_array(resource_policy, "required_integ_tags")?;
+    if !integ_tags.is_empty() {
+        integ_label.insert("tags".to_string(), Value::Array(integ_tags));
+    }
+
+    let mut egress_policy = serde_json::Map::new();
+    egress_policy.insert(
+        "mode".to_string(),
+        Value::String(object_string(resource_policy, "egress_mode")?),
+    );
+    egress_policy.insert(
+        "destinations".to_string(),
+        Value::Array(object_array(resource_policy, "egress_allowlist")?),
+    );
+
+    let mut output_policy = serde_json::Map::new();
+    output_policy.insert(
+        "redaction_profile".to_string(),
+        Value::String(object_string(
+            resource_policy,
+            "required_redaction_profile",
+        )?),
+    );
+    output_policy.insert(
+        "max_response_bytes".to_string(),
+        Value::Number(object_u64(resource_policy, "max_response_bytes")?.into()),
+    );
+    output_policy.insert(
+        "allow_secrets_in_output".to_string(),
+        Value::Bool(object_bool(
+            value_object(
+                &policy_input.witness.output_policy()?,
+                "witness.output_policy",
+            )?,
+            "allow_secrets_in_output",
+        )?),
+    );
+    output_policy.insert(
+        "return_to_model".to_string(),
+        Value::Bool(object_bool(resource_policy, "return_to_model_allowed")?),
+    );
+    output_policy.insert(
+        "strip_html".to_string(),
+        Value::Bool(object_bool(resource_policy, "strip_html")?),
+    );
+    output_policy.insert(
+        "classify_output".to_string(),
+        Value::Bool(object_bool(resource_policy, "classify_output")?),
+    );
+
+    let mut constraints = serde_json::Map::new();
+    constraints.insert(
+        "verb_class".to_string(),
+        Value::String(object_string(witness_constraints, "verb_class")?),
+    );
+    constraints.insert(
+        "rows_max".to_string(),
+        Value::Number(
+            object_u64(witness_constraints, "rows_max")?
+                .min(object_u64(resource_policy, "rows_max")?)
+                .into(),
+        ),
+    );
+    constraints.insert(
+        "max_bytes".to_string(),
+        Value::Number(
+            object_u64(witness_constraints, "max_bytes")?
+                .min(object_u64(resource_policy, "max_bytes")?)
+                .into(),
+        ),
+    );
+    constraints.insert(
+        "rate_per_min".to_string(),
+        Value::Number(
+            object_u64(witness_constraints, "rate_per_min")?
+                .min(object_u64(resource_policy, "rate_per_min")?)
+                .into(),
+        ),
+    );
+    constraints.insert(
+        "single_use".to_string(),
+        Value::Bool(
+            object_bool(witness_constraints, "single_use")?
+                || object_bool(resource_policy, "require_single_use")?,
+        ),
+    );
+    constraints.insert(
+        "human_review_required".to_string(),
+        Value::Bool(
+            object_bool(witness_constraints, "human_review_required")?
+                || object_bool(resource_policy, "human_review_required")?,
+        ),
+    );
+    constraints.insert(
+        "max_secret_materializations".to_string(),
+        Value::Number(
+            object_u64(witness_constraints, "max_secret_materializations")?
+                .min(object_u64(resource_policy, "max_secret_materializations")?)
+                .into(),
+        ),
+    );
+
     Ok(EffectiveAuthority {
-        tool: witness.tool()?,
-        resource: witness.resource()?,
-        conf_label: witness.conf_label()?,
-        integ_label: witness.integ_label()?,
-        ttl_s: witness.ttl_s()?,
-        egress_policy: witness.egress_policy()?,
-        output_policy: witness.output_policy()?,
-        approval_mode: witness.approval_mode()?,
-        constraints: witness.constraints()?,
+        tool: policy_input.witness.tool()?,
+        resource: policy_input.witness.resource()?,
+        conf_label: policy_input.witness.conf_label()?,
+        integ_label: Value::Object(integ_label),
+        ttl_s: policy_input
+            .witness
+            .ttl_s()?
+            .min(object_u64(resource_policy, "max_ttl_s")?),
+        egress_policy: Value::Object(egress_policy),
+        output_policy: Value::Object(output_policy),
+        approval_mode: object_string(resource_policy, "required_approval_mode")?,
+        constraints: Value::Object(constraints),
     })
+}
+
+fn value_object<'a>(
+    value: &'a Value,
+    context: &str,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    value
+        .as_object()
+        .ok_or_else(|| format!("{context} must be a JSON object"))
+}
+
+fn object_string(object: &serde_json::Map<String, Value>, key: &str) -> Result<String, String> {
+    object
+        .get(key)
+        .ok_or_else(|| format!("missing required field `{key}`"))?
+        .as_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| format!("field `{key}` must be a string"))
+}
+
+fn object_u64(object: &serde_json::Map<String, Value>, key: &str) -> Result<u64, String> {
+    object
+        .get(key)
+        .ok_or_else(|| format!("missing required field `{key}`"))?
+        .as_u64()
+        .ok_or_else(|| format!("field `{key}` must be an unsigned integer"))
+}
+
+fn object_bool(object: &serde_json::Map<String, Value>, key: &str) -> Result<bool, String> {
+    object
+        .get(key)
+        .ok_or_else(|| format!("missing required field `{key}`"))?
+        .as_bool()
+        .ok_or_else(|| format!("field `{key}` must be a boolean"))
+}
+
+fn object_array(object: &serde_json::Map<String, Value>, key: &str) -> Result<Vec<Value>, String> {
+    object
+        .get(key)
+        .ok_or_else(|| format!("missing required field `{key}`"))?
+        .as_array()
+        .cloned()
+        .ok_or_else(|| format!("field `{key}` must be an array"))
 }
 
 fn push_if_false(reasons: &mut Vec<String>, value: bool, reason: &str) {
@@ -618,8 +891,91 @@ async fn authorize_handler(
     Ok((decision_status(&outcome.decision), Json(outcome.decision)))
 }
 
-async fn mode_state_handler(State(state): State<LocalApiState>) -> Json<ModeState> {
-    Json(state.mode_state().clone())
+async fn mode_state_handler(
+    State(state): State<LocalApiState>,
+) -> Result<Json<ModeState>, (StatusCode, String)> {
+    Ok(Json(
+        state
+            .mode_state()
+            .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err))?,
+    ))
+}
+
+async fn burn_handler(
+    State(state): State<LocalApiState>,
+    payload: Result<Json<ModeCommand>, JsonRejection>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let Json(command) = payload.map_err(|err| (StatusCode::BAD_REQUEST, err.body_text()))?;
+    let mode_state = state
+        .burn(command)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err))?;
+
+    Ok((StatusCode::ACCEPTED, Json(mode_state)))
+}
+
+async fn restore_handler(
+    State(state): State<LocalApiState>,
+    payload: Result<Json<ModeCommand>, JsonRejection>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let Json(command) = payload.map_err(|err| (StatusCode::BAD_REQUEST, err.body_text()))?;
+    let mode_state = state
+        .restore(command)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err))?;
+
+    Ok((StatusCode::ACCEPTED, Json(mode_state)))
+}
+
+fn validate_mode_command(command: &ModeCommand, expected_operation: &str) -> Result<(), String> {
+    if command.version != "0.2" {
+        return Err(format!(
+            "mode command version must be `0.2`, got `{}`",
+            command.version
+        ));
+    }
+    if command.operation != expected_operation {
+        return Err(format!(
+            "mode command operation `{}` does not match endpoint `{expected_operation}`",
+            command.operation
+        ));
+    }
+    if command.approval_mode != "dual" {
+        return Err(format!(
+            "mode command approval_mode must be `dual`, got `{}`",
+            command.approval_mode
+        ));
+    }
+    if command.approval_evidence.approvers.len() < command.approval_evidence.quorum as usize {
+        return Err(format!(
+            "mode command quorum {} exceeds provided approvers {}",
+            command.approval_evidence.quorum,
+            command.approval_evidence.approvers.len()
+        ));
+    }
+    Ok(())
+}
+
+fn command_updated_at(command: &ModeCommand) -> Result<String, String> {
+    command
+        .approval_evidence
+        .approvers
+        .iter()
+        .map(|approver| approver.approved_at.as_str())
+        .max()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "mode command must include at least one approver".to_string())
+}
+
+fn forced_burn_decision(policy_input: &PolicyInput, reason_code: &str) -> Result<Decision, String> {
+    Ok(Decision {
+        effect: "burn".to_string(),
+        allow: false,
+        burn: true,
+        trace: Some(policy_input.witness.trace()?),
+        jti: Some(policy_input.witness.jti()?),
+        deny_reasons: Vec::new(),
+        burn_reasons: vec![reason_code.to_ascii_uppercase()],
+        effective_authority: Some(effective_authority_from_policy_input(policy_input)?),
+    })
 }
 
 pub fn canonical_json_bytes<T>(value: &T) -> Result<Vec<u8>, String>
@@ -721,6 +1077,14 @@ mod tests {
     const GENERATED_AUDIT_RECORD: &str = include_str!(
         "../../../design/adjuncts/bridge-adapter/examples/generated.audit-record.json"
     );
+    const DECISION_ACCEPT: &str = include_str!(
+        "../../../design/adjuncts/bridge-adapter/examples/example.decision.accept.json"
+    );
+    const DECISION_BURN: &str =
+        include_str!("../../../design/adjuncts/bridge-adapter/examples/example.decision.burn.json");
+    const MODE_COMMAND_BURN: &str = include_str!(
+        "../../../design/adjuncts/bridge-adapter/examples/example.mode-command.burn.json"
+    );
     const POLICY_INPUT_BURN: &str = include_str!(
         "../../../design/adjuncts/bridge-adapter/examples/example.policy-input.burn.json"
     );
@@ -777,57 +1141,13 @@ mod tests {
             request,
             &provider_results,
             &mode_state,
+            None,
             "time-authority://core/ntp-primary",
         )
         .unwrap();
 
         let actual = serde_json::to_value(outcome.decision).unwrap();
-        let expected = serde_json::json!({
-            "effect": "accept",
-            "allow": true,
-            "burn": false,
-            "trace": "ca14e9e0-1c8c-40bd-bc53-5d01e4876de8",
-            "jti": "464e6650-b1b0-41f9-89da-47b9b43e8c2b",
-            "deny_reasons": [],
-            "burn_reasons": [],
-            "effective_authority": {
-                "tool": "db.query.readonly",
-                "resource": "postgres://analytics/reporting",
-                "conf_label": {
-                    "level": "restricted",
-                    "compartments": ["finance"],
-                    "tags": ["reporting"],
-                    "marking": "internal-need-to-know"
-                },
-                "integ_label": {
-                    "level": "attested",
-                    "tags": ["signed", "measured-boot"]
-                },
-                "ttl_s": 120,
-                "egress_policy": {
-                    "mode": "allowlist",
-                    "destinations": ["postgres://analytics/reporting"]
-                },
-                "output_policy": {
-                    "redaction_profile": "finance-summary-v1",
-                    "max_response_bytes": 65536,
-                    "allow_secrets_in_output": false,
-                    "return_to_model": true,
-                    "strip_html": true,
-                    "classify_output": true
-                },
-                "approval_mode": "none",
-                "constraints": {
-                    "verb_class": "read",
-                    "single_use": true,
-                    "rows_max": 5000,
-                    "max_bytes": 1048576,
-                    "rate_per_min": 10,
-                    "human_review_required": false,
-                    "max_secret_materializations": 1
-                }
-            }
-        });
+        let expected: Value = serde_json::from_str(DECISION_ACCEPT).unwrap();
 
         assert_eq!(actual, expected);
     }
@@ -842,14 +1162,15 @@ mod tests {
             request,
             &provider_results,
             &mode_state,
+            None,
             "time-authority://core/ntp-primary",
         )
         .unwrap();
 
-        assert_eq!(outcome.decision.effect, "burn");
-        assert!(outcome.decision.burn);
-        assert_eq!(outcome.decision.burn_reasons, vec!["audit_tamper_detected"]);
-        assert_eq!(outcome.decision.effective_authority, None);
+        let actual = serde_json::to_value(outcome.decision).unwrap();
+        let expected: Value = serde_json::from_str(DECISION_BURN).unwrap();
+
+        assert_eq!(actual, expected);
     }
 
     #[tokio::test]
@@ -861,11 +1182,11 @@ mod tests {
         let provider_results: ProviderResults =
             serde_json::from_str(PROVIDER_RESULTS_ACCEPT).unwrap();
         let mode_state: ModeState = serde_json::from_str(MODE_STATE).unwrap();
-        let state = LocalApiState {
+        let state = LocalApiState::new(
             provider_results,
             mode_state,
-            authoritative_time_source: "time-authority://core/ntp-primary".to_string(),
-        };
+            "time-authority://core/ntp-primary".to_string(),
+        );
         let app = build_router(state);
 
         let response = app
@@ -898,11 +1219,11 @@ mod tests {
             serde_json::from_str(PROVIDER_RESULTS_ACCEPT).unwrap();
         let mode_state: ModeState = serde_json::from_str(MODE_STATE).unwrap();
         let expected = serde_json::to_value(&mode_state).unwrap();
-        let state = LocalApiState {
+        let state = LocalApiState::new(
             provider_results,
             mode_state,
-            authoritative_time_source: "time-authority://core/ntp-primary".to_string(),
-        };
+            "time-authority://core/ntp-primary".to_string(),
+        );
         let app = build_router(state);
 
         let response = app
@@ -931,11 +1252,11 @@ mod tests {
         let provider_results: ProviderResults =
             serde_json::from_str(PROVIDER_RESULTS_BURN).unwrap();
         let mode_state: ModeState = serde_json::from_str(MODE_STATE).unwrap();
-        let state = LocalApiState {
+        let state = LocalApiState::new(
             provider_results,
             mode_state,
-            authoritative_time_source: "time-authority://core/ntp-primary".to_string(),
-        };
+            "time-authority://core/ntp-primary".to_string(),
+        );
         let app = build_router(state);
 
         let response = app
@@ -951,5 +1272,164 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn burn_command_updates_mode_state() {
+        let provider_results: ProviderResults =
+            serde_json::from_str(PROVIDER_RESULTS_ACCEPT).unwrap();
+        let mode_state: ModeState = serde_json::from_str(MODE_STATE).unwrap();
+        let command: ModeCommand = serde_json::from_str(MODE_COMMAND_BURN).unwrap();
+        let state = LocalApiState::new(
+            provider_results,
+            mode_state,
+            "time-authority://core/ntp-primary".to_string(),
+        );
+
+        let updated = state.burn(command).unwrap();
+
+        assert_eq!(updated.current_mode, "safe");
+        assert_eq!(
+            updated.last_command_id.as_deref(),
+            Some("cmd-burn-2026-04-11-0001")
+        );
+        assert_eq!(
+            updated.cut_set,
+            vec![
+                "domain:acme.prod.analytics".to_string(),
+                "issuer:bridge-issuer-2026-q2".to_string()
+            ]
+        );
+        assert_eq!(updated.updated_at, "2026-04-11T14:01:10Z");
+    }
+
+    #[tokio::test]
+    async fn router_burn_then_restore_updates_mode_and_authorize_behavior() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use tower::util::ServiceExt as _;
+
+        let provider_results: ProviderResults =
+            serde_json::from_str(PROVIDER_RESULTS_ACCEPT).unwrap();
+        let mode_state: ModeState = serde_json::from_str(MODE_STATE).unwrap();
+        let burn_command: ModeCommand = serde_json::from_str(MODE_COMMAND_BURN).unwrap();
+        let restore_command = ModeCommand {
+            operation: "restore".to_string(),
+            command_id: "cmd-restore-2026-04-12-0001".to_string(),
+            trace: "trace-restore-2026-04-12-0001".to_string(),
+            requested_by: "user:security-operator@example.com".to_string(),
+            reason_code: "RESTORE_AUTHORIZED".to_string(),
+            cut_set: Vec::new(),
+            approval_mode: "dual".to_string(),
+            approval_evidence: burn_command.approval_evidence.clone(),
+            ticket: Some("INC-2026-0411-17".to_string()),
+            version: "0.2".to_string(),
+        };
+        let state = LocalApiState::new(
+            provider_results,
+            mode_state,
+            "time-authority://core/ntp-primary".to_string(),
+        );
+        let app = build_router(state);
+
+        let burn_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/burn")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&burn_command).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(burn_response.status(), StatusCode::ACCEPTED);
+
+        let authorize_after_burn = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/authorize")
+                    .header("content-type", "application/json")
+                    .body(Body::from(AUTHORIZE_REQUEST_ACCEPT))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authorize_after_burn.status(), StatusCode::CONFLICT);
+        let authorize_after_burn_body = to_bytes(authorize_after_burn.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let authorize_after_burn_json: Value =
+            serde_json::from_slice(&authorize_after_burn_body).unwrap();
+        assert_eq!(
+            authorize_after_burn_json["burn_reasons"],
+            serde_json::json!(["AUDIT_TAMPER_DETECTED"])
+        );
+
+        let mode_after_burn = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/state/mode")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mode_after_burn_body = to_bytes(mode_after_burn.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let mode_after_burn_json: Value = serde_json::from_slice(&mode_after_burn_body).unwrap();
+        assert_eq!(mode_after_burn_json["current_mode"], "safe");
+
+        let restore_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/restore")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&restore_command).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restore_response.status(), StatusCode::ACCEPTED);
+
+        let mode_after_restore = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/state/mode")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mode_after_restore_body = to_bytes(mode_after_restore.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let mode_after_restore_json: Value =
+            serde_json::from_slice(&mode_after_restore_body).unwrap();
+        assert_eq!(mode_after_restore_json["current_mode"], "normal");
+        assert_eq!(mode_after_restore_json["cut_set"], serde_json::json!([]));
+
+        let authorize_after_restore = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/authorize")
+                    .header("content-type", "application/json")
+                    .body(Body::from(AUTHORIZE_REQUEST_ACCEPT))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authorize_after_restore.status(), StatusCode::OK);
     }
 }
