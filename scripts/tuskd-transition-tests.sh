@@ -881,6 +881,8 @@ test_dispatch_lane() {
   local launch_status=0
   local plan_json=""
   local plan_status=0
+  local handoff_dispatch_json=""
+  local handoff_dispatch_status=0
   local dispatch_json=""
   local dispatch_status=0
   local board_json=""
@@ -911,6 +913,15 @@ test_dispatch_lane() {
   assert_json_value "${plan_json}" '.mode' "handoff" "dispatch-lane plan mode"
   assert_json_value "${plan_json}" '.policy_class' "tusk.low-risk.v1" "dispatch-lane plan policy"
 
+  run_cli_json handoff_dispatch_json handoff_dispatch_status \
+    env TUSKD_CODEX_LAUNCHER="${stub_path}" \
+      tuskd dispatch-lane --repo "${repo_root}" --issue-id "${issue_id}" --note "dispatch handoff probe"
+  assert_status "${handoff_dispatch_status}" "0" "dispatch-lane handoff"
+  assert_json_value "${handoff_dispatch_json}" '.status' "handoff" "dispatch-lane handoff status"
+  assert_json_value "${handoff_dispatch_json}" '.worker' "codex" "dispatch-lane handoff worker"
+  assert_json_value "${handoff_dispatch_json}" '.mode' "handoff" "dispatch-lane handoff mode"
+  assert_json_value "${handoff_dispatch_json}" '.dispatch.status' "handoff" "dispatch-lane handoff dispatch status"
+
   run_cli_json dispatch_json dispatch_status \
     env TUSKD_CODEX_LAUNCHER="${stub_path}" \
       tuskd dispatch-lane --repo "${repo_root}" --issue-id "${issue_id}" --mode exec --note "dispatch probe"
@@ -929,7 +940,7 @@ test_dispatch_lane() {
   assert_file_present "${output_path}" "dispatch-lane output file"
   assert_file_present "${output_path}.prompt" "dispatch-lane stub prompt capture"
   grep -F "${issue_id}" "${prompt_path}" >/dev/null 2>&1 || fail "dispatch prompt missing issue id"
-  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.dispatch")" = "1" ] || fail "lane.dispatch receipt count mismatch for ${issue_id}"
+  [ "$(receipt_count "${repo_root}" "${issue_id}" "lane.dispatch")" = "2" ] || fail "lane.dispatch receipt count mismatch for ${issue_id}"
 
   board_json="$(tuskd board-status --repo "${repo_root}")"
   assert_json_jq "${board_json}" "board did not show dispatched lane" --arg issue_id "${issue_id}" '

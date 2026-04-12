@@ -5333,7 +5333,7 @@ dispatch_lane_action() {
   local output_path=""
   local launcher=""
   local brief_json="null"
-  local dispatch_status="handed_off"
+  local dispatch_status="handoff"
   local dispatch_requested_at=""
   local previous_lane_json="null"
   local updated_lane_json="null"
@@ -6018,7 +6018,7 @@ complete_lane_action() {
         return 0
       fi
       ;;
-    handed_off|finished)
+    handoff|finished)
       if [ -z "${resolved_revision}" ]; then
         jq -cn \
           --arg issue_id "${issue_id}" \
@@ -6031,7 +6031,7 @@ complete_lane_action() {
       jq -cn \
         --arg issue_id "${issue_id}" \
         --arg status "${lane_status}" \
-        '{ok:false, issue_id:$issue_id, status:$status, error:{message:"complete_lane requires a launched, handed_off, or finished lane"}}'
+        '{ok:false, issue_id:$issue_id, status:$status, error:{message:"complete_lane requires a launched, handoff, or finished lane"}}'
       return 0
       ;;
   esac
@@ -6076,7 +6076,7 @@ complete_lane_action() {
             (if $from_status == "launched" then [
               ("tuskd handoff-lane --repo " + $repo_root + " --issue-id " + $issue_id + " --revision " + $revision),
               ("tuskd finish-lane --repo " + $repo_root + " --issue-id " + $issue_id + " --outcome " + $outcome)
-            ] elif $from_status == "handed_off" then [
+            ] elif $from_status == "handoff" then [
               ("tuskd finish-lane --repo " + $repo_root + " --issue-id " + $issue_id + " --outcome " + $outcome)
             ] else [] end)
             + [
@@ -6112,7 +6112,7 @@ complete_lane_action() {
         return 0
       fi
       ;;
-    handed_off)
+    handoff)
       finish_result="$(run_transition_action "${repo_root}" "${socket_path}" "finish_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg outcome "${outcome}" --arg note "${note}" '{issue_id:$issue_id, outcome:$outcome, note:$note}')")"
       if ! jq -e '.ok == true' >/dev/null <<<"${finish_result}"; then
         jq -cn \
@@ -6331,7 +6331,7 @@ compact_lane_action() {
         return 0
       fi
       ;;
-    handed_off)
+    handoff)
       finish_result="$(run_transition_action "${repo_root}" "${socket_path}" "finish_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg outcome "${outcome}" --arg note "${note}" '{issue_id:$issue_id, outcome:$outcome, note:$note}')")"
       if ! jq -e '.ok == true' >/dev/null <<<"${finish_result}"; then
         jq -cn \
@@ -6348,7 +6348,7 @@ compact_lane_action() {
       jq -cn \
         --arg issue_id "${issue_id}" \
         --arg status "${lane_status}" \
-        '{ok:false, issue_id:$issue_id, status:$status, error:{message:"compact_lane requires a launched, handed_off, or finished lane"}}'
+        '{ok:false, issue_id:$issue_id, status:$status, error:{message:"compact_lane requires a launched, handoff, or finished lane"}}'
       return 0
       ;;
   esac
