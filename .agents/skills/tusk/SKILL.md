@@ -37,6 +37,7 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
    - Prefer `$repo_root/.jj-workspaces/<issue-id>-<slug>`.
    - Prefer semantic workspace names that keep the issue id visible, such as `config-kwj-scaffold`.
    - If one issue needs parallel sublanes, add a stable suffix before the semantic slug, such as `config-kwj.1-sections`.
+   - Before creating a new workspace for an issue, scan both `jj workspace list` and `ls .jj-workspaces/` for existing paths containing the issue id. Auto-slug variants (`<id>-<title-words>`) and semantic slugs (`<id>-<semantic>`) are separate paths, and `tuskd` may auto-forget a workspace whose directory is still on disk. If one exists, inspect it before deciding to adopt, supersede, or supersede-and-capture its work.
    - Reuse an existing workspace only if it is already dedicated to the same issue.
    - Use a sibling checkout such as `../repo-config-kwj` only when the repo already uses that convention or the user asked for it.
    - Prefer an explicit base revision such as `main` instead of inheriting from the current workspace implicitly.
@@ -158,6 +159,7 @@ fi
 
 - Keep `bd` scoped to the canonical tracker root, even when the active shell is inside a workspace.
 - Preflight `bd` before asking `codex exec` to depend on tracker writes, and preflight again before final close/update steps.
+- Record epic-shared shape decisions on the tracker (`bd comment` or `bd update --append-notes`) when the shape first locks, not only at lane close. Local bookmarks and workspace dirs are private; the tracker is the shared surface. See `references/coordinator-mode.md` → *Cross-Lane Visibility*.
 - If the repo requires `devenv up` or another long-lived supervisor, start it once in the coordinator shell and keep it outside worker ownership.
 - Treat tracker ownership as explicit shared infrastructure. Do not surprise workers with first-time `bd` or Dolt setup.
 - Prefer repo-local workflow wrappers such as `bd-lane` and `bd-new-issue` when they exist, and fall back to raw `bd` and `jj` only when necessary.

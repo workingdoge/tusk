@@ -45,6 +45,7 @@
       tuskFlakeModule = import ./flake-module.nix { inherit tuskLib; };
       devenvCodexModule = import ./devenv-codex-module.nix { inherit tuskLib; };
       devenvScratchModule = import ./devenv-scratch-module.nix;
+      devenvCacheModule = import ./devenv-cache-module.nix { inherit tuskLib; };
       skillSources = {
         tusk = ./.agents/skills/tusk;
         ops = ./.agents/skills/ops;
@@ -1102,6 +1103,118 @@
           traceRealization = repoSelfHostTusk.realizations."self.trace-core-health.local";
         }
       );
+      cacheConsumeModuleSmokeCheck =
+        let
+          systemEvalCfg = pkgs.lib.evalModules {
+            modules = [
+              ./modules/cache.nix
+              (
+                { lib, ... }:
+                {
+                  options.nix.settings = {
+                    substituters = lib.mkOption {
+                      type = lib.types.listOf lib.types.str;
+                      default = [ ];
+                    };
+                    trusted-public-keys = lib.mkOption {
+                      type = lib.types.listOf lib.types.str;
+                      default = [ ];
+                    };
+                  };
+                }
+              )
+              {
+                tusk.drivers.attic.cache = {
+                  enable = true;
+                  internal = {
+                    enable = true;
+                    bucket = "nix-cache-internal-prod";
+                    region = "us-east";
+                    endpoint = "https://abc123.s3.latitude.sh";
+                    publicKey = "cache-internal-prod:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+                  };
+                  public = {
+                    enable = true;
+                    url = "https://cache.example.com";
+                    publicKey = "cache-public-prod:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=";
+                  };
+                };
+              }
+            ];
+          };
+          systemCfg = systemEvalCfg.config;
+
+          shellEvalCfg = pkgs.lib.evalModules {
+            modules = [
+              devenvCacheModule
+              (
+                { lib, ... }:
+                {
+                  options.enterShell = lib.mkOption {
+                    type = lib.types.lines;
+                    default = "";
+                  };
+                }
+              )
+              {
+                tusk.drivers.attic.cache.consumerShell = {
+                  enable = true;
+                  url = "https://cache.example.com";
+                  publicKeys = [ "cache-public-prod:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=" ];
+                };
+              }
+            ];
+          };
+          shellCfg = shellEvalCfg.config;
+
+          expectedInternalStoreUrl = "s3://nix-cache-internal-prod?endpoint=abc123.s3.latitude.sh&region=us-east&scheme=https";
+          assertContains =
+            label: expected: actual:
+            if builtins.elem expected actual then
+              true
+            else
+              throw "tusk.drivers.attic.cache smoke: ${label} missing ${expected}; got ${builtins.toJSON actual}";
+          assertHasInfix =
+            label: expected: haystack:
+            if pkgs.lib.hasInfix expected haystack then
+              true
+            else
+              throw "tusk.drivers.attic.cache smoke: ${label} missing infix ${expected}; got ${haystack}";
+          checks = [
+            (assertContains "system internal.storeUrl" expectedInternalStoreUrl [ systemCfg.tusk.drivers.attic.cache.internal.storeUrl ])
+            (assertContains "system substituters (internal)" expectedInternalStoreUrl systemCfg.nix.settings.substituters)
+            (assertContains "system substituters (public)" "https://cache.example.com" systemCfg.nix.settings.substituters)
+            (assertContains "system trusted-public-keys (internal)"
+              "cache-internal-prod:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+              systemCfg.nix.settings.trusted-public-keys
+            )
+            (assertContains "system trusted-public-keys (public)"
+              "cache-public-prod:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+              systemCfg.nix.settings.trusted-public-keys
+            )
+            (assertHasInfix "shell enterShell substituter"
+              "extra-substituters = https://cache.example.com"
+              shellCfg.enterShell
+            )
+            (assertHasInfix "shell enterShell public key"
+              "extra-trusted-public-keys = cache-public-prod:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+              shellCfg.enterShell
+            )
+          ];
+        in
+        assert builtins.all (x: x) checks;
+        pkgs.writeText "tusk-cache-consume-module-smoke.json" (
+          builtins.toJSON {
+            system = {
+              internalStoreUrl = systemCfg.tusk.drivers.attic.cache.internal.storeUrl;
+              substituters = systemCfg.nix.settings.substituters;
+              trustedPublicKeys = systemCfg.nix.settings.trusted-public-keys;
+            };
+            shell = {
+              enterShell = shellCfg.enterShell;
+            };
+          }
+        );
     in
     {
       tusk = repoSelfHostTusk;
@@ -1116,6 +1229,7 @@
       devenvModules = {
         codex = devenvCodexModule;
         scratch = devenvScratchModule;
+        cache = devenvCacheModule;
         consumer = consumerCodexModule;
         default = consumerCodexModule;
         dogfood = dogfoodModule;
@@ -1128,11 +1242,16 @@
       };
       flakeModules.tusk = tuskFlakeModule;
       flakeModules.default = tuskFlakeModule;
+      nixosModules.cache = ./modules/cache.nix;
+      nixosModules.default = ./modules/cache.nix;
+      darwinModules.cache = ./modules/cache.nix;
+      darwinModules.default = ./modules/cache.nix;
       checks.${system} = {
         radicle-flake-wasm-plugin = radicleFlakeWasmPluginPackage;
         radicle-flake-wasm-resolver-wasi = radicleFlakeWasmResolverWasiCheck;
         tusk-self-host-witnesses = repoSelfHostWitnessCheck;
         tusk-self-host-trace = repoSelfHostTraceCheck;
+        tusk-cache-consume-module-smoke = cacheConsumeModuleSmokeCheck;
       };
       packages.${system} = {
         rust-toolchain = rustToolchain;

@@ -491,6 +491,19 @@ let
           && missingDriverRefs == [ ];
       };
     };
+  atticCacheConsumeConfig =
+    {
+      url,
+      publicKeys ? [ ],
+    }:
+    {
+      substituter = url;
+      trustedPublicKeys = publicKeys;
+      nixConfigFragment = ''
+        extra-substituters = ${url}
+        extra-trusted-public-keys = ${concatStringsSep " " publicKeys}
+      '';
+    };
 in
 {
   inherit
@@ -511,5 +524,6 @@ in
     validateSkillSource
     validateOpenAISkillSource
     validateCodexSkillSource
+    atticCacheConsumeConfig
     ;
 }

@@ -45,6 +45,21 @@ Coordinator update rules:
 
 Before launching a lane, prefer ready issues with clear verification and landing boundaries. If the repo ships workflow wrappers such as `bd-lane` or `bd-new-issue`, use those first instead of rebuilding repo-local setup by hand. If an issue is broad or underspecified, shape or split it first rather than passing ambiguity into the worker.
 
+## Cross-Lane Visibility
+
+Parallel agents cannot see your decisions unless you record them. Workspace directories, local bookmarks, and commit messages are private until another agent goes looking. The tracker is the shared surface.
+
+When a lane locks a shape that sibling-epic lanes will consume — a namespace, an API surface, an exported bookmark, a design-note structure — post a `bd comment` or `bd update --append-notes` on the issue with the pointer. Include: the exact namespace or path, the bookmark ref if one exists, a pointer to the commit (change-id), and any follow-ups the choice implies. Do this when the shape first locks, not only at lane close.
+
+Treat these as signals of concurrent activity and re-preflight if you see them:
+
+- `main` advanced between your lane preflight and close.
+- `jj workspace list` has grown or shrunk since you started.
+- A sibling issue in the same epic has a recent `bd` mutation you did not author.
+- Another workspace directory exists for your issue id. Check both `jj workspace list` and `ls .jj-workspaces/` directly — auto-slug variants (`<id>-<title-words>`) and semantic slugs (`<id>-<semantic>`) are separate paths, and `tuskd` may have auto-forgotten a workspace whose directory is still on disk.
+
+Before `bd close`, `jj bookmark create` for publish, or advancing `main`: re-run the readiness probe, re-list workspaces, and re-check sibling-issue mutations. Main drift between preflight and finish is not noise — it means siblings are landing.
+
 ## Worker Brief Contract
 
 Use this structure for any non-trivial `codex exec` worker.
