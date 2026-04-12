@@ -16,6 +16,17 @@ The adapter does three jobs:
 
 The caller never supplies `preflight` booleans directly.
 
+## Placement and ownership
+
+- This bundle is a repo-owned adjunct contract surface in `tusk`, not Tusk
+  kernel law.
+- The companion ownership note is `../../notes/tusk-bridge-topology.md`.
+- The first Tusk-owned runtime surface over this contract lives in
+  `crates/tusk-bridge-adapter/`.
+- Public doctrine belongs in `fish`, reusable carriage belongs in `kurma`, and
+  live provider/policy/secrets proof belongs in a downstream repo unless the
+  boundary later proves to be shared operational infrastructure.
+
 ## Files
 
 - `adapter-contract.md` — normative contract and assembly rules

@@ -18,6 +18,7 @@ surface. They are informative or design-shaping, not the normative kernel.
 ## Repo-Scoped Adapters And Runtime Notes
 
 - `tusk-backend-service-carrier.md`
+- `tusk-bridge-topology.md`
 - `tusk-governed-transition-adapters.md`
 - `tusk-local-trace-executor.md`
 - `tusk-self-host-automation.md`

@@ -97,6 +97,7 @@ nix run .#tusk-ui -- --help
 - `lib.nix` contains the generic `tusk` normalization and validation logic.
 - `flake-module.nix` contains the reusable Nix module surface for `tusk`.
 - `design/adjuncts/` contains repo-owned adjunct spec families that may define external domain contracts without becoming Tusk kernel law.
+- `design/adjuncts/bridge-adapter/` contains the imported bridge adjunct contract surface that `tusk` stages and implements against without promoting it into kernel law.
 - `design/specs/` contains the normative kernel spec series for repo-local workflow law.
 - `design/notes/` contains repo-scoped explanatory and adapter notes that inform `tusk` without redefining the kernel.
 - `design/migration-candidates/` contains explicitly staged notes that remain visible here temporarily but are expected to move to a more appropriate context later; do not treat them as kernel authority.
@@ -125,6 +126,7 @@ nix run .#tusk-ui -- --help
 - Keep `tusk` core generic. Consumer-specific runtime bindings and tracker wrappers belong in the consuming repo until they clearly generalize.
 - Keep `tusk` as an external operational adapter. `fish` owns normative meaning, `kurma` owns carrier/runtime/compiler surfaces, and `tusk` owns orchestration around realized artifacts.
 - When placing new work, ask: does it define meaning, carry meaning, or operate around meaning? Only the last class belongs in `tusk`.
+- Keep the bridge surface in `tusk` scoped to the adjunct contract plus generic adapter/runtime seam. Public doctrine belongs in `fish`, reusable carried method belongs in `kurma`, and provider policy, operator secrets, and first live proof belong downstream unless the boundary later proves to be shared infra.
 - For framework-tracker issues, add one `track:*`, one `place:*`, and one `surface:*` label so board views can project the same issue graph by program track, semantic location, and surface area.
 - Keep consumer-context skills in the consuming repo; do not centralize them in `tusk` unless they are intentionally becoming shared infrastructure.
 - Import `devenvModules.codex` exactly once in a consumer flake, then compose `devenvModules.consumer` or explicit skill modules on top.
