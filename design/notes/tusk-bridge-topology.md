@@ -83,6 +83,9 @@ The Tusk-side conformance boundary is:
 - runtime adapter conformance:
   verify assembly, decision shaping, and local API/admin behavior against the
   adjunct examples and local tests
+- stable operator entrypoint:
+  run `nix run .#tusk-bridge-conformance-check -- --repo <checkout>` to verify
+  the adjunct checksum manifest and the Rust adapter conformance surface
 
 The Tusk-side conformance boundary is not:
 

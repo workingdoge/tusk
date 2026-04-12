@@ -742,6 +742,18 @@
           exec bash ${./scripts/tusk-skill-contract-check.sh} "$@"
         '';
       };
+      tuskBridgeConformanceCheck = pkgs.writeShellApplication {
+        name = "tusk-bridge-conformance-check";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.git
+          rustToolchain
+        ];
+        text = ''
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+          exec bash ${./scripts/tusk-bridge-conformance-check.sh} "$@"
+        '';
+      };
       tuskSkillLoopPackage = pkgs.writeShellApplication {
         name = "tusk-skill-loop";
         runtimeInputs = [
@@ -921,6 +933,7 @@
             echo "  bd ready --json"
             echo "  jj st"
             echo "  tusk-skill-contract-check"
+            echo "  tusk-bridge-conformance-check --help"
             echo "  codex-nix-check"
             echo "  tusk-clean"
             echo "  glistix --help"
@@ -1128,6 +1141,7 @@
         tusk-claude = repoTuskClaude;
         tusk-codex = repoTuskCodex;
         tusk-skill-contract-check = tuskSkillContractCheck;
+        tusk-bridge-conformance-check = tuskBridgeConformanceCheck;
         tusk-skill-loop = tuskSkillLoopPackage;
         radicle-flake-wasm-plugin = radicleFlakeWasmPluginPackage;
         radicle-flake-wasm-resolver = radicleFlakeWasmResolverPackage;
@@ -1173,6 +1187,10 @@
         tusk-skill-contract-check = {
           type = "app";
           program = "${tuskSkillContractCheck}/bin/tusk-skill-contract-check";
+        };
+        tusk-bridge-conformance-check = {
+          type = "app";
+          program = "${tuskBridgeConformanceCheck}/bin/tusk-bridge-conformance-check";
         };
         tusk-skill-loop = {
           type = "app";

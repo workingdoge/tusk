@@ -23,6 +23,8 @@ The caller never supplies `preflight` booleans directly.
 - The companion ownership note is `../../notes/tusk-bridge-topology.md`.
 - The first Tusk-owned runtime surface over this contract lives in
   `crates/tusk-bridge-adapter/`.
+- The stable repo-owned conformance entrypoint for this adjunct surface is
+  `nix run .#tusk-bridge-conformance-check -- --repo <checkout>`.
 - Public doctrine belongs in `fish`, reusable carriage belongs in `kurma`, and
   live provider/policy/secrets proof belongs in a downstream repo unless the
   boundary later proves to be shared operational infrastructure.
