@@ -6,6 +6,7 @@ surface. They are informative or design-shaping, not the normative kernel.
 ## Kernel-Adjacent Explanations
 
 - `tusk-architecture.md`
+- `tusk-context-support-shape.md`
 - `tusk-semantic-spine-map.md`
 - `tusk-workflow-topology.md`
 - `tusk-transition-carrier.md`

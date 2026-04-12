@@ -21,6 +21,10 @@ RFCs. The goal is to freeze the minimum law that the repo already depends on.
    - defines what it means for local work to be discharged
    - defines what the operator surface must expose without becoming authority
 
+5. **`TUSK-0006` — Support and Witness**
+   - names the plan-local support object instead of relying on ambient context
+   - makes epoch-bound witness packaging explicit for later runtime growth
+
 ## Hardening path
 
 The practical hardening path is:

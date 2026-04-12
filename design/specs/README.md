@@ -28,6 +28,7 @@ future kernel edits happen here rather than in out-of-tree spec bundles.
 - `TUSK-0003` — Descent / Closure
 - `TUSK-0004` — Transition Contracts
 - `TUSK-0005` — Projection Surface
+- `TUSK-0006` — Context Support and Witness Bundle
 
 ## How to read the series
 
@@ -39,6 +40,8 @@ Read the series in this order:
 4. **Closure** — how local work stops being merely local (`TUSK-0003`)
 5. **Contracts** — what each concrete transition promises (`TUSK-0004`)
 6. **Projection** — what the operator surface must expose (`TUSK-0005`)
+7. **Support** — how plan-local contexts, concern sections, and epoch binding
+   shape witnesses (`TUSK-0006`)
 
 `TUSK-0004` is the binding engineering surface.
 
@@ -84,6 +87,7 @@ proposal, witness record, admission, application, receipt, projection.
 - `design/notes/tusk-transition-carrier.md`
 - `design/notes/tusk-workflow-topology.md`
 - `design/notes/tusk-operator-snapshot.md`
+- `design/notes/tusk-context-support-shape.md`
 - `design/notes/tusk-semantic-spine-map.md`
 - `design/migration-candidates/tusk-upstream-kernel-recast.md`
 
