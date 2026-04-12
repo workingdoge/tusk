@@ -3394,6 +3394,13 @@ impl TransitionEnvelope {
                     "payload": payload,
                 },
                 "admission": Value::Null,
+                "kernel": {
+                    "support": Value::Null,
+                    "concern_sections": [],
+                    "witness_bundle": Value::Null,
+                    "epoch_binding": Value::Null,
+                    "apply_token": Value::Null,
+                },
                 "realization": Value::Null,
                 "receipts": {
                     "prior": [],
@@ -3518,6 +3525,44 @@ impl TransitionEnvelope {
         );
     }
 
+    fn set_kernel_field(&mut self, field: &str, value: Value) {
+        if let Some(kernel) = self
+            .carrier
+            .get_mut("kernel")
+            .and_then(Value::as_object_mut)
+        {
+            kernel.insert(field.to_string(), value);
+        }
+    }
+
+    fn set_support(&mut self, value: Value) {
+        self.set_kernel_field("support", value);
+    }
+
+    fn set_concern_sections(&mut self, value: Value) {
+        self.set_kernel_field("concern_sections", value);
+    }
+
+    fn set_witness_bundle(&mut self, value: Value) {
+        self.set_kernel_field("witness_bundle", value);
+    }
+
+    fn set_epoch_binding(&mut self, value: Value) {
+        self.set_kernel_field("epoch_binding", value);
+    }
+
+    fn set_apply_token(&mut self, value: Value) {
+        self.set_kernel_field("apply_token", value);
+    }
+
+    fn kernel_field(&self, field: &str) -> Value {
+        self.carrier
+            .get("kernel")
+            .and_then(|kernel| kernel.get(field))
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+
     fn admitted(&self) -> bool {
         self.carrier
             .get("admission")
@@ -3587,6 +3632,176 @@ fn payload_string(payload: &Value, field: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string()
+}
+
+fn object_id(value: &Value) -> String {
+    value
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn admitted_witness_basis(envelope: &TransitionEnvelope) -> Vec<String> {
+    envelope
+        .get("witnesses")
+        .and_then(Value::as_array)
+        .map(|witnesses| {
+            witnesses
+                .iter()
+                .filter(|witness| witness.get("ok").and_then(Value::as_bool) == Some(true))
+                .filter_map(|witness| witness.get("kind").and_then(Value::as_str))
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn ensure_proposal_ref(envelope: &TransitionEnvelope) -> String {
+    format!("proposal:tracker.ensure:{}", envelope.request_id())
+}
+
+fn populate_ensure_kernel_carrier(
+    envelope: &mut TransitionEnvelope,
+    repo_root: &Path,
+    socket_path: &Path,
+) {
+    let proposal_ref = ensure_proposal_ref(envelope);
+    let observed_at = envelope
+        .get("generated_at")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let support_id = format!("{proposal_ref}:support");
+    let service_vertex_id = format!("{support_id}:vertex:service-runtime");
+    let receipt_vertex_id = format!("{support_id}:vertex:receipt-sink");
+    let simplex_id = format!("{support_id}:simplex:service-receipt");
+    let epoch_id = format!("{proposal_ref}:epoch");
+    let authority_section_id = format!("{proposal_ref}:section:authority");
+    let audit_section_id = format!("{proposal_ref}:section:audit");
+    let witness_id = format!("{proposal_ref}:witness");
+
+    let support = json!({
+        "id": support_id,
+        "proposal_ref": proposal_ref,
+        "mode": "degenerate-first-kernel",
+        "vertices": [
+            {
+                "object": "ContextVertex",
+                "id": service_vertex_id,
+                "kind": "service.runtime",
+                "proposal_ref": proposal_ref,
+                "authority_surface": "tuskd.ensure",
+                "trust_class": "repo-local",
+                "facts_ref": "carrier.tracker.preflight",
+            },
+            {
+                "object": "ContextVertex",
+                "id": receipt_vertex_id,
+                "kind": "audit.sink",
+                "proposal_ref": proposal_ref,
+                "authority_surface": "tuskd.receipts",
+                "trust_class": "repo-local",
+                "facts_ref": format!("file:{}", receipts_path(repo_root).to_string_lossy()),
+            },
+        ],
+        "simplices": [
+            {
+                "object": "SupportSimplex",
+                "id": simplex_id,
+                "proposal_ref": proposal_ref,
+                "vertex_ids": [service_vertex_id, receipt_vertex_id],
+                "overlap_kind": "service-realization.audit-boundary",
+                "restriction_refs": [
+                    "tracker.ensure",
+                    format!("socket:{}", socket_path.to_string_lossy()),
+                ],
+            },
+        ],
+    });
+
+    let epoch_binding = json!({
+        "object": "EpochBinding",
+        "id": epoch_id,
+        "observed_at": observed_at,
+        "fresh_until": observed_at,
+        "revocation_refs": [],
+        "approval_window": Value::Null,
+        "lease_window": Value::Null,
+    });
+
+    let concern_sections = json!([
+        {
+            "object": "ConcernSection",
+            "id": authority_section_id,
+            "concern_kind": "authority",
+            "carrier_ref": service_vertex_id,
+            "facts_ref": "carrier.witnesses[backend_observed,tracker_checks_observed,service_snapshot_observed]",
+            "freshness_ref": epoch_id,
+            "status": "satisfied",
+        },
+        {
+            "object": "ConcernSection",
+            "id": audit_section_id,
+            "concern_kind": "audit",
+            "carrier_ref": simplex_id,
+            "facts_ref": format!("file:{}", receipts_path(repo_root).to_string_lossy()),
+            "freshness_ref": epoch_id,
+            "status": "satisfied",
+        },
+    ]);
+
+    let witness_bundle = json!({
+        "object": "WitnessBundle",
+        "id": witness_id,
+        "proposal_ref": proposal_ref,
+        "support_ref": support.get("id").cloned().unwrap_or(Value::Null),
+        "section_refs": concern_sections
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|section| section.get("id").cloned().unwrap_or(Value::Null))
+            .collect::<Vec<_>>(),
+        "epoch_binding": epoch_binding.get("id").cloned().unwrap_or(Value::Null),
+        "admission_basis": admitted_witness_basis(envelope),
+        "compatibility_result": {
+            "ok": true,
+            "mode": "degenerate-first-kernel",
+            "compatible_section_count": concern_sections.as_array().map(|items| items.len()).unwrap_or(0),
+        },
+    });
+
+    envelope.set_support(support);
+    envelope.set_concern_sections(concern_sections);
+    envelope.set_epoch_binding(epoch_binding);
+    envelope.set_witness_bundle(witness_bundle);
+}
+
+fn build_ensure_apply_token(
+    envelope: &TransitionEnvelope,
+    repo_root: &Path,
+    socket_path: &Path,
+) -> Value {
+    let proposal_ref = ensure_proposal_ref(envelope);
+    let witness_ref = object_id(&envelope.kernel_field("witness_bundle"));
+    let epoch_binding = object_id(&envelope.kernel_field("epoch_binding"));
+
+    json!({
+        "object": "ApplyToken",
+        "id": format!("{proposal_ref}:apply"),
+        "proposal_ref": proposal_ref,
+        "witness_ref": witness_ref,
+        "transition_kind": "tracker.ensure",
+        "executor_ref": "tuskd-core:perform_ensure",
+        "driver_ref": format!("socket:{}", socket_path.to_string_lossy()),
+        "epoch_binding": epoch_binding,
+        "scope": {
+            "repo_root": repo_root.to_string_lossy().into_owned(),
+            "service_record": true,
+            "receipt_family": "tracker.ensure",
+        },
+    })
 }
 
 fn build_create_child_issue_carrier(
@@ -4404,6 +4619,7 @@ fn build_ensure_carrier(
         }),
     );
     carrier.set_admission(true, None, &["runtime"]);
+    populate_ensure_kernel_carrier(&mut carrier, repo_root, socket_path);
     Ok(carrier)
 }
 
@@ -4632,6 +4848,12 @@ fn realize_ensure_transition(
     mut envelope: TransitionEnvelope,
 ) -> Result<Value, String> {
     let ensured = perform_ensure(repo_root, socket_path)?;
+    let apply_token = build_ensure_apply_token(&envelope, repo_root, socket_path);
+    let proposal_ref = ensure_proposal_ref(&envelope);
+    let support_ref = object_id(&envelope.kernel_field("support"));
+    let witness_ref = object_id(&envelope.kernel_field("witness_bundle"));
+    let epoch_binding_ref = object_id(&envelope.kernel_field("epoch_binding"));
+    let apply_token_ref = object_id(&apply_token);
 
     envelope.set_service(json!({
         "socket_path": socket_path.to_string_lossy().into_owned(),
@@ -4639,12 +4861,17 @@ fn realize_ensure_transition(
         "leases": ensured.leases.clone(),
         "backend": ensured.health.get("backend").cloned().unwrap_or(Value::Null),
     }));
+    envelope.set_apply_token(apply_token.clone());
     envelope.set_application(json!({
         "kind": "tracker.ensure",
         "mode": ensured.mode,
         "pid": ensured.pid,
         "health": ensured.health.clone(),
         "service_record": ensured.record.clone(),
+        "proposal_ref": proposal_ref,
+        "witness_ref": witness_ref,
+        "epoch_binding_ref": epoch_binding_ref,
+        "apply_token_ref": apply_token_ref,
     }));
 
     let receipt = append_receipt(
@@ -4653,6 +4880,18 @@ fn realize_ensure_transition(
         json!({
             "service": ensured.record.clone(),
             "health": ensured.health.clone(),
+            "witness": {
+                "proposal_ref": proposal_ref,
+                "support_ref": support_ref,
+                "witness_ref": witness_ref,
+                "epoch_binding_ref": epoch_binding_ref,
+                "apply_token_ref": apply_token_ref,
+                "section_refs": envelope
+                    .kernel_field("witness_bundle")
+                    .get("section_refs")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            },
         }),
     )?;
     envelope.set_emitted_receipt(receipt);
@@ -6328,14 +6567,15 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        current_pid, issue_create_identity_metadata, issue_matches_create_identity,
-        lane_state_upsert, merge_backend_observation, next_child_issue_id, now_iso8601,
-        parse_dolt_sql_server_port, session_observed_status, session_state_upsert,
+        TransitionEnvelope, build_ensure_apply_token, current_pid, issue_create_identity_metadata,
+        issue_matches_create_identity, lane_state_upsert, merge_backend_observation,
+        next_child_issue_id, now_iso8601, object_id, parse_dolt_sql_server_port,
+        populate_ensure_kernel_carrier, session_observed_status, session_state_upsert,
         sessions_status_projection,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn temp_repo_root(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -6588,6 +6828,125 @@ mod tests {
         assert_eq!(
             row.get("status").and_then(|value| value.as_str()),
             Some("running")
+        );
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn ensure_kernel_package_uses_service_and_receipt_contexts() {
+        let repo_root = temp_repo_root("ensure-kernel");
+        let socket_path = repo_root.join(".beads/tuskd/tuskd.sock");
+        fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+
+        let mut envelope = TransitionEnvelope::new(&repo_root, "ensure", json!({}));
+        envelope.set_tracker(json!({
+            "preflight": {
+                "backend": {"running": true},
+                "checks": {"tracker_ready": {"ok": true}},
+            }
+        }));
+        envelope.set_service(json!({
+            "record": {"mode": "idle"},
+            "backend": {"running": true},
+        }));
+        envelope.add_witness(
+            "backend_observed",
+            true,
+            "",
+            json!({"backend": {"running": true}}),
+        );
+        envelope.add_witness(
+            "tracker_checks_observed",
+            true,
+            "",
+            json!({"checks": {"tracker_ready": {"ok": true}}}),
+        );
+        envelope.add_witness(
+            "service_snapshot_observed",
+            true,
+            "",
+            json!({"record": {"mode": "idle"}}),
+        );
+        envelope.set_admission(true, None, &["runtime"]);
+
+        populate_ensure_kernel_carrier(&mut envelope, &repo_root, &socket_path);
+
+        let carrier = envelope.into_json();
+        let support = carrier
+            .get("kernel")
+            .and_then(|kernel| kernel.get("support"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let vertices = support
+            .get("vertices")
+            .and_then(Value::as_array)
+            .map(|items| items.to_vec())
+            .unwrap_or_default();
+        let witness_bundle = carrier
+            .get("kernel")
+            .and_then(|kernel| kernel.get("witness_bundle"))
+            .cloned()
+            .unwrap_or(Value::Null);
+
+        assert_eq!(vertices.len(), 2);
+        assert_eq!(
+            vertices[0].get("kind").and_then(Value::as_str),
+            Some("service.runtime")
+        );
+        assert_eq!(
+            vertices[1].get("kind").and_then(Value::as_str),
+            Some("audit.sink")
+        );
+        assert_eq!(
+            witness_bundle
+                .get("compatibility_result")
+                .and_then(|value| value.get("ok"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            witness_bundle
+                .get("section_refs")
+                .and_then(Value::as_array)
+                .map(|items| items.len()),
+            Some(2)
+        );
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn ensure_apply_token_links_witness_and_epoch_binding() {
+        let repo_root = temp_repo_root("ensure-apply-token");
+        let socket_path = repo_root.join(".beads/tuskd/tuskd.sock");
+        fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+
+        let mut envelope = TransitionEnvelope::new(&repo_root, "ensure", json!({}));
+        envelope.add_witness("backend_observed", true, "", json!({}));
+        envelope.add_witness("tracker_checks_observed", true, "", json!({}));
+        envelope.add_witness("service_snapshot_observed", true, "", json!({}));
+        envelope.set_admission(true, None, &["runtime"]);
+        populate_ensure_kernel_carrier(&mut envelope, &repo_root, &socket_path);
+
+        let apply_token =
+            build_ensure_apply_token(&envelope, &repo_root, Path::new("/tmp/tuskd.sock"));
+        let witness_bundle = envelope.kernel_field("witness_bundle");
+        let epoch_binding = envelope.kernel_field("epoch_binding");
+        let witness_ref = object_id(&witness_bundle);
+        let epoch_binding_ref = object_id(&epoch_binding);
+
+        assert_eq!(
+            apply_token.get("witness_ref").and_then(Value::as_str),
+            Some(witness_ref.as_str())
+        );
+        assert_eq!(
+            apply_token.get("epoch_binding").and_then(Value::as_str),
+            Some(epoch_binding_ref.as_str())
+        );
+        assert_eq!(
+            apply_token.get("transition_kind").and_then(Value::as_str),
+            Some("tracker.ensure")
         );
 
         fs::remove_dir_all(repo_root).unwrap();
