@@ -108,6 +108,7 @@ nix run .#tusk-ui -- --help
 - `scripts/tuskd.sh` contains the local control-plane service skeleton, Unix-socket protocol handler, and repo-scoped Dolt backend registry/coordination logic.
 - `scripts/tuskd-transition-tests.sh` clones an isolated colocated temp repo, replays the current lane diff onto it, and runs automated lifecycle, concurrency, and rollback checks against that repo's own flake-owned `bd`/`tuskd` surface.
 - `.beads/tuskd/lanes.json` holds first-class lane state for the current repo; `board-status` reads lane truth from there, derives stale-vs-live workspace observations, and carries ready, claimed, blocked, and deferred issue buckets alongside lanes.
+- `crates/tusk-bridge-adapter/` contains the first Rust-owned bridge adapter surface over the adjunct bridge contract.
 - `crates/tusk-ui/` contains the Rust `ratatui` control-plane client crate and renders tracker, board, lane, and receipt projections from `tuskd`.
 
 ## Codex Contract

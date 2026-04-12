@@ -688,6 +688,20 @@
           cargoArtifacts = tuskdCoreCargoArtifacts;
         }
       );
+      tuskBridgeAdapterSrc = craneLib.cleanCargoSource ./crates/tusk-bridge-adapter;
+      tuskBridgeAdapterCommonArgs = {
+        src = tuskBridgeAdapterSrc;
+        strictDeps = true;
+        # Fixture-driven tests read adjunct examples outside the cleaned crate source.
+        doCheck = false;
+      };
+      tuskBridgeAdapterCargoArtifacts = craneLib.buildDepsOnly tuskBridgeAdapterCommonArgs;
+      tuskBridgeAdapterPackage = craneLib.buildPackage (
+        tuskBridgeAdapterCommonArgs
+        // {
+          cargoArtifacts = tuskBridgeAdapterCargoArtifacts;
+        }
+      );
       tuskUiPackage = pkgs.writeShellApplication {
         name = "tusk-ui";
         runtimeInputs = [ tuskdPackage ];
@@ -1104,6 +1118,7 @@
         tusk-self-host = tuskSelfHostPackage;
         tusk-trace-executor = tuskTraceExecutorPackage;
         tusk-tracker = tuskTrackerPackage;
+        tusk-bridge-adapter = tuskBridgeAdapterPackage;
         tuskd-core = tuskdCorePackage;
         tuskd-transition-tests = tuskdTransitionTestsPackage;
         tusk-ui = tuskUiPackage;
@@ -1186,6 +1201,10 @@
         tusk-tracker = {
           type = "app";
           program = "${tuskTrackerPackage}/bin/tusk-tracker";
+        };
+        tusk-bridge-adapter = {
+          type = "app";
+          program = "${tuskBridgeAdapterPackage}/bin/tusk-bridge-adapter";
         };
         tusk-ui = {
           type = "app";
