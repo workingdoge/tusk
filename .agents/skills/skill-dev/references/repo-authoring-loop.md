@@ -10,6 +10,9 @@ skill in `tusk`.
   `assets/`.
 - Runtime overlays: optional `agents/openai.yaml` and future vendor/distribution
   metadata.
+- Shared skills here should bind stable `tusk` surfaces. If the semantic source
+  of truth lives in tracked upstream `premath` / `fish` or in `bridge`, point
+  at that owner instead of recentering the meaning inside the skill bundle.
 - If upstream helper behavior is worth keeping, absorb the relevant bootstrap
   or validation pattern into repo-owned docs or scripts instead of teaching a
   separate peer workflow.
@@ -48,6 +51,10 @@ skills in-place.
   adapter operations, not a generic installer concept.
 - Use explicit verbs for runtime helpers. `stage-tusk-openai-skill` is honest
   about what it does; a universal `skill-installer` name is not.
+- If a downstream repo ships its own wrapper or root-export helper, keep that
+  detailed contract in the downstream repo. Only promote the general rule that
+  a local wrapper beats inherited upstream env when that lesson is reusable
+  across shared skills.
 
 ## Projection and wiring
 When adding a new shared skill, update all of these together:

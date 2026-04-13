@@ -23,6 +23,11 @@ The canonical authored object is a portable skill bundle centered on
 staging or publish flows, and future runtime quirks are adapter concerns layered on top
 of that bundle.
 
+Shared skills here operate around stable surfaces that `tusk` owns. Tracked
+upstream `premath` and `fish` own doctrine, and `bridge` owns the canonical
+bridge+secret domain stack. Do not use `skill-dev` to smuggle canonical domain
+meaning back into `tusk` just because a shared skill needs to mention it.
+
 It is not a generic prompt-engineering essay. It is the first-class shared
 skill authoring surface in this repo.
 
@@ -90,8 +95,16 @@ Default stance:
 ## Repo-specific rules
 - Shared skills here are repo-authored infrastructure, not consumer-local
   project context.
+- Keep shared skill semantics aligned with the current ownership split:
+  tracked upstream `premath` and `fish` define doctrine, `bridge` owns the
+  canonical bridge+secret domain stack, and `tusk` owns shared workflow and
+  operator-facing skill surfaces.
 - If a skill is only useful in one consuming repo, keep it there until it is
   intentionally promoted.
+- If a lesson comes from a downstream repo's local wrapper or root-export
+  contract, keep the detailed wrapper behavior there. Promote only the
+  general routing rule into `tusk`, such as "prefer the local wrapper over
+  inherited upstream env."
 - Wire new shared skills through `flake.nix`, `devenvModules.dogfood`, and
   `tusk-skill-contract-check` together so projection and validation stay in
   sync.

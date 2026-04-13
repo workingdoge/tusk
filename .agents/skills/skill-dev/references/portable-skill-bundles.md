@@ -41,6 +41,11 @@ to bundled resources.
 When the open Agent Skills frontmatter fields are useful, keep them in the
 portable core rather than inventing vendor-specific substitutes.
 
+If the skill needs to refer to upstream meaning, keep the ownership honest:
+tracked upstream `premath` / `fish` define doctrine, `bridge` owns the
+canonical bridge+secret domain stack, and `tusk` owns shared operator-facing
+skill bundles around those surfaces.
+
 ## What belongs in overlays and adapters
 
 Put a statement in an overlay or adapter when it only makes sense for one
@@ -56,6 +61,9 @@ Decision rule:
   the portable bundle
 - if it only exists because one runtime needs it, keep it in an overlay or
   adapter
+- if it only exists because one downstream repo exports a local wrapper or
+  tracker-root helper, keep the detailed behavior in that downstream repo and
+  only lift the reusable routing rule into shared skill docs
 
 ## Upstream helper integration
 
