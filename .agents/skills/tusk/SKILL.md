@@ -12,6 +12,7 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
 1. Resolve both the active checkout root and the canonical tracker root.
    - Prefer explicit env when the repo exports it: `TUSK_CHECKOUT_ROOT` or `DEVENV_ROOT` for the active checkout, `TUSK_TRACKER_ROOT` or `BEADS_WORKSPACE_ROOT` for the canonical tracker root.
    - Fall back to `git rev-parse --show-toplevel` only for the canonical tracker root when no explicit env is available.
+   - When a downstream repo ships its own tracker wrapper or root-export helper, prefer that local contract over inherited upstream `TUSK_*`, `BEADS_*`, or `DEVENV_*` env from another repo shell.
    - Run `bd` from the tracker root even when code work happens elsewhere.
    - Use `jj --repository "$tracker_root" ...` for repo-global workspace commands.
    - Check the repo instructions for workflow wrappers before assembling raw `bd` and `jj` commands. If the repo ships helpers such as `bd-lane`, `bd-new-issue`, or similar wrappers, prefer those first.
@@ -158,6 +159,7 @@ fi
 ## Guardrails
 
 - Keep `bd` scoped to the canonical tracker root, even when the active shell is inside a workspace.
+- In downstream repos with local wrappers, do not let inherited upstream shell env silently repoint the tracker to another repo. Re-resolve the repo-local tracker root before any `bd` mutation.
 - Preflight `bd` before asking `codex exec` to depend on tracker writes, and preflight again before final close/update steps.
 - Record epic-shared shape decisions on the tracker (`bd comment` or `bd update --append-notes`) when the shape first locks, not only at lane close. Local bookmarks and workspace dirs are private; the tracker is the shared surface. See `references/coordinator-mode.md` → *Cross-Lane Visibility*.
 - If the repo requires `devenv up` or another long-lived supervisor, start it once in the coordinator shell and keep it outside worker ownership.

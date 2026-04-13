@@ -2,8 +2,9 @@
 name: topology
 description: >
   Use this skill when Codex needs to decide where consequential work belongs
-  across `fish`, `kurma`, `tusk`, and downstream repos such as `home` and
-  `aac`, or when it needs to shape one clean lane wire before implementation.
+  across `fish`, `bridge`, `kurma`, `tusk`, and downstream repos such as
+  `home` and `aac`, or when it needs to shape one clean lane wire before
+  implementation.
   Trigger it for repo-placement questions, upstream-vs-downstream boundary
   questions, issue reshaping, proof-vs-product sequencing, and cleanup when a
   default checkout starts carrying mixed threads. Prefer the repo's placement
@@ -49,7 +50,8 @@ Use these first:
 
 The most important split is:
 
-- `fish` defines meaning
+- tracked upstream `premath` and `fish` define meaning
+- `bridge` owns the canonical bridge+secret domain stack
 - `kurma` carries reusable method such as `Premath`, `Nerve`, and `WCAT`
 - `tusk` binds stable upstream surfaces into repo workflow and operator control
 - downstream repos consume that bound surface according to their own product or
@@ -72,6 +74,8 @@ When you use this skill, produce these five things:
 ## Guardrails
 
 - Do not let `tusk` absorb meaning or carriage.
+- Do not leave canonical bridge-domain changes in `tusk` once `bridge` owns
+  that stack.
 - Do not let downstream product work masquerade as shared infra.
 - Do not start implementation from an ambient dirty default checkout when a
   cleanup lane is the real first move.

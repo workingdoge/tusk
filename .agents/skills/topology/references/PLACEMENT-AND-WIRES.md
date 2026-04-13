@@ -8,14 +8,16 @@ when the next lane boundary is unclear.
 Ask these in order:
 
 1. Does this define meaning, doctrine, law, or public semantics?
-   Put it in `fish`.
-2. Does this carry, compile, bind, normalize, validate, or publish reusable
+   Put it in tracked upstream `premath` or `fish`.
+2. Does this define the canonical bridge+secret domain contract stack?
+   Put it in `bridge`.
+3. Does this carry, compile, bind, normalize, validate, or publish reusable
    runtime-facing method?
    Put it in `kurma`.
-3. Does this operate around stable artifacts, repo workflow, operator control,
+4. Does this operate around stable artifacts, repo workflow, operator control,
    receipts, shared runtime adapters, or generic shared infra?
    Put it in `tusk`.
-4. Does this implement a consumer product surface, ingest path, local policy, or
+5. Does this implement a consumer product surface, ingest path, local policy, or
    funded operator runtime?
    Put it in the downstream repo.
 
@@ -32,6 +34,18 @@ Owns:
 - normative meaning
 - doctrine
 - public schemas and laws
+
+Tracked upstream `premath` is the active doctrine surface when the question is
+Premath kernel law or realization-profile classification.
+
+### `bridge`
+
+Owns:
+
+- canonical bridge adapter contract
+- canonical secret suite
+- bridge-to-secret handoff
+- bridge-domain conformance harnesses
 
 ### `kurma`
 
@@ -53,6 +67,8 @@ Owns:
 - shared operational infra that is broader than one consumer but narrower than
   upstream method
 - generic adapters over stable upstream or downstream surfaces
+- compatibility copies or consumer glue when the canonical domain lives
+  elsewhere
 
 ### `aac`
 
@@ -121,6 +137,7 @@ Every consequential issue should declare one main wire:
 Good wire examples:
 
 - upstream row surface -> publishable crate API
+- canonical bridge-domain change -> refreshed `tusk` compatibility bundle
 - crate API -> one `tusk` governed runtime seam
 - shared infra -> one downstream proof consumer
 - proof result -> one follow-up integration issue
