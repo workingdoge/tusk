@@ -28,13 +28,18 @@
     "bridge-src": {
       "flake": false,
       "locked": {
-        "narHash": "sha256-cXUWr8AN4Yp4UDVmjnT9ofiDW+5LsbmHfwM5NKf2Aes=",
-        "path": "/Users/arj/irai/fish/sites/bridge",
-        "type": "path"
+        "lastModified": 1776199392,
+        "narHash": "sha256-F18oL4kccjT3pY/WWchDd8Y2WgHE6zg4yLZINVoLfXs=",
+        "ref": "main",
+        "rev": "e60592938dd47464684e2ed21442613e2c842676",
+        "revCount": 18,
+        "type": "git",
+        "url": "https://github.com/workingdoge/bridge.git"
       },
       "original": {
-        "path": "/Users/arj/irai/fish/sites/bridge",
-        "type": "path"
+        "ref": "main",
+        "type": "git",
+        "url": "https://github.com/workingdoge/bridge.git"
       }
     },
     "bun2nix": {

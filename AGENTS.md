@@ -153,7 +153,7 @@ nix run .#tusk-ui -- --help
 - `nix run .#tusk-claude -- --launcher-help`
 - `tusk-skill-contract-check`
 - `nix run .#tusk-bridge-conformance-check -- --help`
-- `nix run .#tusk-bridge-conformance-check -- --repo "$PWD" --bridge-flake path:/Users/arj/irai/fish/sites/bridge`
+- `nix run .#tusk-bridge-conformance-check -- --repo "$PWD" --bridge-flake git+https://github.com/workingdoge/bridge.git?ref=main`
 - `nix run .#tusk-skill-loop -- --watch-help`
 - `nix build .#tusk-openai-skill`
 - `nix run .#stage-tusk-openai-skill`

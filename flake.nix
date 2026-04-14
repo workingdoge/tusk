@@ -24,19 +24,14 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    # Canonical bridge skill source. Non-flake path input so tusk can
+    # Canonical bridge skill source. Non-flake git input so tusk can
     # project the bridge SKILL.md into its Claude + Codex shells without
-    # bridge needing to ship its own flake. Authored content stays at
-    # fish/sites/bridge/.agents/skills/bridge/; tusk consumes it here.
-    #
-    # Absolute path (machine-local) chosen because relative `path:../..`
-    # inputs escape the flake store boundary and break nix's store-path
-    # resolution. A follow-up lane can convert this to a Radicle- or
-    # flake-parts-based cross-repo mechanism once the ecosystem is ready;
-    # for v0 we accept the machine-locality and rely on flake.lock's
-    # narHash to pin content.
+    # bridge needing to ship skill projection logic here. Authored content
+    # stays at workingdoge/bridge/.agents/skills/bridge/; tusk consumes it
+    # through the published repo so downstream consumers do not inherit a
+    # machine-local source path.
     bridge-src = {
-      url = "path:/Users/arj/irai/fish/sites/bridge";
+      url = "git+https://github.com/workingdoge/bridge.git?ref=main";
       flake = false;
     };
   };
@@ -895,9 +890,9 @@
 
           # In-tree skills use runtimePath so edits to .agents/skills/<name>/
           # reflect live in the projection. Bridge is consumed via the
-          # bridge-src non-flake path input (fish/sites/bridge); it has no
-          # runtimePath and is projected as a packaged skill, so bridge-side
-          # edits require `nix flake update bridge-src` to appear here.
+          # bridge-src non-flake git input; it has no runtimePath and is
+          # projected as a packaged skill, so bridge-side edits require
+          # `nix flake update bridge-src` to appear here.
           codex.skills.tusk.runtimePath = ".agents/skills/tusk";
           codex.skills.ops.runtimePath = ".agents/skills/ops";
           codex.skills.nix.runtimePath = ".agents/skills/nix";
