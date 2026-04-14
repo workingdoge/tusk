@@ -76,6 +76,7 @@ nix run .#tusk-ui -- --help
 
 - `flake.nix` exports `lib.{tusk,crane,mkRepoShell,mkDarwinSystem,mkNixosSystem,mkHomeConfiguration}`, `flakeModules.tusk`, the development shell, `tusk-tracker`, `tuskd`, `tusk-ui`, the OpenAI skill bundle plus `stage-tusk-openai-skill`, and `devenvModules.{codex,scratch,consumer,dogfood,tusk-skill,ops-skill,nix-skill,skill-dev-skill,topology-skill}`.
 - `flake.nix` also exports `tusk-claude`, `tusk-codex`, `tusk-hermes-probe`, `tusk-hermes-runtime`, `tusk-skill-contract-check`, `tusk-bridge-conformance-check`, and `tusk-skill-loop` as the repo-owned launcher and validation surfaces for shared skills, the Hermes local runtime seam, and the bridge adjunct seam.
+- `tusk-bridge-conformance-check` also serves as the thin bridge-flake consumer seam when called with `--bridge-flake <flake-ref>`; the expected upstream edge contract is `bridge-conformance-check`, `bridge-property-check`, and `reference-planner`.
 - `main` is the intended moving bookmark for flake consumers; once exported to Git and pushed, consumers can pin the repo with `?ref=main` and optionally a specific revision.
 - `flake.nix` also exports a flake-owned `bd`/`beads` wrapper app so raw-shell `nix run` calls reuse repo-scoped tracker state instead of ambient host Beads configuration.
 - `flake.nix` also exports `tusk-flake-ref`, which prints the canonical `path:`, `git+file:`, and remote `git+...?...ref=` forms for this repo and reports when no publish remote is configured.
@@ -91,7 +92,7 @@ nix run .#tusk-ui -- --help
 - `scripts/tusk-claude.sh` launches Claude Code against an explicit checkout so repo-local `.claude/skills` follows the active workspace while tracker state stays canonical.
 - `scripts/tusk-codex.sh` launches Codex against an explicit checkout while preserving canonical tracker-root wiring.
 - `scripts/tusk-skill-loop.sh` watches `.agents/skills/**`, reruns `tusk-skill-contract-check`, and relaunches `tusk-codex` only after validation passes.
-- `scripts/tusk-bridge-conformance-check.sh` verifies the repo-owned bridge adjunct checksum manifest and runs the Rust bridge adapter conformance tests.
+- `scripts/tusk-bridge-conformance-check.sh` verifies the repo-owned bridge adjunct checksum manifest, runs the Rust bridge adapter conformance tests, and can probe the external `bridge` flake edge contract when `--bridge-flake <flake-ref>` is provided.
 - `scripts/tusk-clean.sh` contains the conservative cleanup/quarantine script for rebuildable repo-local artifacts.
 - `scripts/tusk-radicle.sh` contains the hybrid GitHub/Radicle pilot helper for attaching the existing RID and inspecting local wiring.
 - `scripts/tusk-hermes-probe.sh` contains the lane-scoped Hermes local-isolation launcher and receipt-emitting host control path.
@@ -152,6 +153,7 @@ nix run .#tusk-ui -- --help
 - `nix run .#tusk-claude -- --launcher-help`
 - `tusk-skill-contract-check`
 - `nix run .#tusk-bridge-conformance-check -- --help`
+- `nix run .#tusk-bridge-conformance-check -- --repo "$PWD" --bridge-flake path:/Users/arj/irai/fish/sites/bridge`
 - `nix run .#tusk-skill-loop -- --watch-help`
 - `nix build .#tusk-openai-skill`
 - `nix run .#stage-tusk-openai-skill`

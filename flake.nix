@@ -749,6 +749,7 @@
         runtimeInputs = [
           pkgs.coreutils
           pkgs.git
+          pkgs.nix
           rustToolchain
         ];
         text = ''

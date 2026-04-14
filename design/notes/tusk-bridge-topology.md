@@ -40,6 +40,14 @@ That means "export the minimal bridge flake surface" and "consume that surface
 in `tusk`" are paired endpoint lanes around one edge contract, not two
 independent architecture tracks.
 
+The current edge contract is intentionally small:
+
+- `bridge` exports `bridge-conformance-check`
+- `bridge` exports `bridge-property-check`
+- `bridge` exports `reference-planner`
+- `tusk` consumes those exports through
+  `nix run .#tusk-bridge-conformance-check -- --bridge-flake <flake-ref>`
+
 ### Likely 2-simplex
 
 Once a downstream proof repo consumes the same contract, the shape becomes a
@@ -116,6 +124,11 @@ The Tusk-side conformance boundary is:
 - stable operator entrypoint:
   run `nix run .#tusk-bridge-conformance-check -- --repo <checkout>` to verify
   the adjunct checksum manifest and the Rust adapter conformance surface
+- optional bridge edge-contract entrypoint:
+  run
+  `nix run .#tusk-bridge-conformance-check -- --repo <checkout> --bridge-flake <flake-ref>`
+  to verify that an external `bridge` flake still satisfies the minimal
+  consumer contract expected by `tusk`
 
 The Tusk-side conformance boundary is not:
 

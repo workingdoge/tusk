@@ -25,6 +25,11 @@ The caller never supplies `preflight` booleans directly.
   `crates/tusk-bridge-adapter/`.
 - The stable repo-owned conformance entrypoint for this adjunct surface is
   `nix run .#tusk-bridge-conformance-check -- --repo <checkout>`.
+- The optional bridge edge-contract entrypoint is
+  `nix run .#tusk-bridge-conformance-check -- --repo <checkout> --bridge-flake <flake-ref>`.
+  That path treats the external `bridge` flake as canonical and verifies that
+  it exports `bridge-conformance-check`, `bridge-property-check`, and
+  `reference-planner`.
 - Public doctrine belongs in `fish`, reusable carriage belongs in `kurma`, and
   live provider/policy/secrets proof belongs in a downstream repo unless the
   boundary later proves to be shared operational infrastructure.
