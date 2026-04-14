@@ -352,6 +352,34 @@ fn local_backend_pid(repo_root: &Path) -> Option<i32> {
     read_trimmed(&local_backend_pid_path(repo_root)).and_then(|value| value.parse().ok())
 }
 
+fn supervisor_liveness(repo_root: &Path) -> Value {
+    let port = local_backend_port(repo_root);
+    let pid = local_backend_pid(repo_root);
+    let pid_live = pid.is_some_and(is_live_pid);
+    let alive = port.is_some() && pid.is_some() && pid_live;
+    json!({
+        "alive": alive,
+        "pid": pid,
+        "port": port,
+    })
+}
+
+fn annotate_degraded(repo_root: &Path, mut projection: Value) -> Value {
+    let supervisor = supervisor_liveness(repo_root);
+    if supervisor.get("alive").and_then(Value::as_bool) != Some(true)
+        && let Some(obj) = projection.as_object_mut()
+    {
+        obj.insert(
+            "degraded".to_string(),
+            json!({
+                "reason": "supervisor-down",
+                "repair": "bd dolt start",
+            }),
+        );
+    }
+    projection
+}
+
 fn host_service_record(repo_root: &Path) -> Value {
     read_json_file(&host_service_path(repo_root))
 }
@@ -6130,6 +6158,7 @@ fn run_status(args: &[String]) -> ExitCode {
 
     match status_projection(&parsed.repo_root, &parsed.socket_path) {
         Ok(record) => {
+            let record = annotate_degraded(&parsed.repo_root, record);
             match serde_json::to_string_pretty(&record) {
                 Ok(text) => println!("{text}"),
                 Err(err) => return fail(&format!("failed to encode status projection: {err}")),
@@ -6166,6 +6195,7 @@ fn run_coordinator_status(args: &[String]) -> ExitCode {
 
     match coordinator_status_projection(&parsed.repo_root) {
         Ok(record) => {
+            let record = annotate_degraded(&parsed.repo_root, record);
             match serde_json::to_string(&record) {
                 Ok(text) => println!("{text}"),
                 Err(err) => {
@@ -6488,13 +6518,16 @@ fn run_board_status(args: &[String]) -> ExitCode {
     };
 
     match board_status_projection(&parsed.repo_root, &parsed.socket_path) {
-        Ok(record) => match serde_json::to_string(&record) {
-            Ok(text) => {
-                println!("{text}");
-                ExitCode::SUCCESS
+        Ok(record) => {
+            let record = annotate_degraded(&parsed.repo_root, record);
+            match serde_json::to_string(&record) {
+                Ok(text) => {
+                    println!("{text}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => fail(&format!("failed to encode board projection: {err}")),
             }
-            Err(err) => fail(&format!("failed to encode board projection: {err}")),
-        },
+        }
         Err(message) => fail(&message),
     }
 }
@@ -6514,13 +6547,16 @@ fn run_sessions_status(args: &[String]) -> ExitCode {
     };
 
     match sessions_status_projection(&parsed.repo_root) {
-        Ok(record) => match serde_json::to_string(&record) {
-            Ok(text) => {
-                println!("{text}");
-                ExitCode::SUCCESS
+        Ok(record) => {
+            let record = annotate_degraded(&parsed.repo_root, record);
+            match serde_json::to_string(&record) {
+                Ok(text) => {
+                    println!("{text}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => fail(&format!("failed to encode sessions projection: {err}")),
             }
-            Err(err) => fail(&format!("failed to encode sessions projection: {err}")),
-        },
+        }
         Err(message) => fail(&message),
     }
 }
@@ -6540,13 +6576,16 @@ fn run_operator_snapshot(args: &[String]) -> ExitCode {
     };
 
     match operator_snapshot_projection(&parsed.repo_root, &parsed.socket_path) {
-        Ok(record) => match serde_json::to_string(&record) {
-            Ok(text) => {
-                println!("{text}");
-                ExitCode::SUCCESS
+        Ok(record) => {
+            let record = annotate_degraded(&parsed.repo_root, record);
+            match serde_json::to_string(&record) {
+                Ok(text) => {
+                    println!("{text}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => fail(&format!("failed to encode operator snapshot: {err}")),
             }
-            Err(err) => fail(&format!("failed to encode operator snapshot: {err}")),
-        },
+        }
         Err(message) => fail(&message),
     }
 }
@@ -6566,13 +6605,16 @@ fn run_receipts_status(args: &[String]) -> ExitCode {
     };
 
     match receipts_status_projection(&parsed.repo_root) {
-        Ok(record) => match serde_json::to_string(&record) {
-            Ok(text) => {
-                println!("{text}");
-                ExitCode::SUCCESS
+        Ok(record) => {
+            let record = annotate_degraded(&parsed.repo_root, record);
+            match serde_json::to_string(&record) {
+                Ok(text) => {
+                    println!("{text}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => fail(&format!("failed to encode receipts projection: {err}")),
             }
-            Err(err) => fail(&format!("failed to encode receipts projection: {err}")),
-        },
+        }
         Err(message) => fail(&message),
     }
 }
@@ -7326,7 +7368,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        LaneProjectionClass, TransitionEnvelope, build_ensure_apply_token,
+        LaneProjectionClass, TransitionEnvelope, annotate_degraded, build_ensure_apply_token,
         classify_doctor_beads_permissions, classify_doctor_remote_url, current_pid,
         issue_create_identity_metadata, issue_matches_create_identity, lane_projection_class,
         lane_state_upsert, merge_backend_observation, next_child_issue_id, now_iso8601, object_id,
@@ -7651,6 +7693,43 @@ mod tests {
             assert_eq!(status, expected_status);
             assert_eq!(repair.as_deref(), expected_repair);
         }
+    }
+
+    #[test]
+    fn annotate_degraded_adds_supervisor_down_when_pid_file_missing() {
+        let repo_root = temp_repo_root("annotate-degraded-pid-missing");
+        fs::create_dir_all(repo_root.join(".beads")).unwrap();
+
+        let projection = json!({ "ok": true, "data": "hello" });
+        let annotated = annotate_degraded(&repo_root, projection);
+
+        let degraded = annotated.get("degraded").expect("degraded field present");
+        assert_eq!(
+            degraded.get("reason").and_then(Value::as_str),
+            Some("supervisor-down")
+        );
+        assert_eq!(
+            degraded.get("repair").and_then(Value::as_str),
+            Some("bd dolt start")
+        );
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn annotate_degraded_leaves_projection_unchanged_when_pid_is_live() {
+        let repo_root = temp_repo_root("annotate-degraded-pid-live");
+        let beads_dir = repo_root.join(".beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        fs::write(beads_dir.join("dolt-server.pid"), current_pid().to_string()).unwrap();
+        fs::write(beads_dir.join("dolt-server.port"), "5432").unwrap();
+
+        let projection = json!({ "ok": true });
+        let annotated = annotate_degraded(&repo_root, projection);
+
+        assert!(annotated.get("degraded").is_none());
+
+        fs::remove_dir_all(repo_root).unwrap();
     }
 
     #[test]
