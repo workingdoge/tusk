@@ -58,6 +58,7 @@ run_in_repo() {
   (
     cd "${repo_root}"
     tusk_export_runtime_roots "${repo_root}" "${repo_root}"
+    tusk_heal_legacy_self_dolt_remote "${repo_root}" "${real_bd}"
     "$@"
   )
 }

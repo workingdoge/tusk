@@ -130,6 +130,7 @@ main() {
 
   record_json="$(ensure_service_record "${repo_root}")"
   export_service_env "${checkout_root}" "${repo_root}" "${record_json}"
+  tusk_heal_legacy_self_dolt_remote "${repo_root}" "${real_bd}"
   exec "${real_bd}" "$@"
 }
 

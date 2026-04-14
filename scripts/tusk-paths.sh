@@ -198,3 +198,83 @@ tusk_export_runtime_roots() {
   export DEVENV_ROOT="${checkout_root}"
   export BEADS_WORKSPACE_ROOT="${tracker_root}"
 }
+
+# Legacy tracker state can carry a malformed self-pointing Dolt remote that
+# causes every write to emit noisy auto-push warnings. Drop only that exact URL.
+tusk__legacy_self_dolt_remote_url() {
+  local repo_root="$1"
+
+  printf 'git+ssh://file////%s\n' "${repo_root#/}"
+}
+
+tusk__parse_remote_name() {
+  local line="$1"
+
+  printf '%s\n' "${line%%[[:space:]]*}"
+}
+
+tusk__parse_remote_url() {
+  local line="$1"
+  local name=""
+  local rest=""
+
+  name="$(tusk__parse_remote_name "${line}")"
+  rest="${line#"$name"}"
+  rest="${rest#"${rest%%[![:space:]]*}"}"
+  printf '%s\n' "${rest}"
+}
+
+tusk_find_legacy_self_dolt_remote_name() {
+  local repo_root="$1"
+  local bd_bin="$2"
+  local legacy_url=""
+  local line=""
+  local name=""
+  local url=""
+
+  legacy_url="$(tusk__legacy_self_dolt_remote_url "${repo_root}")"
+  while IFS= read -r line; do
+    [ -n "${line}" ] || continue
+    case "${line}" in
+      No\ remotes\ configured.*)
+        continue
+        ;;
+    esac
+
+    name="$(tusk__parse_remote_name "${line}")"
+    url="$(tusk__parse_remote_url "${line}")"
+    if [ "${url}" = "${legacy_url}" ]; then
+      printf '%s\n' "${name}"
+      return 0
+    fi
+  done <<EOF
+$("${bd_bin}" dolt remote list 2>/dev/null || true)
+EOF
+
+  return 1
+}
+
+tusk_heal_legacy_self_dolt_remote() {
+  local repo_root="$1"
+  local bd_bin="$2"
+  local remote_name=""
+  local remove_output=""
+
+  if ! remote_name="$(tusk_find_legacy_self_dolt_remote_name "${repo_root}" "${bd_bin}")"; then
+    return 0
+  fi
+
+  if remove_output="$("${bd_bin}" dolt remote remove "${remote_name}" 2>&1)"; then
+    return 0
+  fi
+
+  if ! tusk_find_legacy_self_dolt_remote_name "${repo_root}" "${bd_bin}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "tusk: failed to remove legacy self-pointing Dolt remote ${remote_name}" >&2
+  if [ -n "${remove_output}" ]; then
+    printf '%s\n' "${remove_output}" >&2
+  fi
+  return 0
+}
