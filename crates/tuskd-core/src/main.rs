@@ -24,6 +24,8 @@ Usage:
   tuskd-core board-status --repo PATH
   tuskd-core sessions-status --repo PATH
   tuskd-core receipts-status --repo PATH
+  tuskd-core lane-park --repo PATH --issue-id ISSUE_ID
+  tuskd-core lane-abandon --repo PATH --issue-id ISSUE_ID
   tuskd-core lane-state <upsert|remove> ...
   tuskd-core session-state <upsert|remove> ...
   tuskd-core receipt append ...
@@ -43,6 +45,8 @@ Commands:
   board-status    Publish the current board projection.
   sessions-status Publish the current worker session projection.
   receipts-status Publish the current receipt projection.
+  lane-park       Rewrite one live workspace sentinel to parked.
+  lane-abandon    Rewrite one live workspace sentinel to abandoned.
   lane-state      Mutate repo-local lane state through Rust-owned file updates.
   session-state   Mutate repo-local worker session state through Rust-owned file updates.
   receipt         Append one receipt through the Rust-owned audit seam.
@@ -1138,6 +1142,16 @@ fn write_json_value(path: &Path, value: &Value) -> Result<(), String> {
     let bytes = serde_json::to_vec(value)
         .map_err(|err| format!("failed to encode {}: {err}", path.display()))?;
     atomic_write(path, &bytes)
+}
+
+fn write_pretty_json_value(path: &Path, value: &Value) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(value)
+        .map_err(|err| format!("failed to encode {}: {err}", path.display()))?;
+    atomic_write(path, format!("{text}\n").as_bytes())
+}
+
+fn lane_sentinel_path(workspace_path: &Path) -> PathBuf {
+    workspace_path.join(".tusk-lane")
 }
 
 fn session_state_lock_dir(repo_root: &Path) -> PathBuf {
@@ -3371,6 +3385,53 @@ fn current_lane_for_issue(repo_root: &Path, issue_id: &str) -> Value {
         .into_iter()
         .find(|lane| lane.get("issue_id").and_then(Value::as_str) == Some(issue_id))
         .unwrap_or(Value::Null)
+}
+
+/// `.tusk-lane` schema v1 is one pretty-printed JSON object with
+/// `version`, `issue_id`, `workspace_name`, `state`, `claimed_at`,
+/// `coordinator_pid`, `coordinator_host`, and `base_rev`.
+fn rewrite_lane_sentinel_state(
+    repo_root: &Path,
+    issue_id: &str,
+    next_state: &str,
+    command_name: &str,
+) -> Result<Value, String> {
+    if issue_id.is_empty() {
+        return Err(format!("{command_name} requires --issue-id"));
+    }
+
+    let lane = current_lane_for_issue(repo_root, issue_id);
+    if lane.is_null() {
+        return Err(format!("{command_name} requires an existing lane record"));
+    }
+
+    let workspace_path = lane
+        .get("workspace_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{command_name} requires lane.workspace_path"))?;
+    if workspace_path.is_empty() {
+        return Err(format!("{command_name} requires lane.workspace_path"));
+    }
+
+    let sentinel_path = lane_sentinel_path(Path::new(workspace_path));
+    let sentinel_text = fs::read_to_string(&sentinel_path)
+        .map_err(|_| format!("{command_name} requires an existing lane sentinel"))?;
+    let mut sentinel = serde_json::from_str::<Value>(&sentinel_text)
+        .map_err(|err| format!("failed to parse {}: {err}", sentinel_path.display()))?;
+    let sentinel_object = sentinel
+        .as_object_mut()
+        .ok_or_else(|| format!("{} was not a JSON object", sentinel_path.display()))?;
+    sentinel_object.insert("state".to_string(), Value::String(next_state.to_string()));
+
+    write_pretty_json_value(&sentinel_path, &sentinel)?;
+    Ok(json!({
+        "repo_root": repo_root.to_string_lossy().into_owned(),
+        "issue_id": issue_id,
+        "workspace_path": workspace_path,
+        "sentinel_path": sentinel_path.to_string_lossy().into_owned(),
+        "state": next_state,
+        "sentinel": sentinel,
+    }))
 }
 
 fn issue_receipt_refs(repo_root: &Path, issue_id: &str) -> Value {
@@ -6516,6 +6577,99 @@ fn run_receipts_status(args: &[String]) -> ExitCode {
     }
 }
 
+struct LaneLifecycleArgs {
+    repo_root: PathBuf,
+    issue_id: String,
+}
+
+fn parse_lane_lifecycle_args(
+    args: &[String],
+    command_name: &str,
+) -> Result<LaneLifecycleArgs, String> {
+    let mut repo_root: Option<PathBuf> = None;
+    let mut issue_id: Option<String> = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--repo" => {
+                let value = args.get(index + 1).ok_or("--repo requires a path")?;
+                repo_root = Some(repo_root_arg(value)?);
+                index += 2;
+            }
+            "--issue-id" => {
+                let value = args.get(index + 1).ok_or("--issue-id requires a value")?;
+                issue_id = Some(value.clone());
+                index += 2;
+            }
+            "--help" | "-h" => return Err("USAGE".to_string()),
+            flag => return Err(format!("unknown {command_name} argument: {flag}")),
+        }
+    }
+
+    Ok(LaneLifecycleArgs {
+        repo_root: repo_root.ok_or(format!("{command_name} requires --repo"))?,
+        issue_id: issue_id.ok_or(format!("{command_name} requires --issue-id"))?,
+    })
+}
+
+fn print_lane_park_help() {
+    println!("Usage:\n  tuskd-core lane-park --repo PATH --issue-id ISSUE_ID");
+}
+
+fn print_lane_abandon_help() {
+    println!("Usage:\n  tuskd-core lane-abandon --repo PATH --issue-id ISSUE_ID");
+}
+
+fn run_lane_park(args: &[String]) -> ExitCode {
+    let parsed = match parse_lane_lifecycle_args(args, "lane-park") {
+        Ok(parsed) => parsed,
+        Err(message) if message == "USAGE" => {
+            print_lane_park_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => return fail(&message),
+    };
+
+    match rewrite_lane_sentinel_state(&parsed.repo_root, &parsed.issue_id, "parked", "lane-park") {
+        Ok(record) => match serde_json::to_string(&record) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => fail(&format!("failed to encode lane-park result: {err}")),
+        },
+        Err(message) => fail(&message),
+    }
+}
+
+fn run_lane_abandon(args: &[String]) -> ExitCode {
+    let parsed = match parse_lane_lifecycle_args(args, "lane-abandon") {
+        Ok(parsed) => parsed,
+        Err(message) if message == "USAGE" => {
+            print_lane_abandon_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => return fail(&message),
+    };
+
+    match rewrite_lane_sentinel_state(
+        &parsed.repo_root,
+        &parsed.issue_id,
+        "abandoned",
+        "lane-abandon",
+    ) {
+        Ok(record) => match serde_json::to_string(&record) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => fail(&format!("failed to encode lane-abandon result: {err}")),
+        },
+        Err(message) => fail(&message),
+    }
+}
+
 enum LaneStateArgs {
     Upsert {
         repo_root: PathBuf,
@@ -7156,6 +7310,8 @@ fn main() -> ExitCode {
         Some("board-status") => run_board_status(&args[1..]),
         Some("sessions-status") => run_sessions_status(&args[1..]),
         Some("receipts-status") => run_receipts_status(&args[1..]),
+        Some("lane-park") => run_lane_park(&args[1..]),
+        Some("lane-abandon") => run_lane_abandon(&args[1..]),
         Some("lane-state") => run_lane_state(&args[1..]),
         Some("session-state") => run_session_state(&args[1..]),
         Some("receipt") => run_receipt(&args[1..]),
@@ -7174,8 +7330,8 @@ mod tests {
         classify_doctor_beads_permissions, classify_doctor_remote_url, current_pid,
         issue_create_identity_metadata, issue_matches_create_identity, lane_projection_class,
         lane_state_upsert, merge_backend_observation, next_child_issue_id, now_iso8601, object_id,
-        parse_dolt_sql_server_port, populate_ensure_kernel_carrier, session_observed_status,
-        session_state_upsert, sessions_status_projection,
+        parse_dolt_sql_server_port, populate_ensure_kernel_carrier, rewrite_lane_sentinel_state,
+        session_observed_status, session_state_upsert, sessions_status_projection,
     };
     use serde_json::{Value, json};
     use std::fs;
@@ -7495,6 +7651,104 @@ mod tests {
             assert_eq!(status, expected_status);
             assert_eq!(repair.as_deref(), expected_repair);
         }
+    }
+
+    #[test]
+    fn lane_lifecycle_rewrites_workspace_sentinel_state() {
+        let repo_root = temp_repo_root("lane-lifecycle-rewrite");
+        let workspace_path = repo_root
+            .join(".jj-workspaces")
+            .join("tusk-asy.2.75.3-lifecycle");
+        fs::create_dir_all(&workspace_path).unwrap();
+
+        lane_state_upsert(
+            &repo_root,
+            json!({
+                "issue_id": "tusk-asy.2.75.3",
+                "issue_title": "LIFECYCLE",
+                "status": "launched",
+                "workspace_name": "tusk-asy.2.75.3-lifecycle",
+                "workspace_path": workspace_path.to_string_lossy().into_owned(),
+                "base_rev": "main",
+                "base_commit": "b8bf46db",
+                "launched_at": now_iso8601(),
+            }),
+        )
+        .unwrap();
+
+        let sentinel_path = workspace_path.join(".tusk-lane");
+        fs::write(
+            &sentinel_path,
+            r#"{
+  "version": 1,
+  "issue_id": "tusk-asy.2.75.3",
+  "workspace_name": "tusk-asy.2.75.3-lifecycle",
+  "state": "active",
+  "claimed_at": "2026-04-14T21:03:00Z",
+  "coordinator_pid": 12345,
+  "coordinator_host": "hostname.local",
+  "base_rev": "main"
+}
+"#,
+        )
+        .unwrap();
+
+        let parked =
+            rewrite_lane_sentinel_state(&repo_root, "tusk-asy.2.75.3", "parked", "lane-park")
+                .unwrap();
+        assert_eq!(parked.get("state").and_then(Value::as_str), Some("parked"));
+        let parked_sentinel =
+            serde_json::from_str::<Value>(&fs::read_to_string(&sentinel_path).unwrap()).unwrap();
+        assert_eq!(
+            parked_sentinel.get("state").and_then(Value::as_str),
+            Some("parked")
+        );
+
+        let abandoned =
+            rewrite_lane_sentinel_state(&repo_root, "tusk-asy.2.75.3", "abandoned", "lane-abandon")
+                .unwrap();
+        assert_eq!(
+            abandoned.get("state").and_then(Value::as_str),
+            Some("abandoned")
+        );
+        let abandoned_sentinel =
+            serde_json::from_str::<Value>(&fs::read_to_string(&sentinel_path).unwrap()).unwrap();
+        assert_eq!(
+            abandoned_sentinel.get("state").and_then(Value::as_str),
+            Some("abandoned")
+        );
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn lane_lifecycle_requires_existing_workspace_sentinel() {
+        let repo_root = temp_repo_root("lane-lifecycle-missing-sentinel");
+        let workspace_path = repo_root
+            .join(".jj-workspaces")
+            .join("tusk-asy.2.75.3-lifecycle");
+        fs::create_dir_all(&workspace_path).unwrap();
+
+        lane_state_upsert(
+            &repo_root,
+            json!({
+                "issue_id": "tusk-asy.2.75.3",
+                "issue_title": "LIFECYCLE",
+                "status": "launched",
+                "workspace_name": "tusk-asy.2.75.3-lifecycle",
+                "workspace_path": workspace_path.to_string_lossy().into_owned(),
+                "base_rev": "main",
+                "base_commit": "b8bf46db",
+                "launched_at": now_iso8601(),
+            }),
+        )
+        .unwrap();
+
+        let err = rewrite_lane_sentinel_state(&repo_root, "tusk-asy.2.75.3", "parked", "lane-park")
+            .unwrap_err();
+        assert_eq!(err, "lane-park requires an existing lane sentinel");
+
+        fs::remove_dir_all(repo_root).unwrap();
     }
 
     #[test]

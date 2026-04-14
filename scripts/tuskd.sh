@@ -29,9 +29,11 @@ Usage:
   tuskd autonomous-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID [--base-rev REV] [--slug SLUG] [--worker WORKER] [--note TEXT] [--quarantine] [--plan]
   tuskd handoff-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --revision REV [--note TEXT]
   tuskd finish-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --outcome OUTCOME [--note TEXT]
+  tuskd lane-park [--repo PATH] --issue-id ISSUE_ID
+  tuskd lane-abandon [--repo PATH] --issue-id ISSUE_ID
   tuskd archive-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID [--note TEXT]
   tuskd complete-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON [--revision REV] [--outcome OUTCOME] [--note TEXT] [--quarantine] [--plan]
-  tuskd compact-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON [--revision REV] [--outcome OUTCOME] [--note TEXT] [--quarantine]
+  tuskd compact-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON [--revision REV] [--outcome OUTCOME] [--note TEXT] [--quarantine] [--force]
   tuskd serve [--repo PATH] [--socket PATH]
   tuskd query [--repo PATH] [--socket PATH] --kind KIND [--request-id ID] [--payload JSON]
 
@@ -56,9 +58,11 @@ Commands:
   autonomous-lane Run the first bounded autonomous lane class through claim, dispatch, verification, and governed closeout.
   handoff-lane  Record a lane handoff with an explicit revision.
   finish-lane   Record a terminal lane outcome without collapsing into issue closure.
+  lane-park     Rewrite one lane sentinel from active to parked without removing the workspace.
+  lane-abandon  Rewrite one lane sentinel to abandoned so compact-lane may clean the workspace.
   archive-lane  Remove one finished lane from live state once its workspace is gone.
   complete-lane Complete one live lane through handoff, finish, landing, cleanup, archive, and close.
-  compact-lane  Compact one live lane through handoff, finish, workspace cleanup, archive, and close.
+  compact-lane  Compact one live lane through handoff, finish, workspace cleanup, archive, and close. Use --force only for stuck sentinels.
   serve         Serve the local JSON protocol over a Unix socket.
   query         Query one tuskd protocol request; read kinds are handled locally, actions still require a live socket.
 
@@ -448,6 +452,204 @@ ensure_host_state_dirs() {
 is_live_pid() {
   local pid="${1:-}"
   [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null
+}
+
+lane_sentinel_path() {
+  local workspace_path="$1"
+  printf '%s/.tusk-lane\n' "${workspace_path%/}"
+}
+
+file_mtime_epoch() {
+  local path="$1"
+  local mtime=""
+
+  if mtime="$(stat -f '%m' "${path}" 2>/dev/null)"; then
+    printf '%s\n' "${mtime}"
+    return 0
+  fi
+  if mtime="$(stat -c '%Y' "${path}" 2>/dev/null)"; then
+    printf '%s\n' "${mtime}"
+    return 0
+  fi
+
+  return 1
+}
+
+lane_sentinel_is_recent() {
+  local sentinel_path="$1"
+  local mtime_epoch=""
+  local now_epoch=""
+
+  mtime_epoch="$(file_mtime_epoch "${sentinel_path}")" || return 1
+  now_epoch="$(date -u +%s)"
+  [ $((now_epoch - mtime_epoch)) -le 86400 ]
+}
+
+# .tusk-lane schema v1 is a single JSON object with:
+# version, issue_id, workspace_name, state, claimed_at, coordinator_pid,
+# coordinator_host, and base_rev. It is written with two-space indent so
+# operators can inspect the lifecycle state directly in the workspace.
+write_lane_sentinel() {
+  local issue_id="$1"
+  local workspace_name="$2"
+  local workspace_path="$3"
+  local state="$4"
+  local base_rev="$5"
+  local sentinel_path=""
+  local tmp_path=""
+  local coordinator_host=""
+
+  sentinel_path="$(lane_sentinel_path "${workspace_path}")"
+  coordinator_host="$(hostname 2>/dev/null || printf 'unknown-host')"
+  tmp_path="$(mktemp "${sentinel_path}.tmp.XXXXXX")" || return 1
+
+  if ! jq -n \
+    --arg issue_id "${issue_id}" \
+    --arg workspace_name "${workspace_name}" \
+    --arg state "${state}" \
+    --arg claimed_at "$(now_iso8601)" \
+    --argjson coordinator_pid "$$" \
+    --arg coordinator_host "${coordinator_host}" \
+    --arg base_rev "${base_rev}" \
+    '{
+      version: 1,
+      issue_id: $issue_id,
+      workspace_name: $workspace_name,
+      state: $state,
+      claimed_at: $claimed_at,
+      coordinator_pid: $coordinator_pid,
+      coordinator_host: $coordinator_host,
+      base_rev: $base_rev
+    }' >"${tmp_path}"; then
+    rm -f -- "${tmp_path}"
+    return 1
+  fi
+
+  if ! mv -- "${tmp_path}" "${sentinel_path}"; then
+    rm -f -- "${tmp_path}"
+    return 1
+  fi
+}
+
+compact_lane_sentinel_guard() {
+  local issue_id="$1"
+  local workspace_path="$2"
+  local force_requested="${3:-false}"
+  local sentinel_path=""
+  local sentinel_json=""
+  local sentinel_state=""
+  local coordinator_pid=""
+  local coordinator_pid_live=false
+  local sentinel_recent=false
+  local message=""
+
+  if [ -z "${workspace_path}" ]; then
+    jq -cn '{ok:true, sentinel:null}'
+    return 0
+  fi
+
+  sentinel_path="$(lane_sentinel_path "${workspace_path}")"
+  if [ ! -f "${sentinel_path}" ]; then
+    jq -cn --arg sentinel_path "${sentinel_path}" '{ok:true, sentinel:{present:false, path:$sentinel_path}}'
+    return 0
+  fi
+
+  if ! sentinel_json="$(jq -c '.' "${sentinel_path}" 2>/dev/null)"; then
+    if [ "${force_requested}" = true ]; then
+      jq -cn --arg sentinel_path "${sentinel_path}" '{ok:true, forced:true, sentinel:{present:true, valid:false, path:$sentinel_path}}'
+      return 0
+    fi
+    jq -cn \
+      --arg issue_id "${issue_id}" \
+      --arg sentinel_path "${sentinel_path}" \
+      '{
+        ok: false,
+        issue_id: $issue_id,
+        error: {
+          message: ("compact_lane refuses: invalid lane sentinel at " + $sentinel_path + "; run '\''tuskd lane-abandon " + $issue_id + "'\'' or pass --force")
+        },
+        sentinel: {
+          present: true,
+          valid: false,
+          path: $sentinel_path
+        }
+      }'
+    return 0
+  fi
+
+  sentinel_state="$(jq -r '.state // ""' <<<"${sentinel_json}")"
+  coordinator_pid="$(jq -r '.coordinator_pid // ""' <<<"${sentinel_json}")"
+  if is_live_pid "${coordinator_pid}"; then
+    coordinator_pid_live=true
+  fi
+  if lane_sentinel_is_recent "${sentinel_path}"; then
+    sentinel_recent=true
+  fi
+
+  case "${sentinel_state}" in
+    abandoned)
+      jq -cn --argjson sentinel "${sentinel_json}" '{ok:true, sentinel:$sentinel}'
+      return 0
+      ;;
+    active|parked)
+      if [ "${force_requested}" = true ]; then
+        jq -cn \
+          --argjson sentinel "${sentinel_json}" \
+          --argjson coordinator_pid_live "$(json_bool "${coordinator_pid_live}")" \
+          --argjson sentinel_recent "$(json_bool "${sentinel_recent}")" \
+          '{ok:true, forced:true, sentinel:$sentinel, coordinator_pid_live:$coordinator_pid_live, sentinel_recent:$sentinel_recent}'
+        return 0
+      fi
+
+      if [ "${coordinator_pid_live}" = true ] || [ "${sentinel_recent}" = true ]; then
+        message="compact_lane refuses: ${sentinel_state} lane sentinel at ${sentinel_path}; run 'tuskd lane-abandon ${issue_id}' or pass --force"
+      else
+        message="compact_lane refuses: stale ${sentinel_state} lane sentinel at ${sentinel_path}; run 'tuskd lane-abandon ${issue_id}' or pass --force"
+      fi
+
+      jq -cn \
+        --arg issue_id "${issue_id}" \
+        --arg message "${message}" \
+        --arg sentinel_path "${sentinel_path}" \
+        --argjson sentinel "${sentinel_json}" \
+        --argjson coordinator_pid_live "$(json_bool "${coordinator_pid_live}")" \
+        --argjson sentinel_recent "$(json_bool "${sentinel_recent}")" \
+        '{
+          ok: false,
+          issue_id: $issue_id,
+          error: {
+            message: $message
+          },
+          sentinel: $sentinel,
+          sentinel_path: $sentinel_path,
+          coordinator_pid_live: $coordinator_pid_live,
+          sentinel_recent: $sentinel_recent,
+          stale: ((not $coordinator_pid_live) and (not $sentinel_recent))
+        }'
+      return 0
+      ;;
+    *)
+      if [ "${force_requested}" = true ]; then
+        jq -cn --argjson sentinel "${sentinel_json}" '{ok:true, forced:true, sentinel:$sentinel}'
+        return 0
+      fi
+      jq -cn \
+        --arg issue_id "${issue_id}" \
+        --arg sentinel_path "${sentinel_path}" \
+        --arg state "${sentinel_state}" \
+        --argjson sentinel "${sentinel_json}" \
+        '{
+          ok: false,
+          issue_id: $issue_id,
+          error: {
+            message: ("compact_lane refuses: unknown lane sentinel state " + ($state | @json) + " at " + $sentinel_path + "; run '\''tuskd lane-abandon " + $issue_id + "'\'' or pass --force")
+          },
+          sentinel: $sentinel,
+          sentinel_path: $sentinel_path
+        }'
+      return 0
+      ;;
+  esac
 }
 
 port_owner_pid() {
@@ -3531,12 +3733,14 @@ compact_lane_workspace() {
   local workspace_name="$3"
   local workspace_path="$4"
   local quarantine_requested="${5:-false}"
+  local force_requested="${6:-false}"
   local workspace_root=""
   local requested_mode="remove"
   local effective_mode="none"
   local quarantine_path=""
   local registration_present=false
   local path_present=false
+  local sentinel_guard='{"ok":true}'
   local forget_output=""
   local forget_exit=0
   local cleanup_output=""
@@ -3570,6 +3774,12 @@ compact_lane_workspace() {
         return 0
         ;;
     esac
+  fi
+
+  sentinel_guard="$(compact_lane_sentinel_guard "${issue_id}" "${workspace_path}" "${force_requested}")"
+  if ! jq -e '.ok == true' >/dev/null <<<"${sentinel_guard}"; then
+    printf '%s\n' "${sentinel_guard}"
+    return 0
   fi
 
   if workspace_registration_present "${repo_root}" "${workspace_name}"; then
@@ -4188,6 +4398,14 @@ realize_launch_lane_transition() {
     realization_json="$(jq -cn --arg workspace_name "${workspace_name}" --arg workspace_path "${workspace_path}" --arg base_rev "${base_rev}" --arg output "${add_output}" '{kind:"jj_workspace_add", workspace_name:$workspace_name, workspace_path:$workspace_path, base_rev:$base_rev, output:$output}')"
     carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
     transition_failure_result "${carrier_json}" "jj workspace add failed" "$(jq -cn --arg workspace_name "${workspace_name}" --arg workspace_path "${workspace_path}" --arg base_rev "${base_rev}" --arg output "${add_output}" '{workspace_name:$workspace_name, workspace_path:$workspace_path, base_rev:$base_rev, output:$output}')"
+    return 0
+  fi
+
+  if ! write_lane_sentinel "${issue_id}" "${workspace_name}" "${workspace_path}" "active" "${base_rev}"; then
+    rollback_json="$(rollback_launch_artifacts "${repo_root}" "${issue_id}" "${workspace_name}" "${workspace_path}")"
+    realization_json="$(jq -cn --arg workspace_name "${workspace_name}" --arg workspace_path "${workspace_path}" --arg base_rev "${base_rev}" --argjson rollback "${rollback_json}" '{kind:"launch_lane", workspace_name:$workspace_name, workspace_path:$workspace_path, base_rev:$base_rev, sentinel_path:(($workspace_path | rtrimstr("/")) + "/.tusk-lane"), rollback:$rollback}')"
+    carrier_json="$(carrier_set_realization "${carrier_json}" "${realization_json}")"
+    transition_failure_result "${carrier_json}" "failed to write lane sentinel after workspace creation" "$(jq -cn --arg workspace_name "${workspace_name}" --arg workspace_path "${workspace_path}" --argjson rollback "${rollback_json}" '{workspace_name:$workspace_name, workspace_path:$workspace_path, sentinel_path:(($workspace_path | rtrimstr("/")) + "/.tusk-lane"), rollback:$rollback}')"
     return 0
   fi
 
@@ -5954,6 +6172,20 @@ cmd_finish_lane() {
   cmd_transition_action "${repo_root}" "${socket_path}" "finish_lane" "$(jq -cn --arg issue_id "${issue_id}" --arg outcome "${outcome}" --arg note "${note}" '{issue_id:$issue_id, outcome:$outcome, note:$note}')"
 }
 
+cmd_lane_park() {
+  local repo_root="$1"
+  local issue_id="$2"
+
+  exec_tuskd_core lane-park --repo "${repo_root}" --issue-id "${issue_id}"
+}
+
+cmd_lane_abandon() {
+  local repo_root="$1"
+  local issue_id="$2"
+
+  exec_tuskd_core lane-abandon --repo "${repo_root}" --issue-id "${issue_id}"
+}
+
 cmd_archive_lane() {
   local repo_root="$1"
   local socket_path="$2"
@@ -6285,6 +6517,7 @@ compact_lane_action() {
   local outcome="${6:-completed}"
   local note="${7:-}"
   local quarantine_requested="${8:-false}"
+  local force_requested="${9:-false}"
   local lane_json="null"
   local lane_status=""
   local workspace_name=""
@@ -6368,7 +6601,7 @@ compact_lane_action() {
       ;;
   esac
 
-  cleanup_result="$(compact_lane_workspace "${repo_root}" "${issue_id}" "${workspace_name}" "${workspace_path}" "${quarantine_requested}")"
+  cleanup_result="$(compact_lane_workspace "${repo_root}" "${issue_id}" "${workspace_name}" "${workspace_path}" "${quarantine_requested}" "${force_requested}")"
   if ! jq -e '.ok == true' >/dev/null <<<"${cleanup_result}"; then
     jq -cn \
       --arg issue_id "${issue_id}" \
@@ -6437,9 +6670,10 @@ cmd_compact_lane() {
   local outcome="${6:-completed}"
   local note="${7:-}"
   local quarantine_requested="${8:-false}"
+  local force_requested="${9:-false}"
   local compact_result=""
 
-  compact_result="$(compact_lane_action "${repo_root}" "${socket_path}" "${issue_id}" "${revision}" "${reason}" "${outcome}" "${note}" "${quarantine_requested}")"
+  compact_result="$(compact_lane_action "${repo_root}" "${socket_path}" "${issue_id}" "${revision}" "${reason}" "${outcome}" "${note}" "${quarantine_requested}" "${force_requested}")"
   if jq -e '.ok == true' >/dev/null <<<"${compact_result}"; then
     jq -c '.payload' <<<"${compact_result}"
     return 0
@@ -6568,6 +6802,7 @@ note_arg=""
 payload_arg="null"
 quarantine_arg=false
 json_arg=false
+force_arg=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -6679,6 +6914,10 @@ while [ $# -gt 0 ]; do
       quarantine_arg=true
       shift
       ;;
+    --force)
+      force_arg=true
+      shift
+      ;;
     --payload)
       [ $# -ge 2 ] || fail "--payload requires a JSON value"
       payload_arg="$2"
@@ -6787,6 +7026,14 @@ case "${command}" in
     [ -n "${outcome_arg}" ] || fail "finish-lane requires --outcome"
     cmd_finish_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${outcome_arg}" "${note_arg}"
     ;;
+  lane-park)
+    [ -n "${issue_id_arg}" ] || fail "lane-park requires --issue-id"
+    cmd_lane_park "${repo_root}" "${issue_id_arg}"
+    ;;
+  lane-abandon)
+    [ -n "${issue_id_arg}" ] || fail "lane-abandon requires --issue-id"
+    cmd_lane_abandon "${repo_root}" "${issue_id_arg}"
+    ;;
   archive-lane)
     [ -n "${issue_id_arg}" ] || fail "archive-lane requires --issue-id"
     cmd_archive_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${note_arg}"
@@ -6799,7 +7046,7 @@ case "${command}" in
   compact-lane)
     [ -n "${issue_id_arg}" ] || fail "compact-lane requires --issue-id"
     [ -n "${reason_arg}" ] || fail "compact-lane requires --reason"
-    cmd_compact_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${revision_arg}" "${reason_arg}" "${outcome_arg:-completed}" "${note_arg}" "${quarantine_arg}"
+    cmd_compact_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${revision_arg}" "${reason_arg}" "${outcome_arg:-completed}" "${note_arg}" "${quarantine_arg}" "${force_arg}"
     ;;
   serve)
     cmd_serve "${repo_root}" "${socket_path}"
