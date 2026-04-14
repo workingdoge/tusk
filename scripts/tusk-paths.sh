@@ -31,12 +31,50 @@ tusk__find_flake_root_from() {
   done
 }
 
+tusk__normalize_git_root() {
+  local root="$1"
+
+  case "${root}" in
+    */.git)
+      dirname "${root}"
+      ;;
+    *)
+      printf '%s\n' "${root}"
+      ;;
+  esac
+}
+
+tusk__jj_git_root_from() {
+  local start="$1"
+  local root=""
+
+  root="$(
+    cd "${start}"
+    jj git root 2>/dev/null || true
+  )"
+
+  [ -n "${root}" ] || return 1
+  tusk__normalize_git_root "${root}"
+}
+
 tusk__git_root_from() {
   local start="$1"
 
+  if (
+    cd "${start}"
+    git rev-parse --show-toplevel 2>/dev/null
+  ); then
+    return 0
+  fi
+
+  if tusk__jj_git_root_from "${start}" >/dev/null 2>&1; then
+    tusk__jj_git_root_from "${start}"
+    return 0
+  fi
+
   (
     cd "${start}"
-    git rev-parse --show-toplevel 2>/dev/null || pwd
+    pwd
   )
 }
 

@@ -31,7 +31,7 @@ fail() {
 
 resolve_repo_root() {
   local repo_arg="${1:-}"
-  tusk_resolve_checkout_root "${repo_arg}"
+  tusk_resolve_tracker_root "${repo_arg}"
 }
 
 default_remote_name() {
@@ -42,7 +42,7 @@ default_remote_name() {
     return
   fi
 
-  git -C "${repo_root}" remote | awk 'NF { print; exit }'
+  git -C "${repo_root}" remote 2>/dev/null | awk 'NF { print; exit }'
 }
 
 bookmark_jj_commit() {
