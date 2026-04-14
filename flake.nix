@@ -707,6 +707,21 @@
           exec bash ${./scripts/tusk-flake-ref.sh} "$@"
         '';
       };
+      tuskRadiclePackage = pkgs.writeShellApplication {
+        name = "tusk-radicle";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.git
+          pkgs.gawk
+          pkgs.gnugrep
+          pkgs.openssh
+          pkgs.radicle-node
+        ];
+        text = ''
+          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
+          exec bash ${./scripts/tusk-radicle.sh} "$@"
+        '';
+      };
       tuskUiSrc = craneLib.cleanCargoSource ./crates/tusk-ui;
       tuskUiCommonArgs = {
         src = tuskUiSrc;
@@ -1301,6 +1316,7 @@
         radicle-flake-wasm-resolver = radicleFlakeWasmResolverPackage;
         tusk-clean = tuskClean;
         tusk-flake-ref = tuskFlakeRefPackage;
+        tusk-radicle = tuskRadiclePackage;
         tusk-hermes-probe = tuskHermesProbePackage;
         tusk-hermes-runtime = tuskHermesRuntimePackage;
         tusk-self-host = tuskSelfHostPackage;
@@ -1365,6 +1381,10 @@
         tusk-flake-ref = {
           type = "app";
           program = "${tuskFlakeRefPackage}/bin/tusk-flake-ref";
+        };
+        tusk-radicle = {
+          type = "app";
+          program = "${tuskRadiclePackage}/bin/tusk-radicle";
         };
         tusk-hermes-probe = {
           type = "app";
