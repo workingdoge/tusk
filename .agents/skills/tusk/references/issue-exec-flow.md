@@ -4,9 +4,16 @@
 
 Before assembling raw `bd` and `jj` commands, look for repo-local workflow wrappers. If the repo ships helpers such as `bd-lane` and `bd-new-issue`, prefer them because they usually encode the repo's workspace layout, prompt shape, tracker contract, and naming conventions already.
 
+If you are inside a downstream repo from another repo's shell, prefer that
+downstream repo's local wrapper or root-export helper before trusting
+inherited upstream `TUSK_*`, `BEADS_*`, or `DEVENV_*` env. The fallback
+expansions below are only for cases where no stricter local contract exists.
+
 Example coordinator setup when the repo ships `bd-lane`:
 
 ```bash
+# In a downstream repo with its own wrapper or root-export helper, prefer that
+# local contract before falling back to inherited upstream env.
 checkout_root="${TUSK_CHECKOUT_ROOT:-${DEVENV_ROOT:-$PWD}}"
 repo_root="${TUSK_TRACKER_ROOT:-${BEADS_WORKSPACE_ROOT:-$(git -C "$checkout_root" rev-parse --show-toplevel)}}"
 issue_id=config-kwj
@@ -43,6 +50,8 @@ bd-new-issue \
 When no wrapper exists, or when you need to bypass the wrapper deliberately, prefer a repo-local workspace path when the repo already uses `jj` workspaces:
 
 ```bash
+# In a downstream repo with its own wrapper or root-export helper, prefer that
+# local contract before falling back to inherited upstream env.
 checkout_root="${TUSK_CHECKOUT_ROOT:-${DEVENV_ROOT:-$PWD}}"
 repo_root="${TUSK_TRACKER_ROOT:-${BEADS_WORKSPACE_ROOT:-$(git -C "$checkout_root" rev-parse --show-toplevel)}}"
 issue_id=config-kwj
@@ -106,6 +115,8 @@ Load `tracker-contract.md` when tracker ownership, degraded mode, or first-time 
 Use a sibling checkout only when the repo already uses that pattern or the user asked for it:
 
 ```bash
+# In a downstream repo with its own wrapper or root-export helper, prefer that
+# local contract before falling back to inherited upstream env.
 checkout_root="${TUSK_CHECKOUT_ROOT:-${DEVENV_ROOT:-$PWD}}"
 repo_root="${TUSK_TRACKER_ROOT:-${BEADS_WORKSPACE_ROOT:-$(git -C "$checkout_root" rev-parse --show-toplevel)}}"
 repo_name=$(basename "$repo_root")
