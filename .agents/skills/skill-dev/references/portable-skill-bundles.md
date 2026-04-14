@@ -8,19 +8,37 @@ bundle and runtime-specific behavior.
 The canonical authored object in `tusk` is a portable skill bundle under
 `.agents/skills/<name>/`.
 
-Portable core:
-- `SKILL.md`
+The portable core is the open Agent Skills specification at
+<https://agentskills.io/specification>. Everything else in this repo layers on
+top of that spec-core and is either an opt-in overlay or generated projected
+runtime state.
+
+Spec-core (agentskills.io — portable across Claude Code, Codex, Cursor,
+GitHub Copilot, Gemini CLI, Goose, OpenHands, etc.):
+- `SKILL.md` with required `name` + `description` frontmatter (see the
+  Conformance section of `SKILL.md` for hard rules).
 - optional `references/`
 - optional `scripts/`
 - optional `assets/`
+- optional spec frontmatter fields: `license`, `compatibility`, `metadata`,
+  `allowed-tools` (experimental).
 
-Runtime overlays:
-- optional `agents/openai.yaml`
-- optional future vendor or distribution metadata beside the bundle
+Tusk-local extensions (never replace spec-core; runtime-surface-specific):
+- optional `agents/openai.yaml` — OpenAI/Codex-facing UI metadata and prompt.
+- future vendor or distribution metadata beside the bundle, when it would
+  only make sense for one runtime.
 
-Projected runtime state:
+Projected runtime state (generated; do not author directly):
 - `.codex/skills/<name>`
 - `.claude/skills/<name>`
+
+Validators:
+- `tusk-skill-contract-check` — repo-owned; validates `SKILL.md` against both
+  spec-core and tusk-local extensions; validates `agents/openai.yaml` only
+  when present.
+- `skills-ref validate ./skill-dir` — upstream reference validator from the
+  spec authors (<https://github.com/agentskills/agentskills/tree/main/skills-ref>);
+  good for checking spec-core conformance independently.
 
 Keep authored source under `.agents/skills/*`. Do not edit projected runtime
 state directly.

@@ -131,6 +131,61 @@ When finishing a shared-skill change, report:
    `tusk-skill-loop`, or some combination
 5. which runtime-specific staging or publish helpers changed, if any
 
+## Conformance to agentskills.io
+
+The portable core of every authored skill here conforms to the open Agent
+Skills specification at <https://agentskills.io/specification>. That
+specification is the cross-tool contract shared by Claude Code, Codex, Cursor,
+GitHub Copilot, Gemini CLI, Goose, OpenHands, and others. Authoring against it
+is what makes one `.agents/skills/<name>/` bundle work in any of those
+runtimes, not just tusk's dogfood shell.
+
+Hard rules the spec imposes (treat these as MUST when authoring a new skill or
+editing frontmatter):
+
+- `name` (required): 1-64 characters, unicode lowercase alphanumeric plus
+  hyphens; must not start or end with a hyphen; no consecutive hyphens; must
+  match the parent directory name.
+- `description` (required): 1-1024 characters; should state both what the
+  skill does and when to use it; should include keywords agents can match on.
+- `SKILL.md` body: YAML frontmatter first, then Markdown. Keep the body under
+  ~500 lines / ~5000 tokens. Move long material into `references/`.
+- Canonical optional directories: `scripts/`, `references/`, `assets/`.
+- File references inside `SKILL.md` should be relative and one level deep.
+
+Optional frontmatter fields the spec defines (use when relevant, never invent
+vendor-specific substitutes for these):
+
+- `license` — short license name or reference to a bundled license file.
+- `compatibility` — ≤500 chars; environment requirements (intended product,
+  required tools, network access). Most skills should omit this.
+- `metadata` — arbitrary string→string map for repo-local annotations.
+- `allowed-tools` — experimental; space-separated pre-approved tools.
+
+Tusk-local extensions layered on top of the spec (always opt-in, never
+replace spec-core):
+
+- `agents/openai.yaml` — OpenAI/Codex-facing overlay with UI metadata and
+  prompt. See `references/portable-skill-bundles.md`.
+- Projected runtime state under `.codex/skills/` and `.claude/skills/` —
+  generated, never authored.
+- `tusk-skill-contract-check` — repo-owned validator that enforces both the
+  spec's hard rules on `SKILL.md` and the tusk extension rules on any present
+  overlay.
+
+Two validators you should know about:
+
+- `tusk-skill-contract-check --repo <checkout>` — repo-local, always run
+  before finishing a skill edit.
+- `skills-ref validate ./skill-dir` — upstream reference validator from the
+  spec authors; runs the spec's hard rules standalone. See
+  <https://github.com/agentskills/agentskills/tree/main/skills-ref>.
+
+When they disagree, trust `skills-ref` on questions about spec-core rules and
+trust `tusk-skill-contract-check` on the tusk extensions. If a genuine drift
+appears (e.g. the spec evolves), land a `skill-dev` lane that re-aligns the
+repo validator instead of silently diverging.
+
 ## References
 - Read `references/repo-authoring-loop.md` for the concrete command loop and
   the decision rules for portable core versus overlays.
