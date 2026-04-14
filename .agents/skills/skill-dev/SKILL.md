@@ -99,6 +99,10 @@ Default stance:
   tracked upstream `premath` and `fish` define doctrine, `bridge` owns the
   canonical bridge+secret domain stack, and `tusk` owns shared workflow and
   operator-facing skill surfaces.
+- When a shared skill needs to describe a cross-repo seam, describe the seam
+  as an edge contract with named endpoint owners instead of collapsing the
+  repos into one pseudo-owner. If a third proof consumer matters, say so
+  explicitly rather than hiding it inside the upstream wording.
 - If a skill is only useful in one consuming repo, keep it there until it is
   intentionally promoted.
 - If a lesson comes from a downstream repo's local wrapper or root-export

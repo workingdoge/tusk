@@ -34,8 +34,11 @@ Before starting a consequential slice:
 
 1. classify the work by context
 2. choose the owning repo or layer
-3. shape one bounded wire
-4. only then start or reshape a lane with `$tusk`
+3. if the same contract spans multiple repos, name the simplex:
+   one edge contract for two repos, or a higher-order coherence shape once a
+   downstream proof consumer joins
+4. shape one bounded wire
+5. only then start or reshape a lane with `$tusk`
 
 ## Context classes
 
@@ -69,6 +72,13 @@ Strong trigger terms include:
 - bridge admission
 - secret materialization
 - burn or restore of a materialized capability
+
+When the question is about a cross-repo seam rather than one repo in
+isolation, treat the seam as a simplex-shaped organizational pattern:
+
+- 1-simplex: one explicit edge contract between two repos
+- 2-simplex: that same contract plus a downstream proof or product consumer
+  that creates a coherence condition across all three vertices
 
 ## Output contract
 

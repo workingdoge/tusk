@@ -22,6 +22,36 @@ contract.
 
 This is a `tusk` adapter seam, not Tusk kernel law.
 
+## Cross-repo shape
+
+The current bridge organization is easiest to read as a simplex-shaped repo
+pattern rather than as unrelated tasks.
+
+### Current 1-simplex
+
+Today the live organizational shape is a 1-simplex:
+
+- `bridge` owns the canonical bridge+secret domain contract
+- `tusk` owns the compatibility seam and local adapter/runtime surface
+- the shared edge contract is the bridge surface that `tusk` stages or
+  consumes
+
+That means "export the minimal bridge flake surface" and "consume that surface
+in `tusk`" are paired endpoint lanes around one edge contract, not two
+independent architecture tracks.
+
+### Likely 2-simplex
+
+Once a downstream proof repo consumes the same contract, the shape becomes a
+2-simplex:
+
+- `bridge` canonical contract owner
+- `tusk` shared compatibility or operator seam
+- downstream proof repo such as `home`
+
+At that point the important question is no longer only ownership of one edge.
+It is coherence across all three vertices.
+
 ## Ownership
 
 ### `tusk`

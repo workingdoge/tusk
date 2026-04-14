@@ -30,6 +30,9 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
    - Prefer ready issues: clear goal, non-goals, verification, and landing boundary.
    - If repo placement or ownership is still unclear, route through the
      `topology` skill before you claim.
+   - If the real work spans more than one repo around one shared contract,
+     treat it as a cross-repo simplex: file one issue per endpoint repo around
+     the same edge contract instead of widening a single repo lane.
    - If the issue is too broad or underspecified, shape or split it before launching a worker.
    - When shaping or splitting work, prefer repo-local issue wrappers such as `bd-new-issue` when they exist.
    - Do not widen the lane. File discovered work as new linked issues instead.
@@ -112,6 +115,9 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
 - Prefer issues that map cleanly to one workspace, one lane, and usually one final visible commit.
 - A ready issue should name the goal, non-goals, verification, and landing boundary.
 - Split issues on dependency edges, landing-owner changes, verification boundaries, or risk boundaries, not on arbitrary file boundaries alone.
+- For cross-repo work, split on simplex endpoints:
+  one issue for the canonical contract owner, one for the consumer seam, and a
+  separate downstream proof issue when a third vertex is required.
 - Order work as: runtime or tracker unblockers first, then dependency roots, then independent leaves in parallel, then integration or cleanup.
 - Do not launch a worker on an omnibus issue that mixes unrelated outcomes. Shape it into linked follow-ups first.
 - When new work is discovered, create linked follow-up issues instead of widening the current lane.

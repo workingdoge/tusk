@@ -156,6 +156,56 @@ Bad wire examples:
 - one issue that changes shared infra and two consumers at once
 - one lane that starts from ambient default dirt and calls it feature work
 
+## Simplex patterns
+
+When the same contract spans more than one repo, model the organization as a
+simplex instead of pretending each repo task is unrelated.
+
+### 1-simplex
+
+Use a 1-simplex when two repos meet at one explicit edge contract.
+
+- vertex A: the canonical owner of the contract
+- vertex B: the consumer or compatibility owner
+- edge: the stable contract both lanes refer to
+
+Execution rule:
+
+- file one issue per endpoint repo
+- keep both issues tied to the same edge contract
+- do not widen one repo lane until it starts doing the other repo's job
+
+Current example:
+
+- `bridge` exports the canonical bridge flake surface
+- `tusk` consumes that surface as a compatibility seam
+- the edge contract is the minimal exported flake surface itself
+
+### 2-simplex
+
+Use a 2-simplex when a third repo joins the same contract and creates a
+coherence condition across all three vertices.
+
+- vertex A: canonical contract owner
+- vertex B: shared consumer or operator seam
+- vertex C: downstream proof or product consumer
+
+Execution rule:
+
+- keep one issue per vertex or per edge-owned realization
+- name the common contract explicitly
+- treat the downstream proof as a third vertex, not as an afterthought hidden
+  inside one of the upstream lanes
+
+Likely next example:
+
+- `bridge` canonical contract
+- `tusk` compatibility seam
+- `home` first live proof consumer
+
+That turns the bridge export/consume edge into a 2-simplex once the proof repo
+must agree with the same contract.
+
 ## Split rules
 
 Split issues when any of these change:
