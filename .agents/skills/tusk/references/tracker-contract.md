@@ -9,6 +9,12 @@ Use this reference when a lane depends on `bd` and Dolt being healthy, when shar
 - If the repo has its own wrapper or root-export helper, use it to override any
   inherited upstream `TUSK_*`, `BEADS_*`, or `DEVENV_*` env before trusting
   tracker commands.
+- If the repo has a pinned `bd` wrapper, treat that wrapper as the canonical
+  CLI/runtime contract. In `tusk`, outside the dogfood shell use
+  `nix run .#bd -- ...`; inside the dogfood shell the flake-owned `bd` on
+  `PATH` is already the pinned surface.
+- Do not trust `/usr/local/bin/bd`, `~/.local/bin/bd`, or another ambient host
+  binary when a repo-owned wrapper or managed shell exists.
 - For repos that use `tuskd`, server-mode Dolt is part of the runtime contract. Fresh tracker bootstrap should use `bd init --server`; embedded mode requires explicit migration work.
 - The normal `tusk` tracker scope is:
   - read issue state,
@@ -30,6 +36,18 @@ bd show "$issue_id" >/dev/null
 - If the repo documents a wrapper or managed shell, use that instead of raw commands.
 - If a long-lived service such as `devenv up` keeps Dolt alive, the coordinator should own that session.
 
+For `tusk` itself, read the probe as:
+
+```bash
+cd "$repo_root"
+nix run .#bd -- ready --json >/dev/null
+nix run .#bd -- dolt status || true
+nix run .#bd -- show "$issue_id" >/dev/null
+```
+
+Inside the dogfood shell, plain `bd` is equivalent because the shell already
+pins the wrapper-backed runtime.
+
 ## Ownership Rules
 
 - Default shared-backend owner: coordinator.
@@ -37,6 +55,18 @@ bd show "$issue_id" >/dev/null
 - If the tracker is unhealthy, either:
   - repair it in the coordinator shell, or
   - downgrade the lane so the worker does code work only and leaves issue mutation to the coordinator.
+
+## Drift Symptoms
+
+Treat these as tracker/runtime drift until proven otherwise:
+
+- missing-column or unknown-field errors from `bd`
+- CLI/database schema-version mismatch warnings paired with read/write failures
+- board summary calls working while issue read or create calls fail
+- host `bd` resolving a different repo or endpoint than the repo-owned wrapper
+
+These are not ordinary feature-lane failures. They mean the pinned tracker
+runtime contract is not actually pinned in the current shell.
 
 ## What Does Not Belong In A Normal Lane
 
@@ -58,6 +88,13 @@ If the tracker is unavailable and you still want code progress:
 - tell the worker tracker mutation is out of scope for this run,
 - require exact reporting of the failing command and error, and
 - keep final issue updates or closure in the coordinator shell.
+
+If the failure smells like drift, report:
+
+- which `bd` surface was used
+- whether it came from the repo wrapper, managed shell, or host `PATH`
+- the exact schema or unknown-field error
+- whether the repo-owned wrapper succeeds differently
 
 ## Finish Rules
 

@@ -23,6 +23,10 @@ Ask these in order:
 
 If the slice fails step 3, it should not land in `tusk`.
 
+Tracker/schema drift, CLI pinning, repo-owned wrapper contracts, and
+coordinator/runtime repair belong to step 4 unless the problem is purely one
+consumer repo's private wrapper.
+
 ## Current map
 
 Use this map unless a newer explicit issue or design note overrides it.
@@ -71,11 +75,31 @@ Owns:
 - repo-local workflow
 - operator control plane
 - tracker, lane, receipt, and projection orchestration
+- pinned tracker/runtime wrapper contracts such as the repo-owned `bd` surface
+- tracker schema drift, CLI drift, and coordinator/runtime repair as shared
+  operational infra
 - shared operational infra that is broader than one consumer but narrower than
   upstream method
 - generic adapters over stable upstream or downstream surfaces
 - compatibility copies or consumer glue when the canonical domain lives
   elsewhere
+
+## Tracker/runtime rule
+
+For tracker or shell/tooling drift, use this split:
+
+- shared `bd` wrapper contract, shell pin, tracker endpoint pin, and generic
+  coordinator/runtime repair: `tusk`
+- one consumer repo's private wrapper, root-export quirk, or local policy:
+  downstream repo
+- upstream doctrine and carriage are not the owner just because the drift
+  blocks later doctrinal or carried work
+
+Sequence it as:
+
+1. repair or pin the tracker/runtime contract
+2. rerun tracker preflight
+3. only then resume the blocked feature or placement lane
 
 ### `aac`
 
@@ -162,6 +186,8 @@ Bad wire examples:
 - mixed architecture note plus runtime refactor plus downstream adoption
 - one issue that changes shared infra and two consumers at once
 - one lane that starts from ambient default dirt and calls it feature work
+- one lane that treats missing-column tracker failures as random feature-lane
+  noise instead of a shared-infra blocker
 
 ## Simplex patterns
 

@@ -13,17 +13,20 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
    - Prefer explicit env when the repo exports it: `TUSK_CHECKOUT_ROOT` or `DEVENV_ROOT` for the active checkout, `TUSK_TRACKER_ROOT` or `BEADS_WORKSPACE_ROOT` for the canonical tracker root.
    - Fall back to `git rev-parse --show-toplevel` only for the canonical tracker root when no explicit env is available.
    - When a downstream repo ships its own tracker wrapper or root-export helper, prefer that local contract over inherited upstream `TUSK_*`, `BEADS_*`, or `DEVENV_*` env from another repo shell.
+   - When a repo ships a pinned tracker wrapper, treat that wrapper as the canonical `bd` surface for both CLI version and tracker endpoint. In `tusk` itself, outside the dogfood shell use `nix run .#bd -- ...`; inside the dogfood shell use the flake-owned `bd` already on `PATH`.
    - Run `bd` from the tracker root even when code work happens elsewhere.
    - Use `jj --repository "$tracker_root" ...` for repo-global workspace commands.
    - Check the repo instructions for workflow wrappers before assembling raw `bd` and `jj` commands. If the repo ships helpers such as `bd-lane`, `bd-new-issue`, or similar wrappers, prefer those first.
 2. Preflight the tracker before relying on `bd` mutations.
    - Run one read command such as `bd ready --json` or `bd show <id> --json` from the tracker root.
    - Check `bd dolt status` when the tracker uses Dolt server mode.
+   - If the only `bd` on `PATH` is an ambient host binary and the repo exposes a pinned wrapper or managed shell, stop and switch to that repo-owned surface before trusting preflight.
    - If the repo uses `tuskd`, also probe the coordinator checkout with `tuskd coordinator-status --repo "$tracker_root"` before new lane work. If it reports drift, decide whether the default checkout is merely stale or is already carrying old issue work.
    - If the repo uses `tuskd`, treat server-mode Dolt as part of the contract. Fresh trackers should be initialized with `bd init --server`; embedded mode is a migration or unblocker task, not normal lane work.
    - If the repo documents a wrapper, dev shell, or service supervisor, use that before ad hoc recovery. Some repos require entering a managed shell and keeping a long-lived service session alive before `bd` is healthy.
    - If the repo uses `devenv up` or a similar interactive supervisor, keep it running in a PTY-backed coordinator session for the duration of tracker-dependent work instead of pushing that ownership into the worker lane.
    - Use `tuskd repair-coordinator --repo "$tracker_root" --target-rev main` when the canonical checkout drifted off `main`, but remember that repair rebases the current default working copy. It is not a cleanup command and it will preserve whatever the coordinator checkout is already carrying.
+   - Treat missing-column, unknown-field, or schema-version mismatch failures as tracker/runtime unblocker work. Do not normalize them as ordinary lane noise or retry raw `bd` commands against a drifting runtime.
    - If tracker health is bad, fix that first or downgrade the worker brief so `codex exec` does code work only and leaves issue mutation to the outer shell.
 3. Pick and claim exactly one issue for the lane.
    - Use `bd ready --json`, `bd show <id>`, and `bd update <id> --claim --json`.
@@ -92,11 +95,13 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
 ## Tracker Contract
 
 - Keep the tracker rooted at the canonical tracker root. Workers may edit code in a workspace, but `bd` remains a tracker-root concern.
+- If the repo ships a pinned `bd` wrapper, use that wrapper or the repo-managed shell before trusting raw `bd`. In `tusk`, outside the dogfood shell use `nix run .#bd -- ...`; inside the dogfood shell the flake-owned `bd` on `PATH` is already the pinned surface.
 - Default readiness contract: probe with `bd ready --json`, check `bd dolt status` when Dolt server mode exists, and confirm the issue can be read before asking a worker to mutate tracker state.
 - Make shared backend ownership explicit. Default owner: the coordinator shell, especially when `devenv up` or another singleton supervisor keeps Dolt alive.
 - Default tracker scope inside `tusk`: claim, read, update, and close existing issues only when the backend is healthy.
 - First-time tracker bootstrap, `bd init`, Dolt setup, schema/admin repair, or tracker migration are not default lane work. Make those explicit tasks instead of surprising a worker with shared-state repair.
 - If the repo uses `tuskd`, embedded Dolt mode is incompatible with the normal tracker contract. Fresh bootstrap should use `bd init --server`, and legacy embedded trackers should be handled as explicit migration work.
+- Missing-column, schema-version, or unknown-field failures are tracker/runtime drift symptoms. Route them to explicit shared-infra repair work instead of widening the feature lane that happened to hit them.
 - If tracker readiness depends on shell, flake, `devenv`, or tool-provisioning changes, load the repo's Nix environment skill, such as `nix-interrogation`, if available.
 
 ## Environment Contract
@@ -104,7 +109,7 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
 - Capture the runtime contract in the worker brief when the repo depends on a managed shell or supervisor.
 - Include the shell entry path the worker should assume, such as `nix develop`, `direnv`, `devenv shell`, or a repo wrapper.
 - Include any coordinator-owned long-lived process the worker depends on, such as `devenv up`, and state that the worker must not try to own that singleton lifecycle.
-- Include the tools or runtimes the worker may assume are already present, such as `bd`, `jj`, language toolchains, or repo-specific wrappers.
+- Include the tools or runtimes the worker may assume are already present, such as the pinned `bd` surface, `jj`, language toolchains, or repo-specific wrappers.
 - State whether changing the runtime is in scope. Default: no.
 - Treat shell authoring, flake edits, `devenv` module changes, dependency packaging, and tool installation as out of scope unless the issue is explicitly about the environment itself.
 - If the issue is about the environment itself, say so explicitly in the brief and switch the lane goal from "use the runtime" to "change the runtime safely".
@@ -166,6 +171,7 @@ fi
 
 - Keep `bd` scoped to the canonical tracker root, even when the active shell is inside a workspace.
 - In downstream repos with local wrappers, do not let inherited upstream shell env silently repoint the tracker to another repo. Re-resolve the repo-local tracker root before any `bd` mutation.
+- Do not let an ambient host `bd` bypass a repo-owned wrapper pin. If the repo documents `nix run .#bd -- ...`, a managed shell `bd`, or another local wrapper, prefer that surface and treat raw host `bd` as suspect.
 - Preflight `bd` before asking `codex exec` to depend on tracker writes, and preflight again before final close/update steps.
 - Record epic-shared shape decisions on the tracker (`bd comment` or `bd update --append-notes`) when the shape first locks, not only at lane close. Local bookmarks and workspace dirs are private; the tracker is the shared surface. See `references/coordinator-mode.md` → *Cross-Lane Visibility*.
 - If the repo requires `devenv up` or another long-lived supervisor, start it once in the coordinator shell and keep it outside worker ownership.
@@ -188,6 +194,7 @@ fi
 - Do not run `jj git init --colocate` unless the user explicitly asked to adopt `jj` in a git-only repo.
 - If the workspace path sits outside the tracker root, treat `--add-dir "$tracker_root"` as mandatory for tracker writes.
 - If `bd` is unhealthy, do not hide that behind repeated retries. Either repair the tracker first or keep issue mutation outside the worker run.
+- Treat schema-drift errors such as missing columns, unknown fields, or CLI/database version mismatch as explicit shared-infra blockers. Do not continue a normal feature lane until the tracker/runtime contract is pinned again.
 - Do not stream raw `codex exec` logs to the user by default. Translate them into lane status, blockers, and next actions.
 - Use the repo's normal landing or export flow before forgetting a workspace.
 - After a publish or merge event outside the workspace, sync imported Git state before cleanup.

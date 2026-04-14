@@ -6,9 +6,10 @@ description: >
   `home` and `aac`, or when it needs to shape one clean lane wire before
   implementation.
   Trigger it for repo-placement questions, upstream-vs-downstream boundary
-  questions, issue reshaping, proof-vs-product sequencing, and cleanup when a
-  default checkout starts carrying mixed threads. Prefer the repo's placement
-  rules and one-wire-per-lane discipline before starting code changes.
+  questions, issue reshaping, proof-vs-product sequencing, tracker/runtime
+  drift, and cleanup when a default checkout starts carrying mixed threads.
+  Prefer the repo's placement rules and one-wire-per-lane discipline before
+  starting code changes.
 ---
 
 # Topology
@@ -60,6 +61,11 @@ The most important split is:
 - downstream repos consume that bound surface according to their own product or
   operator policy
 
+Use `shared-operational-infra` when the problem is about tracker/schema drift,
+CLI pinning, repo-owned wrappers, or coordinator/runtime repair. Those are
+`tusk` work unless the fix is purely a downstream repo's private wrapper or
+local policy.
+
 When the question is specifically about bridge admission or secret
 materialization, route to the canonical `bridge` skill when it is available.
 Strong trigger terms include:
@@ -104,6 +110,8 @@ When you use this skill, produce these six things:
 - Do not let `tusk` absorb meaning or carriage.
 - Do not leave canonical bridge-domain changes in `tusk` once `bridge` owns
   that stack.
+- Do not misroute tracker CLI/schema drift into `fish` or `kurma` just because
+  it blocks doctrinal or carried work downstream.
 - Do not let downstream product work masquerade as shared infra.
 - Do not start implementation from an ambient dirty default checkout when a
   cleanup lane is the real first move.
