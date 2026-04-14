@@ -198,6 +198,7 @@ pub(crate) struct HomeViewModel {
     pub(crate) attention_workers: Vec<WorkerItem>,
     pub(crate) live_workers: Vec<WorkerItem>,
     pub(crate) active_lanes: Vec<LaneItem>,
+    pub(crate) closeout: Vec<LaneItem>,
     pub(crate) claimed: Vec<IssueItem>,
     pub(crate) stale: Vec<LaneItem>,
     pub(crate) obstructions: Vec<ObstructionItem>,
@@ -244,7 +245,7 @@ pub(crate) struct BoardViewModel {
     pub(crate) blocked_issues: Vec<IssueItem>,
     pub(crate) deferred_issues: Vec<IssueItem>,
     pub(crate) active_lanes: Vec<LaneItem>,
-    pub(crate) finished_lanes: Vec<LaneItem>,
+    pub(crate) closeout_lanes: Vec<LaneItem>,
     pub(crate) stale_lanes: Vec<LaneItem>,
     pub(crate) workspaces: Vec<String>,
 }
@@ -324,6 +325,12 @@ pub(crate) fn home_viewmodel(snapshot: &OperatorSnapshot) -> HomeViewModel {
         active_lanes: snapshot
             .now
             .active_lanes
+            .iter()
+            .map(|lane| lane_item_from_operator_lane(lane, false))
+            .collect(),
+        closeout: snapshot
+            .now
+            .closeout_lanes
             .iter()
             .map(|lane| lane_item_from_operator_lane(lane, false))
             .collect(),
@@ -432,7 +439,7 @@ pub(crate) fn board_viewmodel(
     filter_query: Option<&str>,
 ) -> BoardViewModel {
     let mut active_lanes = Vec::new();
-    let mut finished_lanes = Vec::new();
+    let mut closeout_lanes = Vec::new();
     let mut stale_lanes = Vec::new();
     let filter = normalized_filter_query(filter_query);
 
@@ -446,7 +453,7 @@ pub(crate) fn board_viewmodel(
         let selected = selected_board_item_id == Some(lane.issue_id.as_str());
         match lane_group(&lane) {
             LaneGroup::Active => active_lanes.push(lane_item_from_lane(&lane, selected)),
-            LaneGroup::Finished => finished_lanes.push(lane_item_from_lane(&lane, false)),
+            LaneGroup::Closeout => closeout_lanes.push(lane_item_from_lane(&lane, false)),
             LaneGroup::Stale => stale_lanes.push(lane_item_from_lane(&lane, false)),
         }
     }
@@ -480,7 +487,7 @@ pub(crate) fn board_viewmodel(
             .map(|issue| issue_item(issue, false))
             .collect(),
         active_lanes,
-        finished_lanes,
+        closeout_lanes,
         stale_lanes,
         workspaces: board.workspaces.clone(),
     }
@@ -1133,7 +1140,7 @@ fn receipt_details(receipt: &ReceiptEntry) -> Vec<String> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LaneGroup {
     Active,
-    Finished,
+    Closeout,
     Stale,
 }
 
@@ -1144,8 +1151,10 @@ fn lane_group(lane: &LaneEntry) -> LaneGroup {
         .unwrap_or(lane.status.as_str());
     if observed_status == "stale" {
         LaneGroup::Stale
-    } else if lane.status == "finished" || observed_status == "finished" {
-        LaneGroup::Finished
+    } else if matches!(lane.status.as_str(), "handoff" | "finished")
+        || matches!(observed_status, "handoff" | "finished")
+    {
+        LaneGroup::Closeout
     } else {
         LaneGroup::Active
     }
@@ -1176,6 +1185,7 @@ mod tests {
             model.focus.as_ref().map(|focus| focus.unlocks.len()),
             Some(1)
         );
+        assert_eq!(model.closeout.len(), 1);
         assert_eq!(
             model
                 .primary_action
@@ -1357,6 +1367,7 @@ mod tests {
         assert!(model.ready_issues.is_empty());
         assert!(model.claimed_issues.is_empty());
         assert_eq!(model.active_lanes.len(), 1);
+        assert!(model.closeout_lanes.is_empty());
         assert_eq!(model.active_lanes[0].issue_id, "tusk-lane");
         assert!(model.active_lanes[0].selected);
     }

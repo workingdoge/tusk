@@ -2,7 +2,7 @@ pub(crate) const GOLDEN_OPERATOR_SNAPSHOT_FIXTURE_JSON: &str = r#"{
   "generated_at": "2026-04-07T20:00:00Z",
   "briefing": {
     "headline": "Launch tusk-ready next.",
-    "summary": "Runtime is healthy. 1 active lane, 1 claimed issue, and 1 ready issue.",
+    "summary": "Runtime is healthy. 0 live lanes, 1 closeout lane, 1 claimed issue, and 1 ready issue.",
     "focus_issue": {
       "id": "tusk-ready",
       "title": "ready issue",
@@ -12,7 +12,7 @@ pub(crate) const GOLDEN_OPERATOR_SNAPSHOT_FIXTURE_JSON: &str = r#"{
       "dependent_count": 2
     },
     "narrative": [
-      "No active lanes are currently moving claimed work.",
+      "No live lanes are currently moving claimed work.",
       "It unlocks 2 downstream items."
     ]
   },
@@ -28,7 +28,8 @@ pub(crate) const GOLDEN_OPERATOR_SNAPSHOT_FIXTURE_JSON: &str = r#"{
         "data_dir": "/tmp/repo/.beads/dolt"
       }
     },
-    "active_lanes": [
+    "active_lanes": [],
+    "closeout_lanes": [
       {
         "issue_id": "tusk-live",
         "issue_title": "live lane",
@@ -63,7 +64,8 @@ pub(crate) const GOLDEN_OPERATOR_SNAPSHOT_FIXTURE_JSON: &str = r#"{
       }
     ],
     "counts": {
-      "active_lanes": 1,
+      "active_lanes": 0,
+      "closeout_lanes": 1,
       "claimed_issues": 1,
       "stale_lanes": 1,
       "obstructions": 1

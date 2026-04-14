@@ -275,6 +275,8 @@ pub(crate) struct OperatorNow {
     #[serde(default)]
     pub(crate) active_lanes: Vec<OperatorLane>,
     #[serde(default)]
+    pub(crate) closeout_lanes: Vec<OperatorLane>,
+    #[serde(default)]
     pub(crate) claimed_issues: Vec<BoardIssue>,
     #[serde(default)]
     pub(crate) stale_lanes: Vec<OperatorLane>,
@@ -322,6 +324,7 @@ pub(crate) struct OperatorObstruction {
 #[derive(Debug, Deserialize)]
 pub(crate) struct OperatorNowCounts {
     pub(crate) active_lanes: u64,
+    pub(crate) closeout_lanes: u64,
     pub(crate) claimed_issues: u64,
     pub(crate) stale_lanes: u64,
     pub(crate) obstructions: u64,

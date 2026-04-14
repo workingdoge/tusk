@@ -188,6 +188,36 @@ pub(crate) fn home_now_lines(snapshot: &HomeViewModel) -> Vec<Line<'static>> {
         }
     }
 
+    if !snapshot.closeout.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(title_line("closeout lanes"));
+        for lane in snapshot.closeout.iter().take(4) {
+            lines.push(Line::from(format!("{} {}", lane.issue_id, lane.title)));
+            let mut details = Vec::new();
+            if let Some(status) = &lane.status {
+                details.push(format!("status {status}"));
+            }
+            if let Some(observed_status) = &lane.observed_status {
+                if lane.status.as_ref() != Some(observed_status) {
+                    details.push(format!("observed {observed_status}"));
+                }
+            }
+            if let Some(workspace_name) = &lane.workspace_name {
+                details.push(format!("ws {workspace_name}"));
+            }
+            if let Some(workspace_exists) = lane.workspace_exists {
+                details.push(if workspace_exists {
+                    "workspace live".to_owned()
+                } else {
+                    "workspace missing".to_owned()
+                });
+            }
+            if !details.is_empty() {
+                lines.push(Line::from(format!("  {}", details.join(" | "))));
+            }
+        }
+    }
+
     if !snapshot.claimed.is_empty() {
         lines.push(Line::from(""));
         lines.push(title_line("waiting claims"));
@@ -462,7 +492,10 @@ fn compact_worker_lines(worker: &WorkerItem) -> Vec<Line<'static>> {
     }
 
     if !worker.obstructions.is_empty() {
-        lines.push(Line::from(format!("  attention {}", worker.obstructions.join(" | "))));
+        lines.push(Line::from(format!(
+            "  attention {}",
+            worker.obstructions.join(" | ")
+        )));
     }
 
     lines

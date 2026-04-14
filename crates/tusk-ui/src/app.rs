@@ -197,7 +197,7 @@ impl App {
                             + board.blocked_issues.len()
                             + board.deferred_issues.len()
                             + board.active_lanes.len()
-                            + board.finished_lanes.len()
+                            + board.closeout_lanes.len()
                             + board.stale_lanes.len()
                     })
                     .unwrap_or_default(),
@@ -1164,7 +1164,9 @@ impl OverlayState {
                 body.push("Workers".to_owned());
                 body.push("  j / k or Up / Down scroll session state".to_owned());
                 body.push("  Review live sessions, stale workers, and recent exits".to_owned());
-                body.push("  Use this view when worker pressure matters more than lane counts".to_owned());
+                body.push(
+                    "  Use this view when worker pressure matters more than lane counts".to_owned(),
+                );
             }
             ViewMode::Tracker => {
                 body.push("Tracker".to_owned());

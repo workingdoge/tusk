@@ -110,7 +110,7 @@ pub(crate) fn summary_lines(summary: &SummaryView) -> Vec<Line<'static>> {
 
 fn lane_lines(board: &BoardViewModel) -> Vec<Line<'static>> {
     if board.active_lanes.is_empty()
-        && board.finished_lanes.is_empty()
+        && board.closeout_lanes.is_empty()
         && board.stale_lanes.is_empty()
     {
         return vec![Line::from("none")];
@@ -120,11 +120,11 @@ fn lane_lines(board: &BoardViewModel) -> Vec<Line<'static>> {
     if !board.active_lanes.is_empty() {
         append_lane_section(&mut lines, "active lanes", &board.active_lanes);
     }
-    if !board.finished_lanes.is_empty() {
+    if !board.closeout_lanes.is_empty() {
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
-        append_lane_section(&mut lines, "finished lanes", &board.finished_lanes);
+        append_lane_section(&mut lines, "closeout lanes", &board.closeout_lanes);
     }
     if !board.stale_lanes.is_empty() {
         if !lines.is_empty() {
@@ -216,14 +216,14 @@ pub(crate) fn selected_line_offset(board: &BoardViewModel) -> Option<usize> {
         return Some(selected);
     }
     line += lane_section_len(&board.active_lanes, !board.active_lanes.is_empty());
-    if !board.active_lanes.is_empty() && !board.finished_lanes.is_empty() {
+    if !board.active_lanes.is_empty() && !board.closeout_lanes.is_empty() {
         line += 1;
     }
-    if let Some(selected) = selected_lane_line(&board.finished_lanes, line) {
+    if let Some(selected) = selected_lane_line(&board.closeout_lanes, line) {
         return Some(selected);
     }
-    line += lane_section_len(&board.finished_lanes, !board.finished_lanes.is_empty());
-    if (!board.active_lanes.is_empty() || !board.finished_lanes.is_empty())
+    line += lane_section_len(&board.closeout_lanes, !board.closeout_lanes.is_empty());
+    if (!board.active_lanes.is_empty() || !board.closeout_lanes.is_empty())
         && !board.stale_lanes.is_empty()
     {
         line += 1;
@@ -408,8 +408,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("active lanes"));
-        assert!(rendered.contains("finished lanes"));
+        assert!(rendered.contains("closeout lanes"));
         assert!(rendered.contains("stale lanes"));
         assert!(rendered.contains("tusk-live live lane"));
         assert!(rendered.contains("status handoff"));

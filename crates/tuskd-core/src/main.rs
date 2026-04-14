@@ -1308,6 +1308,52 @@ fn lane_state_projection(repo_root: &Path) -> Result<Value, String> {
     Ok(Value::Array(projected))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LaneProjectionClass {
+    Active,
+    Closeout,
+    Stale,
+}
+
+fn lane_projection_class(lane: &Value) -> LaneProjectionClass {
+    let observed_status = lane
+        .get("observed_status")
+        .and_then(Value::as_str)
+        .or_else(|| lane.get("status").and_then(Value::as_str))
+        .unwrap_or("launched");
+    let stored_status = lane
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or(observed_status);
+
+    if observed_status == "stale" {
+        LaneProjectionClass::Stale
+    } else if matches!(stored_status, "handoff" | "finished")
+        || matches!(observed_status, "handoff" | "finished")
+    {
+        LaneProjectionClass::Closeout
+    } else {
+        LaneProjectionClass::Active
+    }
+}
+
+fn compact_closeout_lane_command(repo_root: &Path, lane: &Value) -> Option<String> {
+    let issue_id = lane.get("issue_id").and_then(Value::as_str)?;
+    let reason = lane
+        .get("handoff_revision")
+        .and_then(Value::as_str)
+        .filter(|revision| !revision.is_empty())
+        .map(|revision| format!("completed in visible commit {revision}"))
+        .unwrap_or_else(|| "coordinator closeout cleanup".to_owned());
+
+    Some(format!(
+        "tuskd compact-lane --repo {} --issue-id {} --reason \"{}\"",
+        repo_root.to_string_lossy(),
+        issue_id,
+        reason
+    ))
+}
+
 fn current_lane_for_workspace(repo_root: &Path, workspace_path: &str) -> Value {
     if workspace_path.is_empty() {
         return Value::Null;
@@ -2365,7 +2411,13 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
         .collect::<Vec<_>>();
     let stale_lane_issue_ids = lanes
         .iter()
-        .filter(|lane| lane.get("observed_status").and_then(Value::as_str) == Some("stale"))
+        .filter(|lane| lane_projection_class(lane) == LaneProjectionClass::Stale)
+        .filter_map(|lane| lane.get("issue_id").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let closeout_lane_issue_ids = lanes
+        .iter()
+        .filter(|lane| lane_projection_class(lane) == LaneProjectionClass::Closeout)
         .filter_map(|lane| lane.get("issue_id").and_then(Value::as_str))
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
@@ -2384,6 +2436,7 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
     detail_issue_ids.extend(claimed_issue_ids.iter().cloned());
     detail_issue_ids.extend(ready_issue_ids.iter().cloned());
     detail_issue_ids.extend(blocked_issue_ids.iter().cloned());
+    detail_issue_ids.extend(closeout_lane_issue_ids.iter().cloned());
     detail_issue_ids.extend(stale_lane_issue_ids.iter().cloned());
 
     let issue_details = load_issue_details(repo_root, &detail_issue_ids);
@@ -2393,17 +2446,17 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
 
     let stale_lanes = lanes
         .iter()
-        .filter(|lane| lane.get("observed_status").and_then(Value::as_str) == Some("stale"))
+        .filter(|lane| lane_projection_class(lane) == LaneProjectionClass::Stale)
+        .map(compact_lane_projection)
+        .collect::<Vec<_>>();
+    let closeout_lanes = lanes
+        .iter()
+        .filter(|lane| lane_projection_class(lane) == LaneProjectionClass::Closeout)
         .map(compact_lane_projection)
         .collect::<Vec<_>>();
     let active_lanes = lanes
         .iter()
-        .filter(|lane| {
-            !matches!(
-                lane.get("observed_status").and_then(Value::as_str),
-                Some("stale") | Some("finished") | Some("archived")
-            )
-        })
+        .filter(|lane| lane_projection_class(lane) == LaneProjectionClass::Active)
         .map(compact_lane_projection)
         .collect::<Vec<_>>();
     let claimed = claimed_issues
@@ -2600,6 +2653,31 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
             "dependencies": [],
             "dependents": [],
         }))
+    } else if let Some(lane) = closeout_lanes.first() {
+        let issue_id = lane.get("issue_id").cloned().unwrap_or(Value::Null);
+        let title = lane.get("issue_title").cloned().unwrap_or(Value::Null);
+        let command = compact_closeout_lane_command(repo_root, lane)
+            .map(Value::String)
+            .unwrap_or(Value::Null);
+        Some(json!({
+            "kind": "compact_closeout_lane",
+            "issue_id": issue_id,
+            "title": title,
+            "status": lane.get("status").cloned().unwrap_or(Value::Null),
+            "message": format!(
+                "Compact {} before launching more work.",
+                lane.get("issue_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("the closeout lane")
+            ),
+            "command": command,
+            "rationale": [
+                "This lane is no longer live execution; it is waiting for coordinator closeout.",
+                "Compacting closeout debt keeps the board truthful before new launches or claims."
+            ],
+            "dependencies": [],
+            "dependents": [],
+        }))
     } else if let Some(issue) = first_actionable_issue(&actionable_claimed) {
         let dependents = open_issue_relation_entries(&issue, "dependents");
         let dependencies = open_issue_relation_entries(&issue, "dependencies");
@@ -2762,13 +2840,14 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
             .to_owned()
     } else {
         format!(
-            "Runtime is {}. {} active lane(s), {} active session(s), {} claimed issue(s), {} ready issue(s), {} blocked issue(s).",
+            "Runtime is {}. {} live lane(s), {} closeout lane(s), {} active session(s), {} claimed issue(s), {} ready issue(s), {} blocked issue(s).",
             status
                 .get("health")
                 .and_then(|value| value.get("status"))
                 .and_then(Value::as_str)
                 .unwrap_or("unknown"),
             active_lanes.len(),
+            closeout_lanes.len(),
             session_summary
                 .get("active_sessions")
                 .and_then(Value::as_u64)
@@ -2813,10 +2892,11 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
             "The default coordinator checkout must be rebased onto landed main before local state is trustworthy."
                 .to_owned(),
         );
-    } else if active_lanes.is_empty() && !claimed_issues.is_empty() {
+    } else if active_lanes.is_empty() && (!claimed_issues.is_empty() || !closeout_lanes.is_empty())
+    {
         briefing_narrative.insert(
             0,
-            "No active lanes are currently moving claimed work.".to_owned(),
+            "No live lanes are currently moving claimed work.".to_owned(),
         );
     }
 
@@ -2849,24 +2929,15 @@ fn operator_snapshot_projection(repo_root: &Path, socket_path: &Path) -> Result<
                 "backend": status.get("backend_runtime").cloned().unwrap_or(Value::Null),
             },
             "active_lanes": active_lanes,
+            "closeout_lanes": closeout_lanes,
             "claimed_issues": claimed,
             "stale_lanes": stale_lanes,
             "obstructions": obstructions,
             "counts": {
-                "active_lanes": lanes
-                    .iter()
-                    .filter(|lane| {
-                        !matches!(
-                            lane.get("observed_status").and_then(Value::as_str),
-                            Some("stale") | Some("finished") | Some("archived")
-                        )
-                    })
-                    .count(),
+                "active_lanes": active_lanes.len(),
+                "closeout_lanes": closeout_lanes.len(),
                 "claimed_issues": claimed_issues.len(),
-                "stale_lanes": lanes
-                    .iter()
-                    .filter(|lane| lane.get("observed_status").and_then(Value::as_str) == Some("stale"))
-                    .count(),
+                "stale_lanes": stale_lanes.len(),
                 "obstructions": obstructions.len(),
             },
         },
@@ -2937,6 +3008,27 @@ fn board_status_projection(repo_root: &Path, socket_path: &Path) -> Result<Value
     )?;
     let lanes = lane_state_projection(repo_root)?;
     let sessions = sessions_status_projection(repo_root)?;
+    let active_lanes = lanes
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|lane| lane_projection_class(lane) == LaneProjectionClass::Active)
+        .cloned()
+        .collect::<Vec<_>>();
+    let closeout_lanes = lanes
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|lane| lane_projection_class(lane) == LaneProjectionClass::Closeout)
+        .cloned()
+        .collect::<Vec<_>>();
+    let stale_lanes = lanes
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|lane| lane_projection_class(lane) == LaneProjectionClass::Stale)
+        .cloned()
+        .collect::<Vec<_>>();
 
     let summary = status_result
         .get("output")
@@ -3004,6 +3096,9 @@ fn board_status_projection(repo_root: &Path, socket_path: &Path) -> Result<Value
         "claimed_issues": claimed_issues,
         "blocked_issues": blocked_issues,
         "deferred_issues": deferred_issues,
+        "active_lanes": active_lanes,
+        "closeout_lanes": closeout_lanes,
+        "stale_lanes": stale_lanes,
         "lanes": lanes,
         "sessions": sessions,
         "coordinator": coordinator,
@@ -6777,11 +6872,11 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        TransitionEnvelope, build_ensure_apply_token, current_pid, issue_create_identity_metadata,
-        issue_matches_create_identity, lane_state_upsert, merge_backend_observation,
-        next_child_issue_id, now_iso8601, object_id, parse_dolt_sql_server_port,
-        populate_ensure_kernel_carrier, session_observed_status, session_state_upsert,
-        sessions_status_projection,
+        LaneProjectionClass, TransitionEnvelope, build_ensure_apply_token, current_pid,
+        issue_create_identity_metadata, issue_matches_create_identity, lane_projection_class,
+        lane_state_upsert, merge_backend_observation, next_child_issue_id, now_iso8601, object_id,
+        parse_dolt_sql_server_port, populate_ensure_kernel_carrier, session_observed_status,
+        session_state_upsert, sessions_status_projection,
     };
     use serde_json::{Value, json};
     use std::fs;
@@ -6978,6 +7073,30 @@ mod tests {
 
         assert_eq!(status, "exited");
         assert!(!pid_live);
+    }
+
+    #[test]
+    fn classifies_handoff_lane_as_closeout() {
+        let lane = json!({
+            "issue_id": "tusk-closeout",
+            "status": "handoff",
+            "observed_status": "handoff",
+            "workspace_exists": true,
+        });
+
+        assert_eq!(lane_projection_class(&lane), LaneProjectionClass::Closeout);
+    }
+
+    #[test]
+    fn classifies_finished_lane_as_closeout() {
+        let lane = json!({
+            "issue_id": "tusk-finished",
+            "status": "finished",
+            "observed_status": "finished",
+            "workspace_exists": false,
+        });
+
+        assert_eq!(lane_projection_class(&lane), LaneProjectionClass::Closeout);
     }
 
     #[test]
