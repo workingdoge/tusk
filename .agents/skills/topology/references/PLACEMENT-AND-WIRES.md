@@ -141,6 +141,13 @@ Every consequential issue should declare one main wire:
 - verification boundary
 - landing boundary
 
+If the same contract spans multiple repos, declare the simplex alongside the
+wire:
+
+- simplex kind: `1-simplex` or `2-simplex`
+- common contract
+- vertex roles
+
 Good wire examples:
 
 - upstream row surface -> publishable crate API
@@ -236,9 +243,13 @@ When routing a slice, answer in this order:
 1. `Context:` one of the context classes
 2. `Owner:` repo or layer
 3. `Why here:` one or two concrete reasons
-4. `Wire:`
+4. `Simplex:` `none`, `1-simplex`, or `2-simplex`
+   - `Common contract:` required when simplex is not `none`
+   - `Vertices:` required when simplex is not `none`; name vertex A, B, and C
+     roles as applicable
+5. `Wire:`
    - input context
    - output artifact
    - verification
    - landing boundary
-5. `Next:` issue to file, issue to reshape, or lane to launch
+6. `Next:` issue to file, issue to reshape, or lane to launch

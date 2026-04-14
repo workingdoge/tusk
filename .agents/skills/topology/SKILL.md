@@ -82,17 +82,22 @@ isolation, treat the seam as a simplex-shaped organizational pattern:
 
 ## Output contract
 
-When you use this skill, produce these five things:
+When you use this skill, produce these six things:
 
 1. context class
 2. owning repo or layer
-3. issue track or follow-up issue shape
-4. one lane wire:
+3. simplex shape:
+   - `none` for single-repo routing
+   - `1-simplex` or `2-simplex` when the same contract spans multiple repos
+   - name the common contract and vertex roles whenever the simplex is not
+     `none`
+4. issue track or follow-up issue shape
+5. one lane wire:
    - input context
    - output artifact
    - verification boundary
    - landing boundary
-5. next action
+6. next action
 
 ## Guardrails
 
