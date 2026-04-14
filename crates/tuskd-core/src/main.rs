@@ -7,6 +7,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::thread;
@@ -18,6 +19,7 @@ Usage:
   tuskd-core ensure --repo PATH [--socket PATH]
   tuskd-core status --repo PATH [--socket PATH]
   tuskd-core coordinator-status --repo PATH
+  tuskd-core doctor --repo PATH [--json] [--socket PATH]
   tuskd-core operator-snapshot --repo PATH [--socket PATH]
   tuskd-core board-status --repo PATH
   tuskd-core sessions-status --repo PATH
@@ -36,6 +38,7 @@ Commands:
   ensure          Run the Rust-owned backend ensure and service publication path.
   status          Publish the current backend/service projection without repair.
   coordinator-status Publish the default-workspace drift projection.
+  doctor          Publish the read-only tracker preflight invariant report.
   operator-snapshot Publish the compact operator-facing home projection.
   board-status    Publish the current board projection.
   sessions-status Publish the current worker session projection.
@@ -197,13 +200,13 @@ fn host_state_root() -> PathBuf {
         return PathBuf::from(path).join("tusk");
     }
 
-    if cfg!(target_os = "macos") {
-        if let Some(home) = env::var_os("HOME") {
-            return PathBuf::from(home)
-                .join("Library")
-                .join("Caches")
-                .join("tusk");
-        }
+    if cfg!(target_os = "macos")
+        && let Some(home) = env::var_os("HOME")
+    {
+        return PathBuf::from(home)
+            .join("Library")
+            .join("Caches")
+            .join("tusk");
     }
 
     if let Some(home) = env::var_os("HOME") {
@@ -3165,8 +3168,7 @@ fn latest_receipt_by_kind(repo_root: &Path, kind: &str) -> Value {
         .lines()
         .filter(|line| !line.is_empty())
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|value| value.get("kind").and_then(Value::as_str) == Some(kind))
-        .last()
+        .rfind(|value| value.get("kind").and_then(Value::as_str) == Some(kind))
         .unwrap_or(Value::Null)
 }
 
@@ -5274,16 +5276,14 @@ fn realize_create_child_issue_transition(
 
     if env::var("TUSKD_TEST_FAIL_PHASE").ok().as_deref()
         == Some("create_child_issue:tamper_identity")
-    {
-        if let Some(tuskd_metadata) = identity_metadata
+        && let Some(tuskd_metadata) = identity_metadata
             .get_mut("tuskd")
             .and_then(Value::as_object_mut)
-        {
-            tuskd_metadata.insert(
-                "request_id".to_string(),
-                Value::String("tampered-request-id".to_string()),
-            );
-        }
+    {
+        tuskd_metadata.insert(
+            "request_id".to_string(),
+            Value::String("tampered-request-id".to_string()),
+        );
     }
 
     let reread_result = run_tracker_json_command_in_repo(
@@ -5966,11 +5966,13 @@ fn transition_run_result(
 struct ProjectionArgs {
     repo_root: PathBuf,
     socket_path: PathBuf,
+    json_output: bool,
 }
 
 fn parse_projection_args(args: &[String], command_name: &str) -> Result<ProjectionArgs, String> {
     let mut repo_root: Option<PathBuf> = None;
     let mut socket_path: Option<PathBuf> = None;
+    let mut json_output = false;
     let mut index = 0;
 
     while index < args.len() {
@@ -5985,6 +5987,10 @@ fn parse_projection_args(args: &[String], command_name: &str) -> Result<Projecti
                 socket_path = Some(PathBuf::from(value));
                 index += 2;
             }
+            "--json" => {
+                json_output = true;
+                index += 1;
+            }
             "--help" | "-h" => return Err("USAGE".to_string()),
             flag => return Err(format!("unknown {command_name} argument: {flag}")),
         }
@@ -5996,6 +6002,7 @@ fn parse_projection_args(args: &[String], command_name: &str) -> Result<Projecti
     Ok(ProjectionArgs {
         repo_root,
         socket_path,
+        json_output,
     })
 }
 
@@ -6112,6 +6119,296 @@ fn run_coordinator_status(args: &[String]) -> ExitCode {
             }
         }
         Err(message) => fail(&message),
+    }
+}
+
+fn run_bd_stdout_in_repo<I, S>(repo_root: &Path, args: I) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = Command::new("bd")
+        .args(args)
+        .current_dir(repo_root)
+        .env("TUSK_CHECKOUT_ROOT", repo_root)
+        .env("TUSK_TRACKER_ROOT", repo_root)
+        .env("BEADS_WORKSPACE_ROOT", repo_root)
+        .env("DEVENV_ROOT", repo_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|err| format!("failed to run bd: {err}"))?;
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn doctor_invariant(name: &str, status: &str, message: String, repair: Option<String>) -> Value {
+    json!({
+        "name": name,
+        "status": status,
+        "message": message,
+        "repair": repair,
+    })
+}
+
+fn classify_doctor_remote_url(name: &str, url: &str) -> (&'static str, String, Option<String>) {
+    let trimmed = url.trim();
+    if trimmed.starts_with("git+ssh://file//") {
+        return (
+            "fail",
+            format!("remote {name} uses malformed URL {trimmed}"),
+            Some(format!(
+                "bd dolt remote remove {name} && bd dolt remote add {name} <valid-url>"
+            )),
+        );
+    }
+
+    if trimmed.is_empty()
+        || trimmed.starts_with("file://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("ssh://")
+    {
+        return (
+            "ok",
+            if trimmed.is_empty() {
+                format!("remote {name} has no configured URL")
+            } else {
+                format!("remote {name} URL is valid")
+            },
+            None,
+        );
+    }
+
+    ("ok", format!("remote {name} URL is not malformed"), None)
+}
+
+fn classify_doctor_beads_permissions(mode: u32) -> (&'static str, String, Option<String>) {
+    let repair = Some("chmod 0700 .beads/".to_string());
+    match mode & 0o777 {
+        0o700 => ("ok", "permissions are 0700".to_string(), None),
+        0o750 | 0o755 => (
+            "warn",
+            format!("permissions are {:04o}", mode & 0o777),
+            repair,
+        ),
+        permissions if permissions & 0o007 != 0 => (
+            "fail",
+            format!(
+                "permissions are {:04o}; world access is too broad",
+                permissions
+            ),
+            repair,
+        ),
+        permissions => (
+            "fail",
+            format!("permissions are {:04o}; expected 0700", permissions),
+            repair,
+        ),
+    }
+}
+
+fn doctor_dolt_mode_invariant(repo_root: &Path) -> Result<Value, String> {
+    let output = run_bd_stdout_in_repo(repo_root, ["dolt", "status"])?;
+    let lower = output.to_ascii_lowercase();
+    let running = output.contains("Dolt server: running")
+        || output
+            .lines()
+            .any(|line| line.trim_start().starts_with("PID:"));
+
+    if running {
+        return Ok(doctor_invariant(
+            "dolt-mode",
+            "ok",
+            "bd dolt status reported a running Dolt server".to_string(),
+            None,
+        ));
+    }
+
+    let (message, repair) = if lower.contains("embedded") {
+        (
+            "bd dolt status reported embedded tracker mode".to_string(),
+            Some("migrate this tracker to server mode via tusk-154".to_string()),
+        )
+    } else {
+        (
+            "bd dolt status did not report a running Dolt server".to_string(),
+            Some("bd dolt start".to_string()),
+        )
+    };
+
+    Ok(doctor_invariant("dolt-mode", "fail", message, repair))
+}
+
+fn doctor_supervisor_invariant(repo_root: &Path) -> Value {
+    let port = local_backend_port(repo_root);
+    let pid = local_backend_pid(repo_root);
+    let pid_live = pid.is_some_and(is_live_pid);
+
+    if let (Some(port), Some(pid), true) = (port, pid, pid_live) {
+        return doctor_invariant(
+            "supervisor",
+            "ok",
+            format!("recorded supervisor pid {pid} is live on port {port}"),
+            None,
+        );
+    }
+
+    let message = match (port, pid, pid_live) {
+        (Some(port), Some(pid), true) => {
+            format!("recorded supervisor pid {pid} is live on port {port}")
+        }
+        (Some(port), Some(pid), false) => {
+            format!("recorded supervisor pid {pid} is not live on expected port {port}")
+        }
+        (Some(port), None, _) => {
+            format!("no recorded supervisor pid is available for expected port {port}")
+        }
+        (None, Some(pid), true) => {
+            format!("recorded supervisor pid {pid} is live but no expected port is recorded")
+        }
+        (None, Some(pid), false) => {
+            format!("recorded supervisor pid {pid} is not live and no expected port is recorded")
+        }
+        (None, None, _) => "no recorded supervisor pid or expected port is available".to_string(),
+    };
+
+    doctor_invariant(
+        "supervisor",
+        "fail",
+        message,
+        Some("bd dolt start".to_string()),
+    )
+}
+
+fn parse_doctor_remote_line(line: &str) -> Option<(&str, &str)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let split_at = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    let name = trimmed[..split_at].trim();
+    let url = trimmed[split_at..].trim();
+    Some((name, url))
+}
+
+fn doctor_dolt_remote_invariant(repo_root: &Path) -> Result<Value, String> {
+    let output = run_bd_stdout_in_repo(repo_root, ["dolt", "remote", "list"])?;
+    let mut saw_remote = false;
+
+    for line in output.lines() {
+        let Some((name, url)) = parse_doctor_remote_line(line) else {
+            continue;
+        };
+        saw_remote = true;
+
+        let (status, message, repair) = classify_doctor_remote_url(name, url);
+        if status == "fail" {
+            return Ok(doctor_invariant("dolt-remote", status, message, repair));
+        }
+    }
+
+    Ok(doctor_invariant(
+        "dolt-remote",
+        "ok",
+        if saw_remote {
+            "all Dolt remote URLs are valid".to_string()
+        } else {
+            "no Dolt remote URLs were reported".to_string()
+        },
+        None,
+    ))
+}
+
+fn doctor_beads_permissions_invariant(repo_root: &Path) -> Result<Value, String> {
+    let metadata = fs::metadata(repo_root.join(".beads"))
+        .map_err(|err| format!("failed to read .beads metadata: {err}"))?;
+    let (status, message, repair) =
+        classify_doctor_beads_permissions(metadata.permissions().mode());
+
+    Ok(doctor_invariant("beads-perms", status, message, repair))
+}
+
+fn print_doctor_help() {
+    println!("Usage:\n  tuskd-core doctor --repo PATH [--json] [--socket PATH]");
+}
+
+/// Run the read-only tracker preflight projection.
+///
+/// Human output prints one line per invariant as `<name>: <status>` and appends
+/// ` — <repair>` when a warning or failure needs an explicit repair line.
+/// `--json` prints `{"ok":<bool>,"invariants":[...]}` where each invariant is
+/// `{name,status,message,repair}`. `ok` is true only when every invariant is
+/// `ok`; the process exits non-zero only when at least one invariant is `fail`.
+///
+/// Deferred from v1: bd-binary provenance belongs to `tusk-asy.2.75.2`, and
+/// workspace sentinel inspection belongs to `tusk-asy.2.75.3`.
+fn run_doctor(args: &[String]) -> ExitCode {
+    let parsed = match parse_projection_args(args, "doctor") {
+        Ok(parsed) => parsed,
+        Err(message) if message == "USAGE" => {
+            print_doctor_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => return fail(&message),
+    };
+
+    let invariants = match [
+        doctor_dolt_mode_invariant(&parsed.repo_root),
+        Ok(doctor_supervisor_invariant(&parsed.repo_root)),
+        doctor_dolt_remote_invariant(&parsed.repo_root),
+        doctor_beads_permissions_invariant(&parsed.repo_root),
+    ]
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(invariants) => invariants,
+        Err(message) => return fail(&message),
+    };
+
+    let ok = invariants
+        .iter()
+        .all(|invariant| invariant.get("status").and_then(Value::as_str) == Some("ok"));
+    let has_fail = invariants
+        .iter()
+        .any(|invariant| invariant.get("status").and_then(Value::as_str) == Some("fail"));
+    let record = json!({
+        "ok": ok,
+        "invariants": invariants,
+    });
+
+    if parsed.json_output {
+        match serde_json::to_string(&record) {
+            Ok(text) => println!("{text}"),
+            Err(err) => return fail(&format!("failed to encode doctor projection: {err}")),
+        }
+    } else {
+        let Some(items) = record.get("invariants").and_then(Value::as_array) else {
+            return fail("failed to render doctor projection");
+        };
+
+        for invariant in items {
+            let name = invariant
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let status = invariant
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let repair = invariant.get("repair").and_then(Value::as_str);
+            if let Some(repair) = repair {
+                println!("{name}: {status} — {repair}");
+            } else {
+                println!("{name}: {status}");
+            }
+        }
+    }
+
+    if has_fail {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
@@ -6854,6 +7151,7 @@ fn main() -> ExitCode {
         Some("ensure") => run_ensure(&args[1..]),
         Some("status") => run_status(&args[1..]),
         Some("coordinator-status") => run_coordinator_status(&args[1..]),
+        Some("doctor") => run_doctor(&args[1..]),
         Some("operator-snapshot") => run_operator_snapshot(&args[1..]),
         Some("board-status") => run_board_status(&args[1..]),
         Some("sessions-status") => run_sessions_status(&args[1..]),
@@ -6872,7 +7170,8 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        LaneProjectionClass, TransitionEnvelope, build_ensure_apply_token, current_pid,
+        LaneProjectionClass, TransitionEnvelope, build_ensure_apply_token,
+        classify_doctor_beads_permissions, classify_doctor_remote_url, current_pid,
         issue_create_identity_metadata, issue_matches_create_identity, lane_projection_class,
         lane_state_upsert, merge_backend_observation, next_child_issue_id, now_iso8601, object_id,
         parse_dolt_sql_server_port, populate_ensure_kernel_carrier, session_observed_status,
@@ -7160,6 +7459,42 @@ mod tests {
         );
 
         fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn doctor_remote_url_classifier_distinguishes_valid_and_malformed_urls() {
+        for (url, expected_status, expected_repair) in [
+            ("", "ok", None),
+            ("file:///tmp/tusk", "ok", None),
+            ("https://example.com/tusk.git", "ok", None),
+            ("ssh://git@example.com/tusk.git", "ok", None),
+            (
+                "git+ssh://file////Users/arj/irai/tusk",
+                "fail",
+                Some("bd dolt remote remove origin && bd dolt remote add origin <valid-url>"),
+            ),
+        ] {
+            let (status, _, repair) = classify_doctor_remote_url("origin", url);
+
+            assert_eq!(status, expected_status);
+            assert_eq!(repair.as_deref(), expected_repair);
+        }
+    }
+
+    #[test]
+    fn doctor_beads_permissions_classifier_distinguishes_ok_warn_and_fail_modes() {
+        for (mode, expected_status, expected_repair) in [
+            (0o700, "ok", None),
+            (0o750, "warn", Some("chmod 0700 .beads/")),
+            (0o755, "warn", Some("chmod 0700 .beads/")),
+            (0o707, "fail", Some("chmod 0700 .beads/")),
+            (0o740, "fail", Some("chmod 0700 .beads/")),
+        ] {
+            let (status, _, repair) = classify_doctor_beads_permissions(mode);
+
+            assert_eq!(status, expected_status);
+            assert_eq!(repair.as_deref(), expected_repair);
+        }
     }
 
     #[test]

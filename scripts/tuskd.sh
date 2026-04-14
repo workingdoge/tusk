@@ -13,6 +13,7 @@ Usage:
   tuskd ensure [--repo PATH] [--socket PATH]
   tuskd status [--repo PATH] [--socket PATH]
   tuskd coordinator-status [--repo PATH]
+  tuskd doctor [--repo PATH] [--json]
   tuskd operator-snapshot [--repo PATH] [--socket PATH]
   tuskd board-status [--repo PATH]
   tuskd sessions-status [--repo PATH]
@@ -39,6 +40,7 @@ Commands:
   ensure        Ensure repo-local state exists and tracker health is recorded.
   status        Print the current tracker service projection.
   coordinator-status Print the default-workspace drift projection.
+  doctor        Print the read-only tracker preflight invariant report.
   operator-snapshot Print the compact operator-facing home projection.
   board-status  Print the current board projection.
   sessions-status Print the current worker session projection.
@@ -4556,6 +4558,19 @@ cmd_coordinator_status() {
   exec_tuskd_core coordinator-status --repo "${repo_root}"
 }
 
+cmd_doctor() {
+  local repo_root="$1"
+  local socket_path="$2"
+  local json_output="${3:-false}"
+  local -a args=(doctor --repo "${repo_root}" --socket "${socket_path}")
+
+  if [ "${json_output}" = true ]; then
+    args+=(--json)
+  fi
+
+  exec_tuskd_core "${args[@]}"
+}
+
 cmd_operator_snapshot() {
   local repo_root="$1"
   local socket_path="$2"
@@ -6552,6 +6567,7 @@ outcome_arg=""
 note_arg=""
 payload_arg="null"
 quarantine_arg=false
+json_arg=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -6564,6 +6580,10 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || fail "--socket requires a path"
       socket_arg="$2"
       shift 2
+      ;;
+    --json)
+      json_arg=true
+      shift
       ;;
     --kind)
       [ $# -ge 2 ] || fail "--kind requires a value"
@@ -6688,6 +6708,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ "${json_arg}" = true ] && [ "${command}" != "doctor" ]; then
+  fail "unknown argument: --json"
+fi
+
 repo_root="$(resolve_repo_root "${repo_arg}")"
 socket_path="${socket_arg:-$(default_socket_path "${repo_root}")}"
 
@@ -6700,6 +6724,9 @@ case "${command}" in
     ;;
   coordinator-status)
     cmd_coordinator_status "${repo_root}"
+    ;;
+  doctor)
+    cmd_doctor "${repo_root}" "${socket_path}" "${json_arg}"
     ;;
   operator-snapshot)
     cmd_operator_snapshot "${repo_root}" "${socket_path}"
