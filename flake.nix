@@ -1264,6 +1264,62 @@
             };
           }
         );
+
+      radNodeModuleSmokeCheck =
+        let
+          nixosEvalCfg = pkgs.lib.evalModules {
+            modules = [
+              ./modules/rad-node/nixos.nix
+              (
+                { lib, ... }:
+                {
+                  options.systemd.services = lib.mkOption {
+                    type = lib.types.attrsOf (lib.types.attrsOf lib.types.unspecified);
+                    default = { };
+                  };
+                }
+              )
+              {
+                services.radNode = {
+                  enable = true;
+                  passphrasePath = "/var/lib/rad-seed/.rad-passphrase";
+                  radHome = "/var/lib/rad-seed/.radicle";
+                };
+              }
+            ];
+            specialArgs = { inherit pkgs; };
+          };
+          nixosCfg = nixosEvalCfg.config;
+
+          assertContains =
+            label: expected: actual:
+            if builtins.elem expected actual then
+              true
+            else
+              throw "radNode smoke: ${label} missing ${expected}; got ${builtins.toJSON actual}";
+          assertEquals =
+            label: expected: actual:
+            if actual == expected then
+              true
+            else
+              throw "radNode smoke: ${label} expected ${builtins.toJSON expected}; got ${builtins.toJSON actual}";
+
+          checks = [
+            (assertEquals "nixos radicle-seed Restart" "always" nixosCfg.systemd.services.radicle-seed.serviceConfig.Restart)
+            (assertEquals "nixos radicle-seed Type" "simple" nixosCfg.systemd.services.radicle-seed.serviceConfig.Type)
+            (assertContains "nixos radicle-seed wantedBy" "multi-user.target" nixosCfg.systemd.services.radicle-seed.wantedBy)
+          ];
+        in
+        assert builtins.all (x: x) checks;
+        pkgs.writeText "tusk-rad-node-module-smoke.json" (
+          builtins.toJSON {
+            nixosServiceConfig = {
+              Type = nixosCfg.systemd.services.radicle-seed.serviceConfig.Type;
+              Restart = nixosCfg.systemd.services.radicle-seed.serviceConfig.Restart;
+              NoNewPrivileges = nixosCfg.systemd.services.radicle-seed.serviceConfig.NoNewPrivileges;
+            };
+          }
+        );
     in
     {
       tusk = repoSelfHostTusk;
@@ -1294,14 +1350,17 @@
       flakeModules.default = tuskFlakeModule;
       nixosModules.cache = ./modules/cache.nix;
       nixosModules.default = ./modules/cache.nix;
+      nixosModules.radNode = ./modules/rad-node/nixos.nix;
       darwinModules.cache = ./modules/cache.nix;
       darwinModules.default = ./modules/cache.nix;
+      darwinModules.radNode = ./modules/rad-node/darwin.nix;
       checks.${system} = {
         radicle-flake-wasm-plugin = radicleFlakeWasmPluginPackage;
         radicle-flake-wasm-resolver-wasi = radicleFlakeWasmResolverWasiCheck;
         tusk-self-host-witnesses = repoSelfHostWitnessCheck;
         tusk-self-host-trace = repoSelfHostTraceCheck;
         tusk-cache-consume-module-smoke = cacheConsumeModuleSmokeCheck;
+        tusk-rad-node-module-smoke = radNodeModuleSmokeCheck;
       };
       packages.${system} = {
         rust-toolchain = rustToolchain;
