@@ -138,6 +138,11 @@ agent-runtime framework.
 - Prefer the smallest check or effect boundary over whole-system reasoning.
 - Prefer official-source docs after the local shape is known.
 - Treat secrets/state as a separate layer, not as an implementation detail.
+- When the question is really about bridge admission or secret materialization
+  rather than generic repo operations, route to the canonical `bridge` skill
+  when it is available. Strong triggers include `AuthorizeRequest`,
+  `ProviderResults`, `PolicyInput`, `MaterializationPlanRequest`, and
+  `MaterializationSession`.
 - Keep the semantic center on validated sections plus admissible effects.
 - Prefer lane-scoped local probes before reusable executor families.
 - Treat mounts, env policy, network policy, receipt sinks, and reattach mode as

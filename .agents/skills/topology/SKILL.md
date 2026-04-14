@@ -57,6 +57,19 @@ The most important split is:
 - downstream repos consume that bound surface according to their own product or
   operator policy
 
+When the question is specifically about bridge admission or secret
+materialization, route to the canonical `bridge` skill when it is available.
+Strong trigger terms include:
+
+- `AuthorizeRequest`
+- `ProviderResults`
+- `PolicyInput`
+- `MaterializationPlanRequest`
+- `MaterializationSession`
+- bridge admission
+- secret materialization
+- burn or restore of a materialized capability
+
 ## Output contract
 
 When you use this skill, produce these five things:

@@ -46,6 +46,13 @@ Owns:
 - canonical secret suite
 - bridge-to-secret handoff
 - bridge-domain conformance harnesses
+- the canonical `bridge` skill for bridge admission and secret materialization
+  questions
+
+If the active repo exposes the `bridge` skill and the question names
+`AuthorizeRequest`, `ProviderResults`, `PolicyInput`,
+`MaterializationPlanRequest`, `MaterializationSession`, or the burn/restore
+flow around a materialized capability, route there before widening `tusk`.
 
 ### `kurma`
 
@@ -138,6 +145,7 @@ Good wire examples:
 
 - upstream row surface -> publishable crate API
 - canonical bridge-domain change -> refreshed `tusk` compatibility bundle
+- bridge admission or materialization question -> canonical `bridge` skill
 - crate API -> one `tusk` governed runtime seam
 - shared infra -> one downstream proof consumer
 - proof result -> one follow-up integration issue
