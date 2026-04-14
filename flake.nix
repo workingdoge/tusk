@@ -707,21 +707,6 @@
           exec bash ${./scripts/tusk-flake-ref.sh} "$@"
         '';
       };
-      tuskRadiclePackage = pkgs.writeShellApplication {
-        name = "tusk-radicle";
-        runtimeInputs = [
-          pkgs.coreutils
-          pkgs.git
-          pkgs.gawk
-          pkgs.gnugrep
-          pkgs.openssh
-          pkgs.radicle-node
-        ];
-        text = ''
-          export TUSK_PATHS_SH=${./scripts/tusk-paths.sh}
-          exec bash ${./scripts/tusk-radicle.sh} "$@"
-        '';
-      };
       tuskUiSrc = craneLib.cleanCargoSource ./crates/tusk-ui;
       tuskUiCommonArgs = {
         src = tuskUiSrc;
@@ -1264,6 +1249,137 @@
             };
           }
         );
+      bridgeKurmaSidecarModuleSmokeCheck =
+        let
+          systemEvalCfg = pkgs.lib.evalModules {
+            modules = [
+              ./modules/bridge-kurma-sidecar.nix
+              (
+                { lib, ... }:
+                {
+                  options = {
+                    assertions = lib.mkOption {
+                      type = lib.types.listOf lib.types.anything;
+                      default = [ ];
+                    };
+                    users.users = lib.mkOption {
+                      type = lib.types.attrsOf lib.types.anything;
+                      default = { };
+                    };
+                    users.groups = lib.mkOption {
+                      type = lib.types.attrsOf lib.types.anything;
+                      default = { };
+                    };
+                    systemd.services = lib.mkOption {
+                      type = lib.types.attrsOf lib.types.anything;
+                      default = { };
+                    };
+                    systemd.tmpfiles.rules = lib.mkOption {
+                      type = lib.types.listOf lib.types.str;
+                      default = [ ];
+                    };
+                    services.caddy.enable = lib.mkOption {
+                      type = lib.types.bool;
+                      default = false;
+                    };
+                    services.caddy.virtualHosts = lib.mkOption {
+                      type = lib.types.attrsOf lib.types.anything;
+                      default = { };
+                    };
+                  };
+                }
+              )
+              {
+                tusk.services.bridgeKurmaSidecar = {
+                  enable = true;
+                  execStart = "/nix/store/fake/bin/kurma-sidecar --listen 127.0.0.1:4310";
+                  environment = {
+                    SIDE_CAR_MODE = "local";
+                  };
+                  caddy = {
+                    enable = true;
+                    host = "sidecar.local";
+                  };
+                };
+              }
+            ];
+          };
+          systemCfg = systemEvalCfg.config;
+          assertContains =
+            label: expected: actual:
+            if builtins.elem expected actual then
+              true
+            else
+              throw "tusk bridge/kurma sidecar smoke: ${label} missing ${expected}; got ${builtins.toJSON actual}";
+          assertHasInfix =
+            label: expected: haystack:
+            if pkgs.lib.hasInfix expected haystack then
+              true
+            else
+              throw "tusk bridge/kurma sidecar smoke: ${label} missing infix ${expected}; got ${haystack}";
+          serviceCfg = systemCfg.systemd.services."bridge-kurma-sidecar";
+          caddyCfg = systemCfg.services.caddy.virtualHosts."sidecar.local";
+          checks = [
+            (assertContains "systemd tmpfiles state dir"
+              "d /var/lib/bridge-kurma-sidecar 0750 bridge-kurma bridge-kurma -"
+              systemCfg.systemd.tmpfiles.rules
+            )
+            (assertContains "systemd tmpfiles artifact dir"
+              "d /var/lib/bridge-kurma-sidecar/artifacts 0750 bridge-kurma bridge-kurma -"
+              systemCfg.systemd.tmpfiles.rules
+            )
+            (assertContains "service wantedBy" "multi-user.target" serviceCfg.wantedBy)
+            (assertContains "service after" "network-online.target" serviceCfg.after)
+            (assertContains "service wants" "network-online.target" serviceCfg.wants)
+            (assertContains "service path env mode"
+              "SIDE_CAR_MODE"
+              (builtins.attrNames serviceCfg.environment)
+            )
+            (assertContains "user group"
+              "bridge-kurma"
+              [ systemCfg.users.users."bridge-kurma".group ]
+            )
+            (assertContains "service user"
+              "bridge-kurma"
+              [ serviceCfg.serviceConfig.User ]
+            )
+            (assertContains "service group"
+              "bridge-kurma"
+              [ serviceCfg.serviceConfig.Group ]
+            )
+            (assertContains "service working directory"
+              "/var/lib/bridge-kurma-sidecar"
+              [ serviceCfg.serviceConfig.WorkingDirectory ]
+            )
+            (assertContains "service execStart"
+              "/nix/store/fake/bin/kurma-sidecar --listen 127.0.0.1:4310"
+              [ serviceCfg.serviceConfig.ExecStart ]
+            )
+            (assertContains "caddy enabled" true [ systemCfg.services.caddy.enable ])
+            (assertHasInfix "caddy reverse proxy"
+              "reverse_proxy 127.0.0.1:4310"
+              caddyCfg.extraConfig
+            )
+            (assertHasInfix "caddy tls internal"
+              "tls internal"
+              caddyCfg.extraConfig
+            )
+          ];
+        in
+        assert builtins.all (x: x) checks;
+        pkgs.writeText "tusk-bridge-kurma-sidecar-module-smoke.json" (
+          builtins.toJSON {
+            service = {
+              execStart = serviceCfg.serviceConfig.ExecStart;
+              workingDirectory = serviceCfg.serviceConfig.WorkingDirectory;
+              wantedBy = serviceCfg.wantedBy;
+            };
+            caddy = {
+              enable = systemCfg.services.caddy.enable;
+              extraConfig = caddyCfg.extraConfig;
+            };
+          }
+        );
     in
     {
       tusk = repoSelfHostTusk;
@@ -1292,6 +1408,7 @@
       };
       flakeModules.tusk = tuskFlakeModule;
       flakeModules.default = tuskFlakeModule;
+      nixosModules.bridge-kurma-sidecar = ./modules/bridge-kurma-sidecar.nix;
       nixosModules.cache = ./modules/cache.nix;
       nixosModules.default = ./modules/cache.nix;
       darwinModules.cache = ./modules/cache.nix;
@@ -1301,6 +1418,7 @@
         radicle-flake-wasm-resolver-wasi = radicleFlakeWasmResolverWasiCheck;
         tusk-self-host-witnesses = repoSelfHostWitnessCheck;
         tusk-self-host-trace = repoSelfHostTraceCheck;
+        tusk-bridge-kurma-sidecar-module-smoke = bridgeKurmaSidecarModuleSmokeCheck;
         tusk-cache-consume-module-smoke = cacheConsumeModuleSmokeCheck;
       };
       packages.${system} = {
@@ -1316,7 +1434,6 @@
         radicle-flake-wasm-resolver = radicleFlakeWasmResolverPackage;
         tusk-clean = tuskClean;
         tusk-flake-ref = tuskFlakeRefPackage;
-        tusk-radicle = tuskRadiclePackage;
         tusk-hermes-probe = tuskHermesProbePackage;
         tusk-hermes-runtime = tuskHermesRuntimePackage;
         tusk-self-host = tuskSelfHostPackage;
@@ -1381,10 +1498,6 @@
         tusk-flake-ref = {
           type = "app";
           program = "${tuskFlakeRefPackage}/bin/tusk-flake-ref";
-        };
-        tusk-radicle = {
-          type = "app";
-          program = "${tuskRadiclePackage}/bin/tusk-radicle";
         };
         tusk-hermes-probe = {
           type = "app";
