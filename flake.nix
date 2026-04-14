@@ -23,6 +23,22 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    # Canonical bridge skill source. Non-flake path input so tusk can
+    # project the bridge SKILL.md into its Claude + Codex shells without
+    # bridge needing to ship its own flake. Authored content stays at
+    # fish/sites/bridge/.agents/skills/bridge/; tusk consumes it here.
+    #
+    # Absolute path (machine-local) chosen because relative `path:../..`
+    # inputs escape the flake store boundary and break nix's store-path
+    # resolution. A follow-up lane can convert this to a Radicle- or
+    # flake-parts-based cross-repo mechanism once the ecosystem is ready;
+    # for v0 we accept the machine-locality and rely on flake.lock's
+    # narHash to pin content.
+    bridge-src = {
+      url = "path:/Users/arj/irai/fish/sites/bridge";
+      flake = false;
+    };
   };
 
   outputs =
@@ -33,6 +49,7 @@
       nixpkgs,
       llm-agents,
       rust-overlay,
+      bridge-src,
       ...
     }:
     let
@@ -52,6 +69,9 @@
         nix = ./.agents/skills/nix;
         skill-dev = ./.agents/skills/skill-dev;
         topology = ./.agents/skills/topology;
+        # Canonical authoring at fish/sites/bridge/.agents/skills/bridge/;
+        # consumed via the bridge-src non-flake path input. No duplicate.
+        bridge = "${bridge-src}/.agents/skills/bridge";
       };
       mkSkillModule = name: {
         codex.skills.${name}.source = skillSources.${name};
@@ -64,21 +84,25 @@
       devenvNixSkillModule = mkSkillModule "nix";
       devenvSkillDevSkillModule = mkSkillModule "skill-dev";
       devenvTopologySkillModule = mkSkillModule "topology";
+      devenvBridgeSkillModule = mkSkillModule "bridge";
       devenvTuskClaudeSkillModule = mkClaudeSkillModule "tusk";
       devenvOpsClaudeSkillModule = mkClaudeSkillModule "ops";
       devenvNixClaudeSkillModule = mkClaudeSkillModule "nix";
       devenvSkillDevClaudeSkillModule = mkClaudeSkillModule "skill-dev";
       devenvTopologyClaudeSkillModule = mkClaudeSkillModule "topology";
+      devenvBridgeClaudeSkillModule = mkClaudeSkillModule "bridge";
       devenvConsumerSharedSkillsModule = {
         imports = [
           devenvTuskSkillModule
           devenvOpsSkillModule
           devenvNixSkillModule
           devenvTopologySkillModule
+          devenvBridgeSkillModule
           devenvTuskClaudeSkillModule
           devenvOpsClaudeSkillModule
           devenvNixClaudeSkillModule
           devenvTopologyClaudeSkillModule
+          devenvBridgeClaudeSkillModule
         ];
       };
       tuskOpenaiSkillBundle = tuskLib.mkOpenAISkillPackage {
@@ -860,13 +884,20 @@
             devenvNixSkillModule
             devenvSkillDevSkillModule
             devenvTopologySkillModule
+            devenvBridgeSkillModule
             devenvTuskClaudeSkillModule
             devenvOpsClaudeSkillModule
             devenvNixClaudeSkillModule
             devenvSkillDevClaudeSkillModule
             devenvTopologyClaudeSkillModule
+            devenvBridgeClaudeSkillModule
           ];
 
+          # In-tree skills use runtimePath so edits to .agents/skills/<name>/
+          # reflect live in the projection. Bridge is consumed via the
+          # bridge-src non-flake path input (fish/sites/bridge); it has no
+          # runtimePath and is projected as a packaged skill, so bridge-side
+          # edits require `nix flake update bridge-src` to appear here.
           codex.skills.tusk.runtimePath = ".agents/skills/tusk";
           codex.skills.ops.runtimePath = ".agents/skills/ops";
           codex.skills.nix.runtimePath = ".agents/skills/nix";
@@ -1242,6 +1273,7 @@
         nix-skill = devenvNixSkillModule;
         skill-dev-skill = devenvSkillDevSkillModule;
         topology-skill = devenvTopologySkillModule;
+        bridge-skill = devenvBridgeSkillModule;
       };
       flakeModules.tusk = tuskFlakeModule;
       flakeModules.default = tuskFlakeModule;

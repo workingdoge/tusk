@@ -25,6 +25,18 @@
         "type": "github"
       }
     },
+    "bridge-src": {
+      "flake": false,
+      "locked": {
+        "narHash": "sha256-cXUWr8AN4Yp4UDVmjnT9ofiDW+5LsbmHfwM5NKf2Aes=",
+        "path": "/Users/arj/irai/fish/sites/bridge",
+        "type": "path"
+      },
+      "original": {
+        "path": "/Users/arj/irai/fish/sites/bridge",
+        "type": "path"
+      }
+    },
     "bun2nix": {
       "inputs": {
         "flake-parts": [
@@ -1016,6 +1028,7 @@
     },
     "root": {
       "inputs": {
+        "bridge-src": "bridge-src",
         "crane": "crane",
         "devenv": "devenv",
         "glistix": "glistix",
