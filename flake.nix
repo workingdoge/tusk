@@ -358,7 +358,7 @@
               tusk.scratch.enable = mkDefault true;
 
               packages = [
-                consumerBeads
+                repoBeads
                 pkgs.deadnix
                 pkgs.direnv
                 pkgs.dolt
@@ -384,7 +384,8 @@
                 export DEVENV_ROOT="$TUSK_CHECKOUT_ROOT"
                 export BEADS_WORKSPACE_ROOT="$(tusk_resolve_tracker_root)"
                 export TUSK_TRACKER_ROOT="$BEADS_WORKSPACE_ROOT"
-                export PATH="${repoCodex}/bin:$PATH"
+                export PATH="${repoCodex}/bin:${repoBeads}/bin:$PATH"
+                hash -r >/dev/null 2>&1 || true
                 echo "tusk consumer shell"
                 echo "  CODEX_HOME=$CODEX_HOME"
                 echo "  codex"
@@ -922,7 +923,8 @@
             export DEVENV_ROOT="$TUSK_CHECKOUT_ROOT"
             export BEADS_WORKSPACE_ROOT="$(tusk_resolve_tracker_root)"
             export TUSK_TRACKER_ROOT="$BEADS_WORKSPACE_ROOT"
-            export PATH="${repoCodex}/bin:$PATH"
+            export PATH="${repoCodex}/bin:${repoBeads}/bin:$PATH"
+            hash -r >/dev/null 2>&1 || true
             echo "tusk dogfood shell"
             echo "  CODEX_HOME=$CODEX_HOME"
             echo "  codex"
