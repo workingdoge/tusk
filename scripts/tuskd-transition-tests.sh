@@ -74,6 +74,27 @@ run_cli_json() {
   fi
 }
 
+run_flake_tuskd_json() {
+  local output_var="$1"
+  local status_var="$2"
+  local repo_root="$3"
+  shift 3
+  local -a command=(nix run "path:${repo_root}#tuskd" -- "$@")
+
+  if command -v timeout >/dev/null 2>&1; then
+    capture_command "${output_var}" "${status_var}" timeout --foreground 120 "${command[@]}"
+    if [ "${!status_var}" = "124" ]; then
+      fail "nix run path:${repo_root}#tuskd timed out: $*"
+    fi
+  else
+    capture_command "${output_var}" "${status_var}" "${command[@]}"
+  fi
+
+  if [ -n "${!output_var}" ]; then
+    printf '%s' "${!output_var}" | jq -e . >/dev/null 2>&1 || fail "flake tuskd command did not return valid JSON: $*"$'\n'"${!output_var}"
+  fi
+}
+
 assert_status() {
   local actual="$1"
   local expected="$2"
@@ -793,14 +814,14 @@ test_compact_lane_remove() {
   assert_status "${launch_status}" "0" "launch compact remove lane"
 
   revision="$(current_revision "${repo_root}")"
-  run_cli_json compact_json compact_status \
-    tuskd compact-lane \
-      --repo "${repo_root}" \
-      --issue-id "${issue_id}" \
-      --revision "${revision}" \
-      --reason "compact remove test completed" \
-      --note "compact remove probe"
-  assert_status "${compact_status}" "0" "compact lane remove"
+  run_flake_tuskd_json compact_json compact_status "${repo_root}" \
+    compact-lane \
+    --repo "${repo_root}" \
+    --issue-id "${issue_id}" \
+    --revision "${revision}" \
+    --reason "compact remove test completed" \
+    --note "compact remove probe"
+  assert_status "${compact_status}" "0" "compact lane remove via nix run"
   assert_json_value "${compact_json}" '.cleanup.effective_mode' "remove" "compact remove mode"
 
   workspace_path="$(jq -r '.cleanup.workspace_path // ""' <<<"${compact_json}")"
@@ -843,15 +864,15 @@ test_compact_lane_quarantine() {
   assert_status "${launch_status}" "0" "launch compact quarantine lane"
 
   revision="$(current_revision "${repo_root}")"
-  run_cli_json compact_json compact_status \
-    tuskd compact-lane \
-      --repo "${repo_root}" \
-      --issue-id "${issue_id}" \
-      --revision "${revision}" \
-      --reason "compact quarantine test completed" \
-      --note "compact quarantine probe" \
-      --quarantine
-  assert_status "${compact_status}" "0" "compact lane quarantine"
+  run_flake_tuskd_json compact_json compact_status "${repo_root}" \
+    compact-lane \
+    --repo "${repo_root}" \
+    --issue-id "${issue_id}" \
+    --revision "${revision}" \
+    --reason "compact quarantine test completed" \
+    --note "compact quarantine probe" \
+    --quarantine
+  assert_status "${compact_status}" "0" "compact lane quarantine via nix run"
   assert_json_value "${compact_json}" '.cleanup.effective_mode' "quarantine" "compact quarantine mode"
 
   workspace_path="$(jq -r '.cleanup.workspace_path // ""' <<<"${compact_json}")"
@@ -1248,26 +1269,26 @@ test_complete_lane() {
     tuskd land-main --repo "${repo_root}" --revision "${advance_revision}" --note "complete lane main advance"
   assert_status "${advance_land_status}" "0" "complete-lane advance main"
 
-  run_cli_json plan_json plan_status \
-    tuskd complete-lane \
-      --repo "${repo_root}" \
-      --issue-id "${issue_id}" \
-      --revision "${landed_revision}" \
-      --reason "complete lane test completed" \
-      --note "complete lane probe" \
-      --plan
-  assert_status "${plan_status}" "0" "complete-lane plan"
+  run_flake_tuskd_json plan_json plan_status "${repo_root}" \
+    complete-lane \
+    --repo "${repo_root}" \
+    --issue-id "${issue_id}" \
+    --revision "${landed_revision}" \
+    --reason "complete lane test completed" \
+    --note "complete lane probe" \
+    --plan
+  assert_status "${plan_status}" "0" "complete-lane plan via nix run"
   assert_json_value "${plan_json}" '.status' "plan" "complete-lane plan status"
   assert_json_value "${plan_json}" '.revision' "${landed_revision}" "complete-lane plan revision"
 
-  run_cli_json complete_json complete_status \
-    tuskd complete-lane \
-      --repo "${repo_root}" \
-      --issue-id "${issue_id}" \
-      --revision "${landed_revision}" \
-      --reason "complete lane test completed" \
-      --note "complete lane probe"
-  assert_status "${complete_status}" "0" "complete-lane run"
+  run_flake_tuskd_json complete_json complete_status "${repo_root}" \
+    complete-lane \
+    --repo "${repo_root}" \
+    --issue-id "${issue_id}" \
+    --revision "${landed_revision}" \
+    --reason "complete lane test completed" \
+    --note "complete lane probe"
+  assert_status "${complete_status}" "0" "complete-lane run via nix run"
   assert_json_value "${complete_json}" '.status' "completed" "complete-lane result"
   assert_json_value "${complete_json}" '.land.status' "landed_repaired" "complete-lane landing result"
   assert_json_value "${complete_json}" '.land.receipt.kind' "land.main" "complete-lane landing receipt"
