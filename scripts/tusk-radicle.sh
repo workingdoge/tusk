@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-program_name="${0##*/}"
+program_name="tusk-radicle"
 paths_sh="${TUSK_PATHS_SH:?TUSK_PATHS_SH is required}"
 
 # shellcheck disable=SC1090
@@ -13,11 +13,26 @@ usage() {
   cat <<'EOF'
 Usage:
   tusk-radicle status [--repo PATH]
+  tusk-radicle ensure-tools [--repo PATH]
+  tusk-radicle fetch [--repo PATH] [--remote NAME]
+  tusk-radicle push [--repo PATH] [--branch NAME] [--remote NAME]
   tusk-radicle init-existing --rid RID [--repo PATH] [--branch NAME]
 
 Commands:
   status
       Print the current Radicle/Git hybrid wiring for the repo.
+
+  ensure-tools
+      Verify that the Radicle transport toolchain required by this helper is
+      available and print the resolved tool paths.
+
+  fetch
+      Fetch Radicle refs through the helper-owned toolchain. Default remote:
+      `rad`.
+
+  push
+      Push the selected branch to the Radicle remote through the helper-owned
+      toolchain. Default remote: `rad`. Default branch: `main`.
 
   init-existing
       Attach an existing Radicle RID to the repo without stealing the GitHub
@@ -29,6 +44,7 @@ Options:
   --repo PATH         Resolve the target checkout from PATH instead of $PWD.
   --rid RID           Existing Radicle RID to attach.
   --branch NAME       Branch whose Git upstream should be preserved. Default: main
+  --remote NAME       Remote to use for fetch/push. Default: rad
   -h, --help          Show this help text.
 
 Notes:
@@ -60,6 +76,29 @@ ensure_command() {
     || fail "required command `${command_name}` is not available"
 }
 
+command_path_or_missing() {
+  local command_name="$1"
+  command -v "${command_name}" 2>/dev/null || true
+}
+
+tool_path_or_placeholder() {
+  local command_name="$1"
+  local path=""
+
+  path="$(command_path_or_missing "${command_name}")"
+  if [ -n "${path}" ]; then
+    printf '%s\n' "${path}"
+  else
+    printf '<missing>\n'
+  fi
+}
+
+ensure_radicle_transport_tools() {
+  ensure_command git
+  ensure_command rad
+  ensure_command git-remote-rad
+}
+
 current_rid() {
   local repo_root="$1"
   local remote_url=""
@@ -75,6 +114,23 @@ normalize_rid() {
   rid="${rid#rad://}"
   rid="${rid#rad:}"
   printf '%s\n' "${rid}"
+}
+
+rad_profile_home() {
+  printf '%s\n' "${RAD_HOME:-${HOME}/.radicle}"
+}
+
+rad_storage_repo_path() {
+  local repo_root="$1"
+  local rid=""
+
+  rid="$(current_rid "${repo_root}")"
+  if [ -z "${rid}" ]; then
+    printf '\n'
+    return
+  fi
+
+  printf '%s/storage/%s\n' "$(rad_profile_home)" "${rid}"
 }
 
 current_branch_head() {
@@ -213,6 +269,12 @@ show_status() {
   local rad_head=""
   local origin_relation=""
   local rad_relation=""
+  local git_path=""
+  local rad_path=""
+  local git_remote_rad_path=""
+  local transport_ready="false"
+  local rad_storage_repo=""
+  local rad_storage_ready="false"
 
   branch_remote="$(git -C "${repo_root}" config --get "branch.${branch}.remote" || true)"
   branch_merge="$(git -C "${repo_root}" config --get "branch.${branch}.merge" || true)"
@@ -225,11 +287,27 @@ show_status() {
   rad_head="$(remote_branch_head "${repo_root}" rad "${branch}")"
   origin_relation="$(head_relation "${repo_root}" "${local_head}" "${origin_head}")"
   rad_relation="$(head_relation "${repo_root}" "${local_head}" "${rad_head}")"
+  git_path="$(tool_path_or_placeholder git)"
+  rad_path="$(tool_path_or_placeholder rad)"
+  git_remote_rad_path="$(tool_path_or_placeholder git-remote-rad)"
+  rad_storage_repo="$(rad_storage_repo_path "${repo_root}")"
+  if [ "${git_path}" != "<missing>" ] && [ "${rad_path}" != "<missing>" ] && [ "${git_remote_rad_path}" != "<missing>" ]; then
+    transport_ready="true"
+  fi
+  if [ -n "${rad_storage_repo}" ] && [ -d "${rad_storage_repo}" ]; then
+    rad_storage_ready="true"
+  fi
 
   cat <<EOF
 repo_root=${repo_root}
 branch=${branch}
 local_head=${local_head:-<unknown>}
+git_path=${git_path}
+rad_path=${rad_path}
+git_remote_rad_path=${git_remote_rad_path}
+rad_transport_ready=${transport_ready}
+rad_storage_repo=${rad_storage_repo:-<missing>}
+rad_storage_ready=${rad_storage_ready}
 branch_remote=${branch_remote:-<unset>}
 branch_merge=${branch_merge:-<unset>}
 origin_url=${origin_url:-<missing>}
@@ -243,6 +321,75 @@ rad_relation=${rad_relation}
 rad_profile_home=${HOME}/.radicle
 node_status=$(rad node status >/dev/null 2>&1 && printf running || printf stopped)
 EOF
+}
+
+ensure_tools() {
+  local repo_root="$1"
+  local rad_storage_repo=""
+
+  ensure_git_repo "${repo_root}"
+  ensure_radicle_transport_tools
+  rad_storage_repo="$(rad_storage_repo_path "${repo_root}")"
+
+  cat <<EOF
+repo_root=${repo_root}
+git_path=$(command -v git)
+rad_path=$(command -v rad)
+git_remote_rad_path=$(command -v git-remote-rad)
+rad_profile_home=$(rad_profile_home)
+rad_storage_repo=${rad_storage_repo:-<missing>}
+rad_storage_ready=$([ -n "${rad_storage_repo}" ] && [ -d "${rad_storage_repo}" ] && printf true || printf false)
+node_status=$(rad node status >/dev/null 2>&1 && printf running || printf stopped)
+EOF
+}
+
+ensure_radicle_storage_ready() {
+  local repo_root="$1"
+  local remote_name="$2"
+  local action_name="$3"
+  local storage_path=""
+  local rid=""
+
+  if [ "${remote_name}" != "rad" ]; then
+    return
+  fi
+
+  rid="$(current_rid "${repo_root}")"
+  [ -n "${rid}" ] || fail "remote \`${remote_name}\` is not configured for ${repo_root}"
+
+  storage_path="$(rad_storage_repo_path "${repo_root}")"
+  if [ ! -d "${storage_path}" ]; then
+    fail "local Radicle storage for \`rad:${rid}\` is missing at \`${storage_path}\`; attach or clone the repo before using \`${program_name} ${action_name}\`"
+  fi
+}
+
+fetch_remote() {
+  local repo_root="$1"
+  local branch="$2"
+  local remote_name="$3"
+
+  ensure_git_repo "${repo_root}"
+  ensure_radicle_transport_tools
+  ensure_radicle_storage_ready "${repo_root}" "${remote_name}" "fetch"
+
+  git -C "${repo_root}" fetch "${remote_name}"
+  show_status "${repo_root}" "${branch}"
+}
+
+push_remote() {
+  local repo_root="$1"
+  local branch="$2"
+  local remote_name="$3"
+
+  ensure_git_repo "${repo_root}"
+  ensure_radicle_transport_tools
+  ensure_radicle_storage_ready "${repo_root}" "${remote_name}" "push"
+  current_branch_head "${repo_root}" "${branch}" >/dev/null
+  git -C "${repo_root}" rev-parse "${branch}^{commit}" >/dev/null 2>&1 \
+    || fail "branch `${branch}` does not resolve to a local commit"
+
+  git -C "${repo_root}" push "${remote_name}" "${branch}:refs/heads/${branch}"
+  show_status "${repo_root}" "${branch}"
 }
 
 init_existing() {
@@ -278,6 +425,7 @@ main() {
   local repo_arg=""
   local branch="${default_branch}"
   local rid=""
+  local remote_name="rad"
   local command_name="${1:-}"
   local repo_root=""
 
@@ -285,6 +433,13 @@ main() {
     usage
     exit 1
   fi
+
+  case "${command_name}" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+  esac
   shift
 
   while [ "$#" -gt 0 ]; do
@@ -304,6 +459,11 @@ main() {
         branch="$2"
         shift 2
         ;;
+      --remote)
+        [ "$#" -ge 2 ] || fail "`--remote` requires a value"
+        remote_name="$2"
+        shift 2
+        ;;
       -h|--help)
         usage
         exit 0
@@ -319,6 +479,15 @@ main() {
   case "${command_name}" in
     status)
       show_status "${repo_root}" "${branch}"
+      ;;
+    ensure-tools)
+      ensure_tools "${repo_root}"
+      ;;
+    fetch)
+      fetch_remote "${repo_root}" "${branch}" "${remote_name}"
+      ;;
+    push)
+      push_remote "${repo_root}" "${branch}" "${remote_name}"
       ;;
     init-existing)
       init_existing "${repo_root}" "${branch}" "${rid}"

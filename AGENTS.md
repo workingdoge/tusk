@@ -21,6 +21,7 @@ These instructions apply to the canonical `tusk` repo checkout.
 - Use `tusk-codex --checkout <workspace>` when you need Codex to follow a live lane workspace, `tusk-claude --checkout <workspace>` when you want Claude Code to read repo-local `.claude/skills` from that workspace, and `tusk-skill-loop --checkout <workspace>` when iterating on `.agents/skills/**`; the loop validates before restart and does fast relaunch rather than pretending in-process hot reload exists.
 - `tuskd` is the coordinator action and receipt surface; `tusk-tracker` is the internal tracker adapter seam behind it.
 - `tusk-radicle` is the repo-owned helper for attaching the canonical checkout to the live Radicle RID while preserving GitHub as the `main` upstream.
+  It also owns the helper-side Radicle transport surface so fetch/push no longer depend on ambient host `rad` or `git-remote-rad`.
   `tusk-radicle status` also surfaces best-effort publish drift between local `main`, `origin`, and `rad`.
 - `.beads/tuskd/lanes.json` is the first-class lane state record; receipts remain the audit log of lane transitions.
 - Outside the dev shell, use `nix run .#bd -- ...` instead of an ambient host `bd`; the wrapper reads the `tuskd` service record and exports the repo-scoped Dolt endpoint before execing Beads.
@@ -44,6 +45,8 @@ nix run .#tusk-flake-ref -- --json
 nix run .#tusk-hermes-probe -- --help
 nix run .#tusk-hermes-runtime -- --help
 nix run .#tusk-radicle -- status
+nix run .#tusk-radicle -- ensure-tools
+nix run .#tusk-radicle -- fetch
 nix eval --raw path:.#packages.aarch64-darwin.rust-toolchain.name
 nix eval --raw --apply 'x: if builtins.isFunction x || builtins.hasAttr "__functor" x then "ok" else throw "not callable"' path:.#lib.crane.buildDepsOnly
 nix develop --no-pure-eval path:. -c sh -lc 'cd "$DEVENV_ROOT" && bd version && jj --version && dolt version'
@@ -80,7 +83,7 @@ nix run .#tusk-ui -- --help
 - `main` is the intended moving bookmark for flake consumers; once exported to Git and pushed, consumers can pin the repo with `?ref=main` and optionally a specific revision.
 - `flake.nix` also exports a flake-owned `bd`/`beads` wrapper app so raw-shell `nix run` calls reuse repo-scoped tracker state instead of ambient host Beads configuration.
 - `flake.nix` also exports `tusk-flake-ref`, which prints the canonical `path:`, `git+file:`, and remote `git+...?...ref=` forms for this repo and reports when no publish remote is configured.
-- `flake.nix` also exports `tusk-radicle`, which attaches the existing Radicle RID to a checkout without repointing `main` away from `origin`.
+- `flake.nix` also exports `tusk-radicle`, which attaches the existing Radicle RID to a checkout without repointing `main` away from `origin`, and owns the helper-side Radicle toolchain for transport commands.
 - `devenv-codex-module.nix` owns the shared `codex.skills` and `claude.skills` option declarations, repo-local `CODEX_HOME` bootstrap, and `.codex/skills` plus `.claude/skills` projection logic for `devenv` consumers.
 - Repo-local skill projection under `.codex/skills/` and `.claude/skills/` is one managed symlink per skill root; the runtime should not materialize fragile per-file link trees there.
 - `devenv-scratch-module.nix` owns the shared per-repo scratch relocation policy for common build tools in consumer shells.
@@ -94,7 +97,7 @@ nix run .#tusk-ui -- --help
 - `scripts/tusk-skill-loop.sh` watches `.agents/skills/**`, reruns `tusk-skill-contract-check`, and relaunches `tusk-codex` only after validation passes.
 - `scripts/tusk-bridge-conformance-check.sh` verifies the repo-owned bridge adjunct checksum manifest, runs the Rust bridge adapter conformance tests, and can probe the external `bridge` flake edge contract when `--bridge-flake <flake-ref>` is provided.
 - `scripts/tusk-clean.sh` contains the conservative cleanup/quarantine script for rebuildable repo-local artifacts.
-- `scripts/tusk-radicle.sh` contains the hybrid GitHub/Radicle pilot helper for attaching the existing RID and inspecting local wiring.
+- `scripts/tusk-radicle.sh` contains the hybrid GitHub/Radicle pilot helper for attaching the existing RID, verifying the helper-side Radicle toolchain, and running fetch/push transport commands through the repo-owned surface.
 - `scripts/tusk-hermes-probe.sh` contains the lane-scoped Hermes local-isolation launcher and receipt-emitting host control path.
 - `scripts/tusk-hermes-probe-container.sh` contains the container-side Hermes bootstrap and probe entrypoint copied into the local run root before execution.
 - `scripts/tusk-hermes-runtime.sh` contains the reusable Hermes local-runtime launcher for bounded command or shell entry.
@@ -162,6 +165,8 @@ nix run .#tusk-ui -- --help
 - `nix run .#tusk-hermes-probe -- --help`
 - `nix run .#tusk-hermes-runtime -- --help`
 - `nix run .#tusk-radicle -- status`
+- `nix run .#tusk-radicle -- ensure-tools`
+- `nix run .#tusk-radicle -- fetch`
 - `nix run .#tusk-tracker -- status --repo "$PWD"`
 - `nix run .#tusk-tracker -- issues board --repo "$PWD"`
 - `nix run .#tusk-tracker -- backend show --repo "$PWD"`

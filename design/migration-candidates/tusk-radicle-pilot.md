@@ -39,6 +39,7 @@ Check the result with:
 
 ```bash
 nix run .#tusk-radicle -- status
+nix run .#tusk-radicle -- ensure-tools
 ```
 
 Expected shape:
@@ -61,9 +62,15 @@ Normal hybrid publish:
 
 ```bash
 git push origin main
-git push rad main
+nix run .#tusk-radicle -- push
+nix run .#tusk-radicle -- fetch
 RAD_PASSPHRASE=... rad sync rad:z3fqVWWfMR7HoVJ1y3CNBz5gciXfm --timeout 20s --replicas 2
 ```
+
+The important ownership change is that Radicle Git transport should happen
+through `tusk-radicle`, not through an ambient host shell that happens to have
+`rad` and `git-remote-rad` installed. The helper package already carries the
+required toolchain.
 
 If the canonical checkout is dirty or otherwise unsuitable for first-time
 bootstrap, use a clean local clone of `main` to initialize the RID and publish,
@@ -86,6 +93,7 @@ Local:
 
 ```bash
 nix run .#tusk-radicle -- status
+nix run .#tusk-radicle -- ensure-tools
 rad .
 rad ls
 ```
