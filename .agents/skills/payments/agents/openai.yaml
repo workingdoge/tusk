@@ -1,0 +1,4 @@
+interface:
+  display_name: "Payments"
+  short_description: "Run the 402 challenge, witness, and retry loop"
+  default_prompt: "Use $payments to interpret this 402 or paid-access challenge, classify the protocol family and method, run preflight, build the right retry witness or executor call, and route ownership cleanly."

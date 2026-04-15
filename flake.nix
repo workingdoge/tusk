@@ -66,6 +66,7 @@
       skillSources = {
         tusk = ./.agents/skills/tusk;
         ops = ./.agents/skills/ops;
+        payments = ./.agents/skills/payments;
         nix = ./.agents/skills/nix;
         skill-dev = ./.agents/skills/skill-dev;
         topology = ./.agents/skills/topology;
@@ -81,12 +82,14 @@
       };
       devenvTuskSkillModule = mkSkillModule "tusk";
       devenvOpsSkillModule = mkSkillModule "ops";
+      devenvPaymentsSkillModule = mkSkillModule "payments";
       devenvNixSkillModule = mkSkillModule "nix";
       devenvSkillDevSkillModule = mkSkillModule "skill-dev";
       devenvTopologySkillModule = mkSkillModule "topology";
       devenvBridgeSkillModule = mkSkillModule "bridge";
       devenvTuskClaudeSkillModule = mkClaudeSkillModule "tusk";
       devenvOpsClaudeSkillModule = mkClaudeSkillModule "ops";
+      devenvPaymentsClaudeSkillModule = mkClaudeSkillModule "payments";
       devenvNixClaudeSkillModule = mkClaudeSkillModule "nix";
       devenvSkillDevClaudeSkillModule = mkClaudeSkillModule "skill-dev";
       devenvTopologyClaudeSkillModule = mkClaudeSkillModule "topology";
@@ -95,11 +98,13 @@
         imports = [
           devenvTuskSkillModule
           devenvOpsSkillModule
+          devenvPaymentsSkillModule
           devenvNixSkillModule
           devenvTopologySkillModule
           devenvBridgeSkillModule
           devenvTuskClaudeSkillModule
           devenvOpsClaudeSkillModule
+          devenvPaymentsClaudeSkillModule
           devenvNixClaudeSkillModule
           devenvTopologyClaudeSkillModule
           devenvBridgeClaudeSkillModule
@@ -896,12 +901,14 @@
             devenvCodexModule
             devenvTuskSkillModule
             devenvOpsSkillModule
+            devenvPaymentsSkillModule
             devenvNixSkillModule
             devenvSkillDevSkillModule
             devenvTopologySkillModule
             devenvBridgeSkillModule
             devenvTuskClaudeSkillModule
             devenvOpsClaudeSkillModule
+            devenvPaymentsClaudeSkillModule
             devenvNixClaudeSkillModule
             devenvSkillDevClaudeSkillModule
             devenvTopologyClaudeSkillModule
@@ -915,12 +922,14 @@
           # edits require `nix flake update bridge-src` to appear here.
           codex.skills.tusk.runtimePath = ".agents/skills/tusk";
           codex.skills.ops.runtimePath = ".agents/skills/ops";
+          codex.skills.payments.runtimePath = ".agents/skills/payments";
           codex.skills.nix.runtimePath = ".agents/skills/nix";
           codex.skills.skill-dev.runtimePath = ".agents/skills/skill-dev";
           codex.skills.topology.runtimePath = ".agents/skills/topology";
 
           claude.skills.tusk.runtimePath = ".agents/skills/tusk";
           claude.skills.ops.runtimePath = ".agents/skills/ops";
+          claude.skills.payments.runtimePath = ".agents/skills/payments";
           claude.skills.nix.runtimePath = ".agents/skills/nix";
           claude.skills.skill-dev.runtimePath = ".agents/skills/skill-dev";
           claude.skills.topology.runtimePath = ".agents/skills/topology";
@@ -1341,6 +1350,7 @@
         consumer-shared-skills = devenvConsumerSharedSkillsModule;
         tusk-skill = devenvTuskSkillModule;
         ops-skill = devenvOpsSkillModule;
+        payments-skill = devenvPaymentsSkillModule;
         nix-skill = devenvNixSkillModule;
         skill-dev-skill = devenvSkillDevSkillModule;
         topology-skill = devenvTopologySkillModule;

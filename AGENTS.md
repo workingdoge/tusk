@@ -110,6 +110,7 @@ nix run .#tusk-ui -- --help
 - `design/migration-candidates/` contains explicitly staged notes that remain visible here temporarily but are expected to move to a more appropriate context later; do not treat them as kernel authority.
 - `.agents/skills/tusk/` contains the repo-local source of truth for the `tusk` workflow skill.
 - `.agents/skills/ops/` contains the repo-local source of truth for the shared `ops` skill.
+- `.agents/skills/payments/` contains the repo-local source of truth for the shared `payments` skill.
 - `.agents/skills/nix/` contains the repo-local source of truth for the shared `nix` skill.
 - `.agents/skills/skill-dev/` contains the repo-local source of truth for the shared skill-authoring meta-skill.
 - `scripts/tusk-tracker.sh` contains the flake-owned tracker boundary; the current implementation is a `bd` adapter so `tuskd` no longer shells out to raw `bd` commands directly.
@@ -125,7 +126,7 @@ nix run .#tusk-ui -- --help
 - Treat `.claude/` as runtime state only. It is the repo-local Claude project surface, not the editable source of skills.
 - Treat `.codex/` as runtime state only. It is the repo-local Codex home, not the editable source of skills.
 - Bootstrap from `~/.codex` only for missing auth/config/rules; do not treat `~/.codex/skills` as runtime skill input.
-- `devenvModules.consumer` should expose zero shared skills by default. Consumers opt in explicitly with `devenvModules.tusk-skill`, `devenvModules.ops-skill`, `devenvModules.nix-skill`, or their own local `codex.skills.*.source` / `claude.skills.*.source` entries.
+- `devenvModules.consumer` should expose zero shared skills by default. Consumers opt in explicitly with `devenvModules.tusk-skill`, `devenvModules.ops-skill`, `devenvModules.payments-skill`, `devenvModules.nix-skill`, or their own local `codex.skills.*.source` / `claude.skills.*.source` entries.
 - `devenvModules.dogfood` is allowed to project the shared skills explicitly because this repo authors them.
 
 ## Change Rules
