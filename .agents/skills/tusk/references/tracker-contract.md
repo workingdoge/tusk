@@ -24,7 +24,26 @@ Use this reference when a lane depends on `bd` and Dolt being healthy, when shar
 
 ## Readiness Sequence
 
-Run the smallest readiness probe before worker launch:
+For `tusk`, the canonical preflight is `tuskd doctor`. It bundles the four tracker invariants and emits one specific repair per failure:
+
+```bash
+cd "$repo_root"
+tuskd doctor --repo "$repo_root"                # human
+tuskd doctor --repo "$repo_root" --json | jq .  # programmatic
+```
+
+The invariants covered:
+
+| Name           | Checks                                                                  |
+|----------------|-------------------------------------------------------------------------|
+| `dolt-mode`    | server mode is active (not embedded)                                    |
+| `supervisor`   | `.beads/dolt-server.pid` is live and `.beads/dolt-server.port` is bound |
+| `dolt-remote`  | configured remote URLs parse into a known scheme                        |
+| `beads-perms`  | `.beads/` is 0700 (warn on 0750/0755, fail on world-anything)           |
+
+A non-zero exit means at least one invariant failed; the stdout lines name which and carry the exact repair command.
+
+For fine-grained checks or drift diagnosis, fall back to raw `bd`:
 
 ```bash
 cd "$repo_root"
@@ -36,17 +55,44 @@ bd show "$issue_id" >/dev/null
 - If the repo documents a wrapper or managed shell, use that instead of raw commands.
 - If a long-lived service such as `devenv up` keeps Dolt alive, the coordinator should own that session.
 
-For `tusk` itself, read the probe as:
+Outside the dogfood shell in `tusk`, prefix with `nix run .#bd -- …` and `nix run .#tuskd -- …`. Inside the dogfood shell, plain `bd` and `tuskd` are equivalent because the shell pins the wrapper-backed runtime.
 
-```bash
-cd "$repo_root"
-nix run .#bd -- ready --json >/dev/null
-nix run .#bd -- dolt status || true
-nix run .#bd -- show "$issue_id" >/dev/null
+## Supervisor Singletons
+
+The Dolt supervisor is a per-checkout singleton. In `tusk` 2026-04 and later, prefer the `tuskd supervisor-*` verbs over raw `bd dolt start`:
+
+- `tuskd supervisor-start --repo "$tracker_root"` — idempotent. No-op and JSON success when a supervisor is already alive; acquires an atomic `mkdir` lock under `.beads/tuskd/supervisor.start.lock/` before shelling to `bd dolt start`; refuses concurrent starts.
+- `tuskd supervisor-attach --repo "$tracker_root"` — verify-only. Returns `{ok:true, role:"attach", pid, port}` when alive, or `{ok:false, error:{kind:"supervisor-down"}}` when not. Never starts anything. Workers should use this.
+- `tuskd supervisor-stop --repo "$tracker_root" [--force]` — shells to `bd dolt stop`; with `--force` falls back to SIGTERM on the recorded pid when bd's own stop fails.
+
+Raw `bd dolt start` still works, but it has no concurrent-start protection: running it twice in parallel can leave orphan Dolt processes holding the data-dir lock while the latest pid file points at a dead pid. The `tuskd supervisor-*` wrappers exist to make that class of failure impossible by construction.
+
+## Read Projections and Degraded Mode
+
+Six read projections in `tusk` surface a top-level `"degraded"` field when the supervisor is down rather than crashing or hanging:
+
+- `tuskd status`
+- `tuskd coordinator-status`
+- `tuskd sessions-status`
+- `tuskd receipts-status`
+- `tuskd operator-snapshot`
+- `tuskd board-status`
+
+The field shape is stable:
+
+```json
+{ "degraded": { "reason": "supervisor-down", "repair": "bd dolt start" } }
 ```
 
-Inside the dogfood shell, plain `bd` is equivalent because the shell already
-pins the wrapper-backed runtime.
+When the supervisor is healthy, the field is absent — consumers can branch on `jq -e '.degraded'` without extra defense. UIs and coordinator shells should surface the repair line instead of interpreting a sea of `ok: false` subfields.
+
+## Workspace-Lane Commands Preflight
+
+Ten workspace-lane commands gate on the supervisor at dispatch and fail fast with a doctor pointer when it is down:
+
+`launch-lane`, `dispatch-lane`, `autonomous-lane`, `handoff-lane`, `finish-lane`, `lane-park`, `lane-abandon`, `archive-lane`, `complete-lane`, `compact-lane`.
+
+None of them will start Dolt; they refuse and tell the caller to run `tuskd supervisor-start` or `tuskd doctor`. This keeps lifecycle ownership explicit: the coordinator owns the supervisor; the lane commands consume a healthy one.
 
 ## Ownership Rules
 

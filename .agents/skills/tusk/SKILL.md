@@ -18,13 +18,15 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
    - Use `jj --repository "$tracker_root" ...` for repo-global workspace commands.
    - Check the repo instructions for workflow wrappers before assembling raw `bd` and `jj` commands. If the repo ships helpers such as `bd-lane`, `bd-new-issue`, or similar wrappers, prefer those first.
 2. Preflight the tracker before relying on `bd` mutations.
-   - Run one read command such as `bd ready --json` or `bd show <id> --json` from the tracker root.
+   - In `tusk`, prefer `tuskd doctor --repo "$tracker_root"` as the canonical single preflight; it checks dolt-mode, supervisor liveness, remote URL, and `.beads/` perms and emits one specific repair line per failing invariant. `tuskd doctor --json` exposes the same matrix for programmatic consumers.
+   - For fine-grained checks, also run `bd ready --json` or `bd show <id> --json` from the tracker root.
    - Check `bd dolt status` when the tracker uses Dolt server mode.
    - If the only `bd` on `PATH` is an ambient host binary and the repo exposes a pinned wrapper or managed shell, stop and switch to that repo-owned surface before trusting preflight.
    - If the repo uses `tuskd`, also probe the coordinator checkout with `tuskd coordinator-status --repo "$tracker_root"` before new lane work. If it reports drift, decide whether the default checkout is merely stale or is already carrying old issue work.
    - If the repo uses `tuskd`, treat server-mode Dolt as part of the contract. Fresh trackers should be initialized with `bd init --server`; embedded mode is a migration or unblocker task, not normal lane work.
    - If the repo documents a wrapper, dev shell, or service supervisor, use that before ad hoc recovery. Some repos require entering a managed shell and keeping a long-lived service session alive before `bd` is healthy.
    - If the repo uses `devenv up` or a similar interactive supervisor, keep it running in a PTY-backed coordinator session for the duration of tracker-dependent work instead of pushing that ownership into the worker lane.
+   - In `tusk`, prefer `tuskd supervisor-start --repo "$tracker_root"` over raw `bd dolt start`. It is idempotent, uses an atomic lock under `.beads/tuskd/supervisor.start.lock/` to refuse concurrent starts, and no-ops cleanly when a supervisor is already alive. Workers should use `tuskd supervisor-attach` to verify health without ever starting one.
    - Use `tuskd repair-coordinator --repo "$tracker_root" --target-rev main` when the canonical checkout drifted off `main`, but remember that repair rebases the current default working copy. It is not a cleanup command and it will preserve whatever the coordinator checkout is already carrying.
    - Treat missing-column, unknown-field, or schema-version mismatch failures as tracker/runtime unblocker work. Do not normalize them as ordinary lane noise or retry raw `bd` commands against a drifting runtime.
    - If tracker health is bad, fix that first or downgrade the worker brief so `codex exec` does code work only and leaves issue mutation to the outer shell.
@@ -51,6 +53,7 @@ Use this skill to turn one tracked issue into one isolated execution lane. When 
    - Seed the new workspace's working-copy change with a lane-local message such as `-m "$issue_id: wip"`.
    - Remember that `jj workspace rename` changes the workspace label, not the directory path. If you want both to match, choose the semantic destination path when you create the workspace.
    - Do not initialize a separate tracker inside the workspace.
+   - In `tusk`, `tuskd launch-lane` writes a `<workspace>/.tusk-lane` sentinel at creation time (version, issue id, state=`active`, coordinator pid, base rev). Auto-compact refuses to touch workspaces with a live sentinel. Transition state via `tuskd lane-park` or `tuskd lane-abandon`; `tuskd compact-lane --force` bypasses a stuck sentinel when the coordinator intentionally owns it.
 5. Write the execution brief.
    - Put the stable scope in the `codex exec` prompt: goal, non-goals, primary files, verification commands, and finish criteria.
    - Include the base revision and intended landing target so rebases, review handoffs, and cleanup decisions stay explicit.
