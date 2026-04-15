@@ -34,6 +34,9 @@ Usage:
   tuskd archive-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID [--note TEXT]
   tuskd complete-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON [--revision REV] [--outcome OUTCOME] [--note TEXT] [--quarantine] [--plan]
   tuskd compact-lane [--repo PATH] [--socket PATH] --issue-id ISSUE_ID --reason REASON [--revision REV] [--outcome OUTCOME] [--note TEXT] [--quarantine] [--force]
+  tuskd supervisor-attach [--repo PATH]
+  tuskd supervisor-start [--repo PATH]
+  tuskd supervisor-stop [--repo PATH] [--force]
   tuskd serve [--repo PATH] [--socket PATH]
   tuskd query [--repo PATH] [--socket PATH] --kind KIND [--request-id ID] [--payload JSON]
 
@@ -63,6 +66,9 @@ Commands:
   archive-lane  Remove one finished lane from live state once its workspace is gone.
   complete-lane Complete one live lane through handoff, finish, landing, cleanup, archive, and close.
   compact-lane  Compact one live lane through handoff, finish, workspace cleanup, archive, and close. Use --force only for stuck sentinels.
+  supervisor-attach  Verify the Dolt supervisor is alive; never start one. Returns ok/pid/port or error with kind=supervisor-down.
+  supervisor-start   Idempotent start: ok if already running; else acquires an atomic lock, calls bd dolt start, and verifies. Refuses concurrent starts via the lock.
+  supervisor-stop    Stop the Dolt supervisor; --force falls back to SIGTERM if bd dolt stop fails.
   serve         Serve the local JSON protocol over a Unix socket.
   query         Query one tuskd protocol request; read kinds are handled locally, actions still require a live socket.
 
@@ -97,13 +103,143 @@ require_supervisor_alive() {
   local pid=""
 
   if [ ! -f "${pid_file}" ] || [ ! -f "${port_file}" ]; then
-    fail "supervisor required; run: bd dolt start (or 'tuskd doctor' for full report)"
+    fail "supervisor required; run: tuskd supervisor-start (or 'tuskd doctor' for full report)"
   fi
 
   pid="$(cat "${pid_file}" 2>/dev/null || true)"
   if [ -z "${pid}" ] || ! kill -0 "${pid}" 2>/dev/null; then
-    fail "supervisor required; run: bd dolt start (or 'tuskd doctor' for full report)"
+    fail "supervisor required; run: tuskd supervisor-start (or 'tuskd doctor' for full report)"
   fi
+}
+
+supervisor_alive_pid() {
+  local repo_root="$1"
+  local pid_file="${repo_root}/.beads/dolt-server.pid"
+  local port_file="${repo_root}/.beads/dolt-server.port"
+  local pid=""
+
+  [ -f "${pid_file}" ] && [ -f "${port_file}" ] || return 1
+  pid="$(cat "${pid_file}" 2>/dev/null || true)"
+  [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null || return 1
+  printf '%s\n' "${pid}"
+}
+
+supervisor_lock_dir() {
+  local repo_root="$1"
+  printf '%s/.beads/tuskd/supervisor.start.lock\n' "${repo_root}"
+}
+
+acquire_supervisor_lock() {
+  local repo_root="$1"
+  local lock_dir
+  lock_dir="$(supervisor_lock_dir "${repo_root}")"
+  mkdir -p "$(dirname "${lock_dir}")"
+  if mkdir "${lock_dir}" 2>/dev/null; then
+    printf '%s' "$$" > "${lock_dir}/pid"
+    return 0
+  fi
+  return 1
+}
+
+release_supervisor_lock() {
+  local repo_root="$1"
+  local lock_dir
+  lock_dir="$(supervisor_lock_dir "${repo_root}")"
+  [ -d "${lock_dir}" ] && rm -rf "${lock_dir}" || true
+}
+
+cmd_supervisor_attach() {
+  local repo_root="$1"
+  local pid port
+  pid="$(supervisor_alive_pid "${repo_root}" || true)"
+  port="$(cat "${repo_root}/.beads/dolt-server.port" 2>/dev/null || true)"
+  if [ -z "${pid}" ]; then
+    jq -cn --arg repo "${repo_root}" '{ok:false, error:{message:"supervisor not running; run: tuskd supervisor-start", kind:"supervisor-down"}, repo_root:$repo}'
+    return 1
+  fi
+  jq -cn --arg repo "${repo_root}" --arg pid "${pid}" --arg port "${port}" \
+    '{ok:true, role:"attach", repo_root:$repo, pid:($pid|tonumber), port:(if $port == "" then null else ($port|tonumber) end)}'
+  return 0
+}
+
+cmd_supervisor_start() {
+  local repo_root="$1"
+  local pid port start_output start_exit
+  pid="$(supervisor_alive_pid "${repo_root}" || true)"
+  if [ -n "${pid}" ]; then
+    port="$(cat "${repo_root}/.beads/dolt-server.port" 2>/dev/null || true)"
+    jq -cn --arg repo "${repo_root}" --arg pid "${pid}" --arg port "${port}" \
+      '{ok:true, role:"start", action:"noop-already-running", repo_root:$repo, pid:($pid|tonumber), port:(if $port == "" then null else ($port|tonumber) end)}'
+    return 0
+  fi
+  if ! acquire_supervisor_lock "${repo_root}"; then
+    jq -cn --arg repo "${repo_root}" \
+      '{ok:false, error:{message:"another supervisor start is in progress; retry after it completes", kind:"supervisor-start-locked"}, repo_root:$repo}'
+    return 1
+  fi
+  trap 'release_supervisor_lock "'"${repo_root}"'"' EXIT
+  pid="$(supervisor_alive_pid "${repo_root}" || true)"
+  if [ -n "${pid}" ]; then
+    release_supervisor_lock "${repo_root}"
+    trap - EXIT
+    port="$(cat "${repo_root}/.beads/dolt-server.port" 2>/dev/null || true)"
+    jq -cn --arg repo "${repo_root}" --arg pid "${pid}" --arg port "${port}" \
+      '{ok:true, role:"start", action:"noop-race-loser", repo_root:$repo, pid:($pid|tonumber), port:(if $port == "" then null else ($port|tonumber) end)}'
+    return 0
+  fi
+  if start_output="$(bd dolt start 2>&1)"; then
+    start_exit=0
+  else
+    start_exit=$?
+  fi
+  release_supervisor_lock "${repo_root}"
+  trap - EXIT
+  if [ "${start_exit}" -ne 0 ]; then
+    jq -cn --arg repo "${repo_root}" --arg output "${start_output}" --argjson exit "${start_exit}" \
+      '{ok:false, error:{message:"bd dolt start failed", kind:"supervisor-start-failed", output:$output, exit_code:$exit}, repo_root:$repo}'
+    return 1
+  fi
+  pid="$(supervisor_alive_pid "${repo_root}" || true)"
+  port="$(cat "${repo_root}/.beads/dolt-server.port" 2>/dev/null || true)"
+  if [ -z "${pid}" ]; then
+    jq -cn --arg repo "${repo_root}" --arg output "${start_output}" \
+      '{ok:false, error:{message:"bd dolt start reported success but no live pid was recorded", kind:"supervisor-start-unverified", output:$output}, repo_root:$repo}'
+    return 1
+  fi
+  jq -cn --arg repo "${repo_root}" --arg pid "${pid}" --arg port "${port}" --arg output "${start_output}" \
+    '{ok:true, role:"start", action:"started", repo_root:$repo, pid:($pid|tonumber), port:(if $port == "" then null else ($port|tonumber) end), output:$output}'
+  return 0
+}
+
+cmd_supervisor_stop() {
+  local repo_root="$1"
+  local force_flag="${2:-false}"
+  local pid stop_output stop_exit
+  pid="$(supervisor_alive_pid "${repo_root}" || true)"
+  if [ -z "${pid}" ]; then
+    jq -cn --arg repo "${repo_root}" \
+      '{ok:true, role:"stop", action:"noop-already-stopped", repo_root:$repo}'
+    return 0
+  fi
+  if stop_output="$(bd dolt stop 2>&1)"; then
+    stop_exit=0
+  else
+    stop_exit=$?
+  fi
+  if [ "${stop_exit}" -ne 0 ] && [ "${force_flag}" = "true" ]; then
+    if kill "${pid}" 2>/dev/null; then
+      stop_exit=0
+      stop_output="${stop_output}"$'\n'"force-killed pid ${pid}"
+    fi
+  fi
+  if [ "${stop_exit}" -ne 0 ]; then
+    jq -cn --arg repo "${repo_root}" --arg output "${stop_output}" --argjson exit "${stop_exit}" --arg pid "${pid}" \
+      '{ok:false, error:{message:"bd dolt stop failed; pass --force to SIGTERM the pid directly", kind:"supervisor-stop-failed", output:$output, exit_code:$exit, pid:($pid|tonumber)}, repo_root:$repo}'
+    return 1
+  fi
+  jq -cn --arg repo "${repo_root}" --arg pid "${pid}" --arg output "${stop_output}" \
+    '{ok:true, role:"stop", action:"stopped", repo_root:$repo, pid:($pid|tonumber), output:$output}'
+  return 0
 }
 
 summary_next_action() {
@@ -7073,6 +7209,15 @@ case "${command}" in
     [ -n "${reason_arg}" ] || fail "compact-lane requires --reason"
     require_supervisor_alive "${repo_root}"
     cmd_compact_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${revision_arg}" "${reason_arg}" "${outcome_arg:-completed}" "${note_arg}" "${quarantine_arg}" "${force_arg}"
+    ;;
+  supervisor-attach)
+    cmd_supervisor_attach "${repo_root}"
+    ;;
+  supervisor-start)
+    cmd_supervisor_start "${repo_root}"
+    ;;
+  supervisor-stop)
+    cmd_supervisor_stop "${repo_root}" "${force_arg:-false}"
     ;;
   serve)
     cmd_serve "${repo_root}" "${socket_path}"
