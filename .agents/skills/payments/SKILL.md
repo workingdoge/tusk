@@ -25,6 +25,8 @@ Read:
 - `references/CHALLENGE-LOOP.md` for the normalized `402` loop
 - `references/FAMILIES-AND-ROUTING.md` for family boundaries, executor split,
   and owner routing
+- `references/WITNESS-ROUTING.md` for the outer-gate versus method-family
+  split, sibling method sketches, and the generic witness-realization seam
 
 ## Core doctrine
 Default order:
@@ -42,6 +44,8 @@ The semantic center is the challenge loop, not the funded runtime:
 - `402` is the outer gate
 - protocol family and method sit beneath it
 - the executor or witness boundary is the local realization seam
+- some methods are concrete family members, while the future carried witness
+  method lives upstream of `tusk`
 
 ## Workflow
 ### 1) Challenge classification
@@ -118,3 +122,5 @@ failed."
 - Read `references/CHALLENGE-LOOP.md` for the normalized `402` flow.
 - Read `references/FAMILIES-AND-ROUTING.md` for family boundaries and owner
   split.
+- Read `references/WITNESS-ROUTING.md` when the question is really about how a
+  paid gate, a concrete method family, and the witness seam fit together.

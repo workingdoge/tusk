@@ -61,10 +61,24 @@ Do not treat:
 - live chain submission and confirmation
 - operator secrets and wallet custody
 
+## Packaging consequence
+
+When packaging this skill for other agents, keep three things in the bundle:
+
+- the outer-gate loop from `CHALLENGE-LOOP.md`
+- the family and owner split from this file
+- the gate-versus-method-versus-witness distinction from
+  `WITNESS-ROUTING.md`
+
+That keeps the portable core useful without turning `tusk` into the semantic
+home for payment doctrine.
+
 ## When to route away
 
 - Route to `topology` when repo ownership or simplex shape is still unclear.
 - Route to `bridge` when the question is really about canonical witness or
   signing-session types.
+- Route to `references/WITNESS-ROUTING.md` first when the user is mixing up
+  outer gates, concrete methods, and the generic witness seam.
 - Keep live provider settlement diagnosis in the downstream proof repo until a
   stable shared boundary emerges.
