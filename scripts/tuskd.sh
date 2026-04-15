@@ -101,14 +101,22 @@ require_supervisor_alive() {
   local pid_file="${repo_root}/.beads/dolt-server.pid"
   local port_file="${repo_root}/.beads/dolt-server.port"
   local pid=""
+  local port=""
+  local owner=""
 
   if [ ! -f "${pid_file}" ] || [ ! -f "${port_file}" ]; then
     fail "supervisor required; run: tuskd supervisor-start (or 'tuskd doctor' for full report)"
   fi
 
   pid="$(cat "${pid_file}" 2>/dev/null || true)"
-  if [ -z "${pid}" ] || ! kill -0 "${pid}" 2>/dev/null; then
+  port="$(cat "${port_file}" 2>/dev/null || true)"
+  if [ -z "${pid}" ] || [ -z "${port}" ] || ! kill -0 "${pid}" 2>/dev/null; then
     fail "supervisor required; run: tuskd supervisor-start (or 'tuskd doctor' for full report)"
+  fi
+
+  owner="$(lsof -nP "-iTCP:${port}" -sTCP:LISTEN -t 2>/dev/null | head -n 1 || true)"
+  if [ "${owner}" != "${pid}" ]; then
+    fail "supervisor required; recorded pid ${pid} does not own port ${port} (pid reuse or orphan Dolt); run: tuskd supervisor-start"
   fi
 }
 
@@ -117,10 +125,16 @@ supervisor_alive_pid() {
   local pid_file="${repo_root}/.beads/dolt-server.pid"
   local port_file="${repo_root}/.beads/dolt-server.port"
   local pid=""
+  local port=""
+  local owner=""
 
   [ -f "${pid_file}" ] && [ -f "${port_file}" ] || return 1
   pid="$(cat "${pid_file}" 2>/dev/null || true)"
-  [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null || return 1
+  port="$(cat "${port_file}" 2>/dev/null || true)"
+  [ -n "${pid}" ] && [ -n "${port}" ] || return 1
+  kill -0 "${pid}" 2>/dev/null || return 1
+  owner="$(lsof -nP "-iTCP:${port}" -sTCP:LISTEN -t 2>/dev/null | head -n 1 || true)"
+  [ "${owner}" = "${pid}" ] || return 1
   printf '%s\n' "${pid}"
 }
 

@@ -352,28 +352,30 @@ fn local_backend_pid(repo_root: &Path) -> Option<i32> {
     read_trimmed(&local_backend_pid_path(repo_root)).and_then(|value| value.parse().ok())
 }
 
-fn supervisor_liveness(repo_root: &Path) -> Value {
-    let port = local_backend_port(repo_root);
-    let pid = local_backend_pid(repo_root);
-    let pid_live = pid.is_some_and(is_live_pid);
-    let alive = port.is_some() && pid.is_some() && pid_live;
-    json!({
-        "alive": alive,
-        "pid": pid,
-        "port": port,
-    })
+fn supervisor_verified(repo_root: &Path) -> bool {
+    match (local_backend_port(repo_root), local_backend_pid(repo_root)) {
+        (Some(port), Some(pid)) => is_live_pid(pid) && port_matches_pid(port, pid),
+        _ => false,
+    }
+}
+
+fn supervisor_admission_reason(repo_root: &Path) -> Option<&'static str> {
+    if supervisor_verified(repo_root) {
+        None
+    } else {
+        Some("supervisor-down: run tuskd supervisor-start")
+    }
 }
 
 fn annotate_degraded(repo_root: &Path, mut projection: Value) -> Value {
-    let supervisor = supervisor_liveness(repo_root);
-    if supervisor.get("alive").and_then(Value::as_bool) != Some(true)
+    if !supervisor_verified(repo_root)
         && let Some(obj) = projection.as_object_mut()
     {
         obj.insert(
             "degraded".to_string(),
             json!({
                 "reason": "supervisor-down",
-                "repair": "bd dolt start",
+                "repair": "tuskd supervisor-start",
             }),
         );
     }
@@ -4632,7 +4634,9 @@ fn build_launch_lane_carrier(
         json!({ "workspace_name": workspace_name, "workspace_path": workspace_path.to_string_lossy().into_owned() }),
     );
 
-    let admission_reason = if issue_id.is_empty() {
+    let admission_reason = if let Some(reason) = supervisor_admission_reason(repo_root) {
+        Some(reason)
+    } else if issue_id.is_empty() {
         Some("launch_lane requires issue_id")
     } else if base_rev.is_empty() {
         Some("launch_lane requires base_rev")
@@ -4746,7 +4750,9 @@ fn build_handoff_lane_carrier(
         json!({ "revision_lookup": revision_lookup_json }),
     );
 
-    let admission_reason = if issue_id.is_empty() {
+    let admission_reason = if let Some(reason) = supervisor_admission_reason(repo_root) {
+        Some(reason)
+    } else if issue_id.is_empty() {
         Some("handoff_lane requires issue_id")
     } else if revision.is_empty() {
         Some("handoff_lane requires revision")
@@ -4825,7 +4831,9 @@ fn build_finish_lane_carrier(
         json!({ "status": stored_status }),
     );
 
-    let admission_reason = if issue_id.is_empty() {
+    let admission_reason = if let Some(reason) = supervisor_admission_reason(repo_root) {
+        Some(reason)
+    } else if issue_id.is_empty() {
         Some("finish_lane requires issue_id")
     } else if outcome.is_empty() {
         Some("finish_lane requires outcome")
@@ -4914,7 +4922,9 @@ fn build_archive_lane_carrier(
         json!({ "workspace_path": workspace_path.to_string_lossy().into_owned() }),
     );
 
-    let admission_reason = if issue_id.is_empty() {
+    let admission_reason = if let Some(reason) = supervisor_admission_reason(repo_root) {
+        Some(reason)
+    } else if issue_id.is_empty() {
         Some("archive_lane requires issue_id")
     } else if !lane_exists {
         Some("archive_lane requires an existing lane record")
@@ -6334,8 +6344,12 @@ fn doctor_supervisor_invariant(repo_root: &Path) -> Value {
     let port = local_backend_port(repo_root);
     let pid = local_backend_pid(repo_root);
     let pid_live = pid.is_some_and(is_live_pid);
+    let port_owned = match (port, pid) {
+        (Some(port), Some(pid)) => port_matches_pid(port, pid),
+        _ => false,
+    };
 
-    if let (Some(port), Some(pid), true) = (port, pid, pid_live) {
+    if let (Some(port), Some(pid), true, true) = (port, pid, pid_live, port_owned) {
         return doctor_invariant(
             "supervisor",
             "ok",
@@ -6344,30 +6358,35 @@ fn doctor_supervisor_invariant(repo_root: &Path) -> Value {
         );
     }
 
-    let message = match (port, pid, pid_live) {
-        (Some(port), Some(pid), true) => {
-            format!("recorded supervisor pid {pid} is live on port {port}")
+    let message = match (port, pid, pid_live, port_owned) {
+        (Some(port), Some(pid), true, false) => {
+            format!(
+                "recorded supervisor pid {pid} is alive but port {port} is not bound to it (pid reuse or orphan Dolt)"
+            )
         }
-        (Some(port), Some(pid), false) => {
+        (Some(port), Some(pid), false, _) => {
             format!("recorded supervisor pid {pid} is not live on expected port {port}")
         }
-        (Some(port), None, _) => {
+        (Some(port), None, _, _) => {
             format!("no recorded supervisor pid is available for expected port {port}")
         }
-        (None, Some(pid), true) => {
+        (None, Some(pid), true, _) => {
             format!("recorded supervisor pid {pid} is live but no expected port is recorded")
         }
-        (None, Some(pid), false) => {
+        (None, Some(pid), false, _) => {
             format!("recorded supervisor pid {pid} is not live and no expected port is recorded")
         }
-        (None, None, _) => "no recorded supervisor pid or expected port is available".to_string(),
+        (None, None, _, _) => {
+            "no recorded supervisor pid or expected port is available".to_string()
+        }
+        _ => "supervisor invariant could not be verified".to_string(),
     };
 
     doctor_invariant(
         "supervisor",
         "fail",
         message,
-        Some("bd dolt start".to_string()),
+        Some("tuskd supervisor-start".to_string()),
     )
 }
 
@@ -6673,6 +6692,10 @@ fn run_lane_park(args: &[String]) -> ExitCode {
         Err(message) => return fail(&message),
     };
 
+    if let Some(reason) = supervisor_admission_reason(&parsed.repo_root) {
+        return fail(reason);
+    }
+
     match rewrite_lane_sentinel_state(&parsed.repo_root, &parsed.issue_id, "parked", "lane-park") {
         Ok(record) => match serde_json::to_string(&record) {
             Ok(text) => {
@@ -6694,6 +6717,10 @@ fn run_lane_abandon(args: &[String]) -> ExitCode {
         }
         Err(message) => return fail(&message),
     };
+
+    if let Some(reason) = supervisor_admission_reason(&parsed.repo_root) {
+        return fail(reason);
+    }
 
     match rewrite_lane_sentinel_state(
         &parsed.repo_root,
@@ -7710,25 +7737,56 @@ mod tests {
         );
         assert_eq!(
             degraded.get("repair").and_then(Value::as_str),
-            Some("bd dolt start")
+            Some("tuskd supervisor-start")
         );
 
         fs::remove_dir_all(repo_root).unwrap();
     }
 
     #[test]
-    fn annotate_degraded_leaves_projection_unchanged_when_pid_is_live() {
-        let repo_root = temp_repo_root("annotate-degraded-pid-live");
+    fn annotate_degraded_rejects_pid_that_does_not_own_recorded_port() {
+        let repo_root = temp_repo_root("annotate-degraded-pid-reuse");
         let beads_dir = repo_root.join(".beads");
         fs::create_dir_all(&beads_dir).unwrap();
         fs::write(beads_dir.join("dolt-server.pid"), current_pid().to_string()).unwrap();
-        fs::write(beads_dir.join("dolt-server.port"), "5432").unwrap();
+        fs::write(beads_dir.join("dolt-server.port"), "1").unwrap();
 
         let projection = json!({ "ok": true });
         let annotated = annotate_degraded(&repo_root, projection);
 
-        assert!(annotated.get("degraded").is_none());
+        let degraded = annotated
+            .get("degraded")
+            .expect("degraded field present when pid does not own port");
+        assert_eq!(
+            degraded.get("reason").and_then(Value::as_str),
+            Some("supervisor-down")
+        );
 
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires lsof visibility of test process's own TCP listener; fails in nix build sandbox. Run with `cargo test -- --ignored` locally."]
+    fn annotate_degraded_leaves_projection_unchanged_when_pid_owns_recorded_port() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let repo_root = temp_repo_root("annotate-degraded-pid-owns-port");
+        let beads_dir = repo_root.join(".beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        fs::write(beads_dir.join("dolt-server.pid"), current_pid().to_string()).unwrap();
+        fs::write(beads_dir.join("dolt-server.port"), port.to_string()).unwrap();
+
+        let projection = json!({ "ok": true });
+        let annotated = annotate_degraded(&repo_root, projection);
+
+        assert!(
+            annotated.get("degraded").is_none(),
+            "supervisor alive should not add degraded field: {annotated}",
+        );
+
+        drop(listener);
         fs::remove_dir_all(repo_root).unwrap();
     }
 
