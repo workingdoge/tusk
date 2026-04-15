@@ -9,9 +9,10 @@ description: >
   it for questions about what should remain pure CI, what should become
   effectful CD, how to place secrets/state, how to compare Hercules against
   generated forge workflows, how a local isolation probe should attach to the
-  control plane, or how to operationalize a flake without collapsing into
-  generic devops. Prefer local flake inspection and official-source docs
-  first.
+  control plane, when a structural probe is sufficient versus when a live
+  host or executor proof is still required, or how to decide when an
+  ops-shaped lane can cleanly close. Prefer local flake inspection and
+  official-source docs first.
 ---
 
 # Ops
@@ -24,6 +25,8 @@ deployments, caches, and the transport layer that carries them.
 
 Read:
 - `references/PIPELINE-SHAPE.md` for the bundle-shaped operational model
+- `references/PROOF-LEVELS.md` for the five-rung proof ladder and the
+  close-boundary rule
 - `references/LOCAL-ISOLATION.md` for lane-scoped local probes and later
   executor-family promotion
 - `references/PLATFORMS.md` for Hercules vs actions.nix vs adjacent tools
@@ -37,9 +40,12 @@ Default order:
 3. identify the admissible effects or local runtime attachments above that
    base,
 4. identify the secrets/state and authority boundary,
-5. distinguish lane-scoped proof from reusable executor-family promotion,
-6. only then compare operational platforms,
-7. propose the smallest useful slice.
+5. locate the work on the proof ladder (inspection → structural probe →
+   lane-scoped local proof → live host smoke → reusable executor-family
+   promotion) and name which rung is sufficient for this lane,
+6. distinguish lane-scoped proof from reusable executor-family promotion,
+7. only then compare operational platforms,
+8. propose the smallest useful slice.
 
 The skill exists because Nix-native operations are not one flat problem:
 - `git-hooks-nix` is local and check-oriented
@@ -133,6 +139,29 @@ Goal:
 Choose one bounded local proof path without widening into a general
 agent-runtime framework.
 
+### 5) Close-boundary decision
+Use when the user asks:
+- is this ops-shaped lane done?
+- is a structural probe enough, or do we still need a live host or executor
+  proof?
+- can we close the tracker issue now, or is this only a handoff?
+
+Default moves:
+1. read `references/PROOF-LEVELS.md`
+2. name the highest rung the lane actually reached, not the rung it aspires
+   to
+3. match that rung against the lane's declared landing boundary
+4. distinguish skill/spec/doc-shaped lanes (where structural completion is
+   usually sufficient) from executor/runtime/effect-shaped lanes (where a
+   live host smoke or repeated lane-scoped proof is required)
+5. if promotion to a reusable executor family is in question, treat it as a
+   separate issue, never as an implicit close
+
+Goal:
+Close on the declared landing boundary, and make any remaining live-proof
+debt explicit as a follow-up issue rather than hiding it behind a structural
+pass.
+
 ## Local-first rules
 - Prefer local flake inspection before platform comparison.
 - Prefer the smallest check or effect boundary over whole-system reasoning.
@@ -149,9 +178,19 @@ agent-runtime framework.
   explicit contract fields, not ambient shell inheritance.
 - Keep Hermes/bootstrap commands, credentials, and product policy downstream of
   the `tusk` attachment boundary.
+- Name the rung of the proof ladder the lane actually reached, and treat
+  structural completion as insufficient evidence for runtime or effect
+  changes.
+- Do not close an ops-shaped lane on a structural probe when the declared
+  landing boundary requires a live host smoke; file the missing proof as a
+  follow-up issue instead of widening the lane.
+- Treat promotion into a reusable executor family as a separate issue, not a
+  silent side effect of closing the current lane.
 
 ## References
 - Read `references/PIPELINE-SHAPE.md` for the operational model.
+- Read `references/PROOF-LEVELS.md` for the five-rung proof ladder and
+  close-boundary rule.
 - Read `references/LOCAL-ISOLATION.md` for local isolation attachment.
 - Read `references/PLATFORMS.md` for official-source platform positioning.
 - Read `references/TOOLING.md` for concrete command order.

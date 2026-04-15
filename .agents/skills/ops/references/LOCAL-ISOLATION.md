@@ -17,6 +17,11 @@ Rule:
 - prefer the lane-scoped local probe before promoting anything into an
   executor family
 
+Both sites live on the proof ladder in `references/PROOF-LEVELS.md`. Use
+that ladder to decide whether the current slice has reached a live host
+smoke yet, and whether promotion into an executor family is in scope for
+this lane or belongs in a separate issue.
+
 ## What belongs in `tusk`
 
 - the normalized runtime request shape
