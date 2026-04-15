@@ -73,6 +73,19 @@ Credentials that authorize mutation or publication decrypt only at effect-runtim
 
 Bridge materialization (`SECRET-0002 MaterializationSession`) remains the long-term target. That runtime does not yet exist. Retrofit into bridge is a later lane and MUST preserve the trust boundaries defined in this note.
 
+The concrete operator split on this line is now backed by downstream proof in
+`fish/sites/workingdoge/cloud/iam/`:
+
+- `README.md` for the local principal and authority-class map
+- `cloudflare-human-bootstrap.md` for named-human dashboard and Zero Trust
+  bootstrap admission
+- `cloudflare-service-automation.md` for Access service-token execution
+  admission
+- `cloudflare-account-role-model.md` for the Cloudflare dashboard role model
+
+This note consumes that proof as repo-local operator doctrine. It does not
+replace it as the source of tenant-local IAM detail.
+
 ### 2.6 Credentials by authority class
 
 v0 distinguishes four authority classes. Confusing them creates the kind of delegated slop this note exists to prevent. Classify by authority, not by vendor.
@@ -92,17 +105,39 @@ v0 distinguishes four authority classes. Confusing them creates the kind of dele
 
 **Mutation credentials** (authorize state-changing provider calls):
 
-- Cloudflare API tokens with write scope for admitted infra changes.
-- Latitude API tokens with write scope for host and network provisioning.
+- Cloudflare account-plane API tokens with write scope for admitted infra
+  changes.
+- Latitude write-capable API keys for host and network provisioning.
 - R2 write-scoped tokens used during effect-runtime.
 
 **Observational credentials** (read-only; may appear above the admit line):
 
-- Read-only Cloudflare tokens for `tofu plan` refresh and state reads.
-- Read-only Latitude tokens for planning and host inspection.
+- Read-only Cloudflare account-plane tokens for `tofu plan` refresh and state
+  reads.
+- Read-only Latitude API keys for planning and host inspection.
 - Read-only R2 tokens for remote-state reads during observational planning.
 
 Trust roots require stricter custody, backup, and rotation policy than operational credentials. Publish credentials MUST NOT be confused with mutation credentials. Observational credentials are the only class that MAY appear during observational planning; all others enter only below the admit line (section 2.10). Signing authority is only exercised below the publish line.
+
+Cloudflare's surfaces are intentionally split three ways on this line:
+
+- named-human dashboard roles govern interactive account and Zero Trust
+  administration
+- account-plane API tokens govern account automation
+- Access service tokens govern app-bound non-human execution
+
+Those are different authority surfaces. They MUST NOT be treated as one
+informal "Cloudflare admin" credential class.
+
+Latitude is narrower. WorkingDoge currently has an honest key-mode split:
+
+- one read-only key for observational commands
+- one write-capable key for mutation commands
+
+But both still occupy the same provider auth slot and both still belong to a
+named user and team membership rather than to a distinct service identity.
+That asymmetry is acceptable for bootstrap only and MUST remain explicit in
+operator doctrine.
 
 ### 2.7 IaC
 
@@ -148,6 +183,16 @@ The **admit line** sits between observational planning and admitted mutation. Th
 
 Read-only observational credentials (section 2.6) MAY be used during observational planning when remote provider state must be read. Credentials that authorize mutation or publication MUST enter only below the admit line. Signing authority is only exercised below the publish line.
 
+In WorkingDoge terms:
+
+- named-human dashboard membership does not itself cross the admit line into
+  automation
+- read-only Cloudflare and Latitude credentials may appear above the admit
+  line for plan and inspection
+- write-capable Cloudflare and Latitude credentials stay below the admit line
+- Access service tokens do not cross into account-plane authority; they admit
+  execution only at the protected application boundary named by local policy
+
 ### 2.11 Code topology
 
 Operational code lives in `fish/sites/workingdoge/cloud/`.
@@ -157,6 +202,8 @@ Expected sub-topology:
 - `cloud/tofu/` for infrastructure resources.
 - `cloud/host/` for host NixOS surfaces.
 - `cloud/README.md` for the operator entrypoint.
+- `cloud/iam/` for the tenant-local Cloudflare and Latitude admission proof
+  consumed by this note.
 
 Consumer-side configuration remains in home (`system/darwin/arj.nix`, `system/modules/determinate-nix-custom-conf.nix`; wired by `home-6xd`). Tusk remains the place for doctrine, specs, and skills. Bridge (`fish/sites/bridge`) remains the place for future secret and cache domain contracts.
 
@@ -184,13 +231,20 @@ Organized by authority class (section 2.6):
 
 **Mutation credentials:**
 
-- Cloudflare API token (write scope) for admitted infra changes.
-- Latitude API token (write scope) for host and network provisioning.
+- Cloudflare account-plane API token (write scope) for admitted infra changes.
+- Latitude write-capable API key for host and network provisioning.
 
 **Observational credentials (optional in v0):**
 
 - Read-only Cloudflare token for `tofu plan` refresh.
-- Read-only Latitude token for host inspection.
+- Read-only Latitude key for host inspection.
+
+Separately, but not as account-plane automation roots:
+
+- named-human Cloudflare dashboard roles for bootstrap, break-glass, billing,
+  DNS, and Zero Trust administration
+- Cloudflare Access service-token pairs for later app-bound non-human
+  execution
 
 ### 3.2 Birthplace and first residence
 
@@ -204,12 +258,22 @@ Each root MUST declare:
 
 ### 3.3 v0 residence rules
 
-- Cloudflare and Latitude operator tokens (mutation class) may begin life on the operator laptop under local encrypted custody until the host exists. They migrate to host-held sops custody once the primary is authoritative (section 3.4).
+- Cloudflare account-plane mutation tokens and the Latitude write-capable key
+  may begin life on the operator laptop under local encrypted custody until
+  the host exists. They migrate to host-held sops custody once the primary is
+  authoritative (section 3.4).
 - Host age identity is generated on the host after first successful bootstrap, then exported to an encrypted recovery package that leaves the host.
 - Radicle seed identity is generated in the host trust domain and backed up offline in encrypted form.
 - Cache signing key is generated in the host trust domain, or injected once into a narrow publish compartment, then backed up offline in encrypted form.
 - Break-glass recovery material MUST exist off-host before the primary becomes authoritative.
-- Observational credentials, if used, SHOULD be separate tokens from mutation credentials, not a down-scoped copy of the same token.
+- Observational credentials, if used, SHOULD be separate tokens or keys from
+  mutation credentials, not a down-scoped copy of the same token.
+- Named-human Cloudflare dashboard standing stays a human admission surface,
+  not a durable automation substrate. Super-admin standing is reserved for
+  bootstrap, break-glass, member management, and account-owned token creation.
+- Access service-token pairs belong to app-bound automation only. They do not
+  mint account tokens, stand in for dashboard members, or replace
+  `CLOUDFLARE_API_TOKEN`.
 
 ### 3.4 Authority handoff to the primary
 
