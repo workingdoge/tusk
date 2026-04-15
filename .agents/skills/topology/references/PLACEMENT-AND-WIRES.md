@@ -123,13 +123,17 @@ Owns:
 
 For paid HTTP, use this split:
 
+- shared operator-facing `402` challenge loop and the `payments` skill: `tusk`
 - protocol boundary and shared paid-request kernel: `tusk`
 - source-facing paid connector and ingest behavior: `aac`
 - funded settlement executors, provider policy, and operator runtime: `home`
+- canonical witness/session domain types when the question is really about
+  those contracts: `bridge`
+- future carried witness-realization method once the seam stabilizes: `kurma`
 
 Sequence it as:
 
-1. `tusk` shared seam
+1. `tusk` shared seam and operator routing
 2. one real proof consumer
 3. second consumer integration
 

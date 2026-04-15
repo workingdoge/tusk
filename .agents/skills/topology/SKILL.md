@@ -66,6 +66,27 @@ CLI pinning, repo-owned wrappers, or coordinator/runtime repair. Those are
 `tusk` work unless the fix is purely a downstream repo's private wrapper or
 local policy.
 
+When the question is specifically about a paid-access challenge loop rather
+than one provider's funded runtime, route to the shared `payments` skill when
+it is available. Strong trigger terms include:
+
+- HTTP `402`
+- paid HTTP
+- `PaymentAuth`
+- `x402`
+- `tempo`
+- `Payment-Receipt`
+- `PAYMENT-REQUIRED`
+
+That route is specifically about the operator-facing challenge loop. Keep the
+owner split explicit:
+
+- `tusk` owns shared usage and workflow guidance around the challenge loop
+- `bridge` owns domain witness/session types when the question is really about
+  those canonical contracts
+- `kurma` owns the future carried witness-realization method
+- downstream repos own live funded proof and provider-local runtime truth
+
 When the question is specifically about bridge admission or secret
 materialization, route to the canonical `bridge` skill when it is available.
 Strong trigger terms include:
@@ -110,6 +131,8 @@ When you use this skill, produce these six things:
 - Do not let `tusk` absorb meaning or carriage.
 - Do not leave canonical bridge-domain changes in `tusk` once `bridge` owns
   that stack.
+- Do not let the shared `payments` route become a second semantic home for
+  payment doctrine, witness law, or funded runtime policy.
 - Do not misroute tracker CLI/schema drift into `fish` or `kurma` just because
   it blocks doctrinal or carried work downstream.
 - Do not let downstream product work masquerade as shared infra.
