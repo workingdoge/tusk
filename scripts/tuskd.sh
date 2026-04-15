@@ -90,6 +90,22 @@ fail() {
   exit 1
 }
 
+require_supervisor_alive() {
+  local repo_root="$1"
+  local pid_file="${repo_root}/.beads/dolt-server.pid"
+  local port_file="${repo_root}/.beads/dolt-server.port"
+  local pid=""
+
+  if [ ! -f "${pid_file}" ] || [ ! -f "${port_file}" ]; then
+    fail "supervisor required; run: bd dolt start (or 'tuskd doctor' for full report)"
+  fi
+
+  pid="$(cat "${pid_file}" 2>/dev/null || true)"
+  if [ -z "${pid}" ] || ! kill -0 "${pid}" 2>/dev/null; then
+    fail "supervisor required; run: bd dolt start (or 'tuskd doctor' for full report)"
+  fi
+}
+
 summary_next_action() {
   local command_name="$1"
   local message="$2"
@@ -7006,46 +7022,56 @@ case "${command}" in
   launch-lane)
     [ -n "${issue_id_arg}" ] || fail "launch-lane requires --issue-id"
     [ -n "${base_rev_arg}" ] || fail "launch-lane requires --base-rev"
+    require_supervisor_alive "${repo_root}"
     cmd_launch_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${base_rev_arg}" "${slug_arg}"
     ;;
   dispatch-lane)
     [ -n "${issue_id_arg}" ] || fail "dispatch-lane requires --issue-id"
+    require_supervisor_alive "${repo_root}"
     cmd_dispatch_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${worker_arg:-codex}" "${mode_arg:-handoff}" "${note_arg}" "${plan_arg:-false}"
     ;;
   autonomous-lane)
     [ -n "${issue_id_arg}" ] || fail "autonomous-lane requires --issue-id"
+    require_supervisor_alive "${repo_root}"
     cmd_autonomous_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${base_rev_arg:-main}" "${slug_arg}" "${worker_arg:-codex}" "${note_arg}" "${quarantine_arg}" "${plan_arg:-false}"
     ;;
   handoff-lane)
     [ -n "${issue_id_arg}" ] || fail "handoff-lane requires --issue-id"
     [ -n "${revision_arg}" ] || fail "handoff-lane requires --revision"
+    require_supervisor_alive "${repo_root}"
     cmd_handoff_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${revision_arg}" "${note_arg}"
     ;;
   finish-lane)
     [ -n "${issue_id_arg}" ] || fail "finish-lane requires --issue-id"
     [ -n "${outcome_arg}" ] || fail "finish-lane requires --outcome"
+    require_supervisor_alive "${repo_root}"
     cmd_finish_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${outcome_arg}" "${note_arg}"
     ;;
   lane-park)
     [ -n "${issue_id_arg}" ] || fail "lane-park requires --issue-id"
+    require_supervisor_alive "${repo_root}"
     cmd_lane_park "${repo_root}" "${issue_id_arg}"
     ;;
   lane-abandon)
     [ -n "${issue_id_arg}" ] || fail "lane-abandon requires --issue-id"
+    require_supervisor_alive "${repo_root}"
     cmd_lane_abandon "${repo_root}" "${issue_id_arg}"
     ;;
   archive-lane)
     [ -n "${issue_id_arg}" ] || fail "archive-lane requires --issue-id"
+    require_supervisor_alive "${repo_root}"
     cmd_archive_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${note_arg}"
     ;;
   complete-lane)
     [ -n "${issue_id_arg}" ] || fail "complete-lane requires --issue-id"
     [ -n "${reason_arg}" ] || fail "complete-lane requires --reason"
+    require_supervisor_alive "${repo_root}"
     cmd_complete_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${revision_arg}" "${reason_arg}" "${outcome_arg:-completed}" "${note_arg}" "${quarantine_arg}" "${plan_arg:-false}"
     ;;
   compact-lane)
     [ -n "${issue_id_arg}" ] || fail "compact-lane requires --issue-id"
     [ -n "${reason_arg}" ] || fail "compact-lane requires --reason"
+    require_supervisor_alive "${repo_root}"
     cmd_compact_lane "${repo_root}" "${socket_path}" "${issue_id_arg}" "${revision_arg}" "${reason_arg}" "${outcome_arg:-completed}" "${note_arg}" "${quarantine_arg}" "${force_arg}"
     ;;
   serve)
